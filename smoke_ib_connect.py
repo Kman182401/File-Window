@@ -3,11 +3,20 @@ import os, sys
 
 HOST = os.getenv("IBKR_HOST","127.0.0.1")
 PORT = int(os.getenv("IBKR_PORT","4002"))
-CID  = int(os.getenv("IBKR_CLIENT_ID","9002"))
+primary = int(os.getenv("IBKR_CLIENT_ID","9003"))
+fallback = int(os.getenv("IBKR_SMOKE_FALLBACK_CLIENT_ID","9004"))
 
 try:
     ib = IB()
-    ib.connect(HOST, PORT, clientId=CID, timeout=30)
+    try:
+        ib.connect(HOST, PORT, clientId=primary, timeout=30)
+    except Exception:
+        try:
+            ib.disconnect()
+        except Exception:
+            pass
+        ib = IB()
+        ib.connect(HOST, PORT, clientId=fallback, timeout=30)
     now = ib.reqCurrentTime()
     es = Contract(symbol='ES', secType='FUT', exchange='CME', currency='USD')
     cds = ib.reqContractDetails(es)

@@ -34,7 +34,7 @@ fi
 echo "[2/5] IB Gateway smoke check…"
 ok=0
 for i in {1..6}; do
-  IBKR_CLIENT_ID="${IBKR_SMOKE_CLIENT_ID:-9001}" python3 ~/smoke_ib_connect.py >/dev/null 2>>"$LOG_DIR/ib_smoke.err" && { ok=1; break; }
+  IBKR_CLIENT_ID="${IBKR_SMOKE_CLIENT_ID:-9003}" python3 ~/smoke_ib_connect.py >/dev/null 2>>"$LOG_DIR/ib_smoke.err" && { ok=1; break; }
   sleep 5
 done
 if [ "$ok" -ne 1 ]; then
