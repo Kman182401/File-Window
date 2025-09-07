@@ -379,7 +379,90 @@ class LightweightNeuralNetwork:
         batch_size = y_true.shape[0]
         
         # Calculate base loss (MSE for regression)
-        base_loss = np.mean((y_pred - y_true) ** 2)\n        \n        # Add regularization losses\n        l1_loss = 0\n        l2_loss = 0\n        if self.l1_reg > 0 or self.l2_reg > 0:\n            for w in self.weights:\n                if self.l1_reg > 0:\n                    l1_loss += self.l1_reg * np.sum(np.abs(w))\n                if self.l2_reg > 0:\n                    l2_loss += self.l2_reg * np.sum(w ** 2)\n        \n        total_loss = base_loss + l1_loss + l2_loss\n        self.loss_history.append(total_loss)\n        \n        # Gradient of loss with respect to output\n        grad_output = 2 * (y_pred - y_true) / batch_size\n        \n        # Backpropagate through layers\n        grad_weights = []\n        grad_biases = []\n        \n        # Start from the last layer\n        current_grad = grad_output\n        \n        for i in range(len(self.weights) - 1, 0, -1):\n            # Gradient for weights and biases\n            prev_activation = self.cache['activations'][i-1] if i > 0 else self.cache['X']\n            \n            # Apply dropout mask during backprop\n            if 'dropout_masks' in self.cache and len(self.cache['dropout_masks']) > i-1:\n                prev_activation = prev_activation * self.cache['dropout_masks'][i-1]\n            \n            grad_w = np.dot(prev_activation.T, current_grad)\n            grad_b = np.sum(current_grad, axis=0, keepdims=True)\n            \n            # Add regularization gradients\n            if self.l1_reg > 0:\n                grad_w += self.l1_reg * np.sign(self.weights[i])\n            if self.l2_reg > 0:\n                grad_w += self.l2_reg * 2 * self.weights[i]\n            \n            grad_weights.insert(0, grad_w)\n            grad_biases.insert(0, grad_b)\n            \n            # Propagate gradient backward\n            current_grad = np.dot(current_grad, self.weights[i].T)\n            \n            # Batch normalization backward pass\n            if self.use_batch_norm and i-1 < len(self.batch_norm_layers):\n                current_grad = self.batch_norm_layers[i-1].backward(current_grad)\n            \n            # Activation function derivative\n            current_grad *= self.apply_activation_derivative(self.cache['pre_activations'][i-1], self.activation)\n        \n        # First layer\n        grad_w = np.dot(self.cache['X'].T, current_grad)\n        grad_b = np.sum(current_grad, axis=0, keepdims=True)\n        \n        # Add regularization\n        if self.l1_reg > 0:\n            grad_w += self.l1_reg * np.sign(self.weights[0])\n        if self.l2_reg > 0:\n            grad_w += self.l2_reg * 2 * self.weights[0]\n        \n        grad_weights.insert(0, grad_w)\n        grad_biases.insert(0, grad_b)\n        \n        # Calculate gradient norm for monitoring\n        grad_norm = sum(np.linalg.norm(gw) for gw in grad_weights)\n        self.gradient_norms.append(grad_norm)\n        \n        # Update weights using optimizer or basic SGD\n        if self.optimizer:\n            self.optimizer.update(self.weights, self.biases, grad_weights, grad_biases)\n        else:\n            # Basic SGD update\n            for i in range(len(self.weights)):\n                self.weights[i] -= self.learning_rate * grad_weights[i]\n                self.biases[i] -= self.learning_rate * grad_biases[i]\n        \n        self.iteration += 1\n        \n        return total_loss"}
+        base_loss = np.mean((y_pred - y_true) ** 2)
+        
+        # Add regularization losses
+        l1_loss = 0
+        l2_loss = 0
+        if self.l1_reg > 0 or self.l2_reg > 0:
+            for w in self.weights:
+                if self.l1_reg > 0:
+                    l1_loss += self.l1_reg * np.sum(np.abs(w))
+                if self.l2_reg > 0:
+                    l2_loss += self.l2_reg * np.sum(w ** 2)
+        
+        total_loss = base_loss + l1_loss + l2_loss
+        self.loss_history.append(total_loss)
+        
+        # Gradient of loss with respect to output
+        grad_output = 2 * (y_pred - y_true) / batch_size
+        
+        # Backpropagate through layers
+        grad_weights = []
+        grad_biases = []
+        
+        # Start from the last layer
+        current_grad = grad_output
+        
+        for i in range(len(self.weights) - 1, 0, -1):
+            # Gradient for weights and biases
+            prev_activation = self.cache['activations'][i-1] if i > 0 else self.cache['X']
+            
+            # Apply dropout mask during backprop
+            if 'dropout_masks' in self.cache and len(self.cache['dropout_masks']) > i-1:
+                prev_activation = prev_activation * self.cache['dropout_masks'][i-1]
+            
+            grad_w = np.dot(prev_activation.T, current_grad)
+            grad_b = np.sum(current_grad, axis=0, keepdims=True)
+            
+            # Add regularization gradients
+            if self.l1_reg > 0:
+                grad_w += self.l1_reg * np.sign(self.weights[i])
+            if self.l2_reg > 0:
+                grad_w += self.l2_reg * 2 * self.weights[i]
+            
+            grad_weights.insert(0, grad_w)
+            grad_biases.insert(0, grad_b)
+            
+            # Propagate gradient backward
+            current_grad = np.dot(current_grad, self.weights[i].T)
+            
+            # Batch normalization backward pass
+            if self.use_batch_norm and i-1 < len(self.batch_norm_layers):
+                current_grad = self.batch_norm_layers[i-1].backward(current_grad)
+            
+            # Activation function derivative
+            current_grad *= self.apply_activation_derivative(self.cache['pre_activations'][i-1], self.activation)
+        
+        # First layer
+        grad_w = np.dot(self.cache['X'].T, current_grad)
+        grad_b = np.sum(current_grad, axis=0, keepdims=True)
+        
+        # Add regularization
+        if self.l1_reg > 0:
+            grad_w += self.l1_reg * np.sign(self.weights[0])
+        if self.l2_reg > 0:
+            grad_w += self.l2_reg * 2 * self.weights[0]
+        
+        grad_weights.insert(0, grad_w)
+        grad_biases.insert(0, grad_b)
+        
+        # Calculate gradient norm for monitoring
+        grad_norm = sum(np.linalg.norm(gw) for gw in grad_weights)
+        self.gradient_norms.append(grad_norm)
+        
+        # Update weights using optimizer or basic SGD
+        if self.optimizer:
+            self.optimizer.update(self.weights, self.biases, grad_weights, grad_biases)
+        else:
+            # Basic SGD update
+            for i in range(len(self.weights)):
+                self.weights[i] -= self.learning_rate * grad_weights[i]
+                self.biases[i] -= self.learning_rate * grad_biases[i]
+        
+        self.iteration += 1
+        
+        return total_loss
     
     def extract_features(self, X: np.ndarray) -> np.ndarray:
         """
@@ -438,7 +521,89 @@ class LightweightNeuralNetwork:
             y_val = y[start_idx:end_idx]
             
             # Training set (everything else)
-            X_train = np.vstack([X[:start_idx], X[end_idx:]])\n            y_train = np.vstack([y[:start_idx], y[end_idx:]])\n            \n            # Create fresh network for this fold\n            fold_network = LightweightNeuralNetwork(\n                input_size=self.input_size,\n                hidden_sizes=self.hidden_sizes,\n                output_size=self.output_size,\n                learning_rate=self.initial_lr,\n                activation=self.activation,\n                use_batch_norm=self.use_batch_norm,\n                dropout_rate=self.dropout_rate,\n                optimizer=self.optimizer_type,\n                l1_reg=self.l1_reg,\n                l2_reg=self.l2_reg\n            )\n            \n            # Train on fold\n            for epoch in range(epochs):\n                # Mini-batch training\n                indices = np.random.permutation(X_train.shape[0])\n                for i in range(0, X_train.shape[0], batch_size):\n                    batch_indices = indices[i:i+batch_size]\n                    batch_X = X_train[batch_indices]\n                    batch_y = y_train[batch_indices]\n                    \n                    # Normalize\n                    if self.scaler_mean is not None:\n                        batch_X = (batch_X - self.scaler_mean) / self.scaler_std\n                    \n                    # Forward and backward pass\n                    y_pred = fold_network.forward(batch_X, training=True)\n                    fold_network.backward(batch_y, y_pred)\n            \n            # Evaluate on validation set\n            if self.scaler_mean is not None:\n                X_val_norm = (X_val - self.scaler_mean) / self.scaler_std\n            else:\n                X_val_norm = X_val\n                \n            val_pred = fold_network.forward(X_val_norm, training=False)\n            val_loss = np.mean((val_pred - y_val) ** 2)\n            cv_scores.append(val_loss)\n        \n        return {\n            'cv_scores': cv_scores,\n            'mean_cv_score': np.mean(cv_scores),\n            'std_cv_score': np.std(cv_scores),\n            'best_fold': np.argmin(cv_scores),\n            'worst_fold': np.argmax(cv_scores)\n        }\n    \n    def early_stopping_monitor(self, val_loss: float, patience: int = 10, \n                              min_delta: float = 1e-4) -> bool:\n        \"\"\"Enhanced early stopping with validation loss monitoring.\"\"\"\n        if not hasattr(self, '_early_stop_counter'):\n            self._early_stop_counter = 0\n            self._best_val_loss = float('inf')\n        \n        if val_loss < self._best_val_loss - min_delta:\n            self._best_val_loss = val_loss\n            self._early_stop_counter = 0\n            return False\n        else:\n            self._early_stop_counter += 1\n            return self._early_stop_counter >= patience\n    \n    def get_gradient_stats(self) -> Dict:\n        \"\"\"Enhanced gradient statistics for monitoring.\"\"\"\n        if not self.gradient_norms:\n            return {}\n        \n        recent_grads = self.gradient_norms[-20:] if len(self.gradient_norms) >= 20 else self.gradient_norms\n        \n        return {\n            'current_grad_norm': self.gradient_norms[-1] if self.gradient_norms else 0,\n            'avg_grad_norm': np.mean(recent_grads),\n            'gradient_variance': np.var(recent_grads),\n            'gradient_trend': np.polyfit(range(len(recent_grads)), recent_grads, 1)[0] if len(recent_grads) > 1 else 0,\n            'should_early_stop': self._should_early_stop(),\n            'exploding_gradients': self.gradient_norms[-1] > 100 if self.gradient_norms else False,\n            'vanishing_gradients': self.gradient_norms[-1] < 1e-6 if self.gradient_norms else False\n        }"}
+            X_train = np.vstack([X[:start_idx], X[end_idx:]])
+            y_train = np.vstack([y[:start_idx], y[end_idx:]])
+            
+            # Create fresh network for this fold
+            fold_network = LightweightNeuralNetwork(
+                input_size=self.input_size,
+                hidden_sizes=self.hidden_sizes,
+                output_size=self.output_size,
+                learning_rate=self.initial_lr,
+                activation=self.activation,
+                use_batch_norm=self.use_batch_norm,
+                dropout_rate=self.dropout_rate,
+                optimizer=self.optimizer_type,
+                l1_reg=self.l1_reg,
+                l2_reg=self.l2_reg
+            )
+            
+            # Train on fold
+            for epoch in range(epochs):
+                # Mini-batch training
+                indices = np.random.permutation(X_train.shape[0])
+                for i in range(0, X_train.shape[0], batch_size):
+                    batch_indices = indices[i:i+batch_size]
+                    batch_X = X_train[batch_indices]
+                    batch_y = y_train[batch_indices]
+                    
+                    # Normalize
+                    if self.scaler_mean is not None:
+                        batch_X = (batch_X - self.scaler_mean) / self.scaler_std
+                    
+                    # Forward and backward pass
+                    y_pred = fold_network.forward(batch_X, training=True)
+                    fold_network.backward(batch_y, y_pred)
+            
+            # Evaluate on validation set
+            if self.scaler_mean is not None:
+                X_val_norm = (X_val - self.scaler_mean) / self.scaler_std
+            else:
+                X_val_norm = X_val
+                
+            val_pred = fold_network.forward(X_val_norm, training=False)
+            val_loss = np.mean((val_pred - y_val) ** 2)
+            cv_scores.append(val_loss)
+        
+        return {
+            'cv_scores': cv_scores,
+            'mean_cv_score': np.mean(cv_scores),
+            'std_cv_score': np.std(cv_scores),
+            'best_fold': np.argmin(cv_scores),
+            'worst_fold': np.argmax(cv_scores)
+        }
+    
+    def early_stopping_monitor(self, val_loss: float, patience: int = 10, 
+                              min_delta: float = 1e-4) -> bool:
+        """Enhanced early stopping with validation loss monitoring."""
+        if not hasattr(self, '_early_stop_counter'):
+            self._early_stop_counter = 0
+            self._best_val_loss = float('inf')
+        
+        if val_loss < self._best_val_loss - min_delta:
+            self._best_val_loss = val_loss
+            self._early_stop_counter = 0
+            return False
+        else:
+            self._early_stop_counter += 1
+            return self._early_stop_counter >= patience
+    
+    def get_gradient_stats(self) -> Dict:
+        """Enhanced gradient statistics for monitoring."""
+        if not self.gradient_norms:
+            return {}
+        
+        recent_grads = self.gradient_norms[-20:] if len(self.gradient_norms) >= 20 else self.gradient_norms
+        
+        return {
+            'current_grad_norm': self.gradient_norms[-1] if self.gradient_norms else 0,
+            'avg_grad_norm': np.mean(recent_grads),
+            'gradient_variance': np.var(recent_grads),
+            'gradient_trend': np.polyfit(range(len(recent_grads)), recent_grads, 1)[0] if len(recent_grads) > 1 else 0,
+            'should_early_stop': self._should_early_stop(),
+            'exploding_gradients': self.gradient_norms[-1] > 100 if self.gradient_norms else False,
+            'vanishing_gradients': self.gradient_norms[-1] < 1e-6 if self.gradient_norms else False
+        }
     
     def _should_early_stop(self, threshold: float = 1e-6, patience: int = 10) -> bool:
         """

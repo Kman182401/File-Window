@@ -293,6 +293,11 @@ class IBKRIngestor:
                 useRTH=useRTH,
                 formatDate=formatDate,
             )
+            
+            # ADDED: Delay to avoid IB rate limits
+            import time
+            time.sleep(0.35)  # 350ms delay between requests
+            
             df = util.df(bars)
             if df is None or df.empty:
                 raise RuntimeError(f"No data returned for {ticker} (contract: {contract}).")
