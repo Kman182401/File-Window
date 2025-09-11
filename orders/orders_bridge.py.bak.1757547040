@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+import os, json, time, sys
+from datetime import datetime
+
+# Add parent directory to path to import paper_trading_executor
+sys.path.insert(0, os.path.expanduser('~'))
+
+try:
+    from ib_insync import IB
+except Exception as e:
+    print("[orders_bridge] ib_insync not available:", e, file=sys.stderr)
+    IB=None
+
+try:
+    from paper_trading_executor import PaperTradingExecutor
+except Exception as e:
+    print("[orders_bridge] cannot import PaperTradingExecutor:", e, file=sys.stderr)
+    PaperTradingExecutor=None
+
+IB_HOST=os.getenv("IBKR_HOST","127.0.0.1")
+IB_PORT=int(os.getenv("IBKR_PORT","4002"))
+IB_CID=int(os.getenv("IBKR_ORDERS_CLIENT_ID","9007"))
+DRY_RUN=int(os.getenv("DRY_RUN","1"))
+ALLOW_ORDERS=int(os.getenv("ALLOW_ORDERS","0"))
+AUDIT=os.path.expanduser("~/trade_audit_log.jsonl")
+
+def parse_decision(rec):
+    sym = rec.get("symbol") or rec.get("ticker") or rec.get("instrument")
+    side = rec.get("side") or rec.get("action") or rec.get("direction")
+    qty = rec.get("qty") or rec.get("size") or 1
+    conf = rec.get("confidence") or rec.get("score")
+    reason = rec.get("reason") or rec.get("strategy") or rec.get("source","decision")
+    if not sym or not side: return None
+    side = str(side).upper()
+    if side not in ("BUY","SELL"): return None
+    try: qty = int(qty)
+    except: qty = 1
+    return {"symbol":sym, "side":side, "qty":qty, "confidence":conf, "reason":reason}
+
+def log_trade(payload):
+    import subprocess, json as _j
+    subprocess.run(["python3", os.path.expanduser("~/monitoring/client/log_trade_event.py")],
+                   input=_j.dumps(payload).encode(), check=False)
+
+def submit_order(dec):
+    ts = datetime.utcnow().isoformat()
+    status = "dry_run" if DRY_RUN or PaperTradingExecutor is None or not ALLOW_ORDERS else "submitted"
+    order_id = None
+    entry_price=None; exit_price=None; pnl=None; dur=None
+    
+    if status == "submitted":
+        try:
+            ex = PaperTradingExecutor(host=IB_HOST, port=IB_PORT, clientId=IB_CID, paper=True)
+            res = ex.place_market_order(symbol=dec["symbol"], side=dec["side"], qty=dec["qty"])
+            order_id = getattr(res, "orderId", None)
+        except Exception as e:
+            status = f"error:{e}"
+    
+    log_trade({
+        "ts": ts,
+        "symbol": dec["symbol"],
+        "side": dec["side"],
+        "qty": dec["qty"],
+        "entry_price": entry_price,
+        "exit_price": exit_price,
+        "pnl": pnl,
+        "duration_sec": dur,
+        "confidence": dec.get("confidence"),
+        "status": status,
+        "order_id": order_id,
+        "reason": dec.get("reason")
+    })
+
+print(f"[orders_bridge] Starting: HOST={IB_HOST} PORT={IB_PORT} CLIENT_ID={IB_CID} DRY_RUN={DRY_RUN} ALLOW_ORDERS={ALLOW_ORDERS}", flush=True)
+print(f"[orders_bridge] Watching: {AUDIT}", flush=True)
+if not ALLOW_ORDERS:
+    print(f"[orders_bridge] WARNING: ALLOW_ORDERS=0 - Orders will NOT be sent to IBKR", flush=True)
+
+os.makedirs(os.path.dirname(AUDIT) or ".", exist_ok=True)
+with open(AUDIT, "a+", buffering=1) as f:
+    f.seek(0,2)
+    while True:
+        line = f.readline()
+        if not line:
+            time.sleep(0.5)
+            continue
+        try:
+            rec = json.loads(line)
+        except Exception:
+            continue
+        dec = parse_decision(rec)
+        if not dec: 
+            continue
+        print(f"[orders_bridge] Decision parsed: {dec}", flush=True)
+        submit_order(dec)
+        print(f"[orders_bridge] Order processed for {dec['symbol']}", flush=True)

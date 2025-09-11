@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Optional, List, Dict, Any, Tuple, Callable
 import logging
 import time
+from utils.persist_market_data import persist_bars
 import asyncio
 import os
 from dataclasses import dataclass
@@ -314,6 +315,14 @@ class IBKRIngestor:
 
             keep_cols = ["timestamp", "open", "high", "low", "close", "volume"]
             cols = [c for c in keep_cols if c in df.columns]
+            
+            try:
+                _sym = locals().get('symbol') or locals().get('ticker') or 'UNKNOWN'
+                if df is not None and not df.empty and _sym != 'UNKNOWN':
+                    persist_bars(_sym, df)
+            except Exception as _e:
+                print(f"[persist] warning: {_e}")
+
             return df[cols]
         except Exception as e:
             raise RuntimeError(f"Exception during IBKR data fetch for {ticker}: {e}")

@@ -82,23 +82,44 @@ Connection setup details are stored in: "C:\Users\Karson\.ssh\IB Gateway ↔ EC2
 ### IBKR Gateway Troubleshooting
 **CRITICAL: If IB Gateway connection fails with TimeoutError, follow these steps:**
 
-#### 1. Quick Diagnosis
+#### 1. Quick Restart Solution (RECOMMENDED)
 ```bash
-# Check if container is running
-docker ps --format "table {{.Names}}\t{{.Status}}"
+# One-command restart of IB Gateway (non-Docker, running on EC2)
+~/bin/restart_ibgw_and_rearm.sh
 
-# Verify port forwarding inside container
-docker exec ibkr-ibkr-gateway-1 ps aux | grep socat
-
-# Check what ports IB Gateway is listening on
-docker exec ibkr-ibkr-gateway-1 cat /proc/net/tcp | grep -E "(0FA1|0FA2)"
-# 0FA1 = port 4001, 0FA2 = port 4002
+# After running, manually re-arm in VNC (localhost:5901):
+# 1) Configure → API → Precautions → Apply → OK
+# 2) Configure → API → Settings → Apply; flip 4002→4003→Apply→4002→Apply→OK
 ```
 
-#### 2. Container Restart Solution (MOST COMMON FIX)
+#### 2. Quick Diagnosis
 ```bash
-cd /home/ubuntu/ibkr
-docker compose restart
+# Check if desktop processes are running
+pgrep -a Xvfb; pgrep -a fluxbox; pgrep -a x11vnc
+
+# Verify display is ready
+ls -l /tmp/.X11-unix/X1 && echo "DISPLAY :1 ready"
+
+# Check IB Gateway tmux session
+tmux ls | grep ibgw
+```
+
+#### 3. Manual Restart (if script fails)
+```bash
+# Kill all processes
+pkill -15 -f "Xvfb|x11vnc|fluxbox|Jts/ibgateway" 2>/dev/null || true
+sleep 2
+pkill -9  -f "Xvfb|x11vnc|fluxbox|Jts/ibgateway" 2>/dev/null || true
+
+# Start desktop
+Xvfb :1 -screen 0 1920x1080x24 -nolisten tcp >/tmp/xvfb.log 2>&1 &
+sleep 0.5
+DISPLAY=:1 fluxbox >/tmp/fluxbox.log 2>&1 &
+x11vnc -display :1 -rfbport 5900 -localhost -forever -shared -repeat -ncache 10 >/tmp/x11vnc.log 2>&1 &
+
+# Start IB Gateway
+tmux kill-session -t ibgw 2>/dev/null || true
+tmux new-session -d -s ibgw -n ibgw "bash -lc 'DISPLAY=:1 ~/Jts/ibgateway/1039/ibgateway'"
 
 # Wait 15-20 seconds for full initialization
 sleep 20
