@@ -13,7 +13,6 @@ LOG_DIR="$HOME/logs"
 export IBKR_HOST="${IBKR_HOST:-127.0.0.1}"
 export IBKR_PORT="${IBKR_PORT:-4002}"
 export IBKR_CLIENT_ID="${IBKR_CLIENT_ID:-9002}"
-export IBKR_HEALTH_CLIENT_ID="${IBKR_HEALTH_CLIENT_ID:-9102}"
 export ALLOW_ORDERS="${ALLOW_ORDERS:-0}"
 export DRY_RUN="${DRY_RUN:-1}"
 
@@ -75,20 +74,3 @@ else
   ~/jobs/run_news_ingestion.sh   >"$LOG_DIR/news.out"     2>"$LOG_DIR/news.err" &
   echo "Started bg jobs. Tail logs in $LOG_DIR."
 fi
-# --- Omega orders sidecar (idempotent) ---
-if tmux has-session -t "$SESSION" 2>/dev/null; then
-  if ! tmux list-windows -t "$SESSION" | grep -q '\<orders\>'; then
-    tmux new-window -t "$SESSION" -n orders "bash -lc 'IBKR_HOST=${IBKR_HOST:-127.0.0.1} IBKR_PORT=${IBKR_PORT:-4002} IBKR_ORDERS_CLIENT_ID=${IBKR_ORDERS_CLIENT_ID:-9007} DRY_RUN=${DRY_RUN:-1} ~/orders/start_orders_bridge.sh'"
-  fi
-fi
-# --- end orders sidecar ---
-
-# --- Omega IB holder (keeps one client connected) ---
-if tmux has-session -t "$SESSION" 2>/dev/null; then
-  if [ "${ENABLE_IB_HOLDER:-1}" = "1" ]; then
-    if ! tmux list-windows -t "$SESSION" | grep -q '\<ib-hold\>'; then
-      tmux new-window -t "$SESSION" -n ib-hold "bash -lc 'IBKR_HOST=${IBKR_HOST:-127.0.0.1} IBKR_PORT=${IBKR_PORT:-4002} IBKR_HOLDER_CLIENT_ID=${IBKR_HOLDER_CLIENT_ID:-9006} ~/jobs/start_ib_holder.sh'"
-    fi
-  fi
-fi
-# --- end ib holder ---

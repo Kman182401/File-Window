@@ -3,8 +3,6 @@ set -euo pipefail
 pkill -15 -f "Xvfb|x11vnc|fluxbox|Jts/ibgateway" 2>/dev/null || true
 sleep 2
 pkill -9  -f "Xvfb|x11vnc|fluxbox|Jts/ibgateway" 2>/dev/null || true
-rm -f /tmp/.X1-lock /tmp/.X11-unix/X1 2>/dev/null || true
-sleep 0.5
 Xvfb :1 -screen 0 1920x1080x24 -nolisten tcp >/tmp/xvfb.log 2>&1 & 
 sleep 0.5
 DISPLAY=:1 fluxbox >/tmp/fluxbox.log 2>&1 &
