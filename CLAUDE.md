@@ -159,6 +159,60 @@ Paper trading does NOT require 2FA authentication. If connection fails:
 2. Wait 20 seconds for initialization
 3. Test connection as shown above
 
+## 🔑 Single-Client IBKR Mode (Source of Truth)
+
+**Architecture**: One process, one socket, clientId=9002 performs market data + orders. Never launch a second client for orders.
+
+**Attach point**: After IBKRIngestor() is created in the pipeline, call `attach_ib(self.market_data_adapter.ib)` once, then (if PIPELINE_KEEPALIVE=1) start one re-entrant keepalive thread (ping reqCurrentTime(), reconnect on drop).
+
+**Client-ID policy**:
+- 9002 = pipeline (market data + orders)
+- 9102 = temporary off-process tests only (disconnect immediately after)
+- Never run two processes with the same clientId
+
+**Order execution gate**: Orders fire only when ENABLE_ORDER_EXEC=1 and ALLOW_ORDERS=1 and DRY_RUN=0. Otherwise, decision logs only.
+
+**Decision→order call site**: Exactly one call right after the pipeline's TRADING_DECISION log, to `_execute_order_single_client(symbol, side, qty)`. Keep this single, guarded call to avoid duplicates.
+
+## 🟢 Golden Re-Arm & Quick Port Flip (When Attach Fails)
+
+1. Close any open dialogs in Gateway
+2. Configure → API → Precautions → Apply → OK
+3. Configure → API → Settings → Apply
+4. If second/next attach still fails: 4002 → Apply → 4003 → Apply → 4002 → Apply
+
+**Acceptance**:
+- `ss -tanp | grep 4002 | grep ESTAB` → one Python PID (the pipeline)
+- VNC header: "API Client: 1 connected (9002)"
+- pipeline.log shows data processing and, when armed, order lines
+
+## ✅ Paper-Trading Acceptance (Run Every Time Before Arming)
+
+1. **No sidecar present**: No orders_bridge.py in tmux or launcher
+2. **One socket**: ss shows one pipeline PID connected to 127.0.0.1:4002
+3. **Sanity tests** (as needed): Run the IBKR/pipeline tests from CLAUDE.md
+4. **Symbols map to futures only**: Use documented mapping (ES/NQ/6E/6B/6A/GC)
+5. **When armed**: pipeline.log emits [single_client_order] and Submitted/PreSubmitted lines; no `connectAsync was never awaited` warnings
+
+## 🧪 In-Pipeline Smoke Hooks (No Second Client)
+
+**Dry smoke (no orders)**: Leave DRY_RUN=1 or ENABLE_ORDER_EXEC=0. Ensure data/feature generation completes in the logs.
+
+**One-shot paper smoke**: Optional, guard with TEST_ORDER_ON_START=1 to submit a far-away LIMIT (stays Submitted) and auto-cancel; disable itself after one run.
+
+## 📉 Risk, Limits & Learning Modes
+
+### Learning Mode Presets
+**Learning (paper)**: 
+- MAX_TRADES_PER_DAY=100
+- MAX_ORDER_SIZE=1  
+- Small tick-based brackets
+- Focus: Sample efficiency for RL training
+
+**Production (paper)**:
+- Revert to documented defaults (20/day, size per config)
+- Ensure rollback gates stay active
+
 ### AWS S3 Storage
 The system uses S3 bucket "omega-singularity-ml" for:
 - Historical market data storage
@@ -254,6 +308,28 @@ Docker containerization available for AWS Lambda deployment:
 - run_adaptive_trading.py is the main trading system
 - never test with mock data only ever test with true data from IBKR
 - Enable Anti-Dilution and Anti-Drift to ensure and any all changes made to the system do not dilute the system or drift from the core logic of the system.
+
+## 🐞 Troubleshooting Patterns Claude Code Must Recognize
+
+**Half-armed API (timeouts / second client blocked)**: Close dialogs → Precautions→Apply→OK → Settings→Apply → (if needed) 4002↔4003 flip; re-check ss.
+
+**Ghost clientId after crash**: Resolved by the same golden re-arm; never reuse clientId across processes.
+
+**Async misuse**: Never call IB.connectAsync without awaiting; in non-async code use `ib.connect(...)` or `util.run(...)`. Run the "ib_async_warnings" test if warnings appear.
+
+**Resource limits on m5.large**: Keep total memory <6GB and accept lower parallelism; Claude should respect this.
+
+## 🧭 Monitoring & Where to Look
+
+**Logs**: 
+- `~/logs/pipeline.log` for decisions/orders
+- `trade_audit_log.jsonl` for audit
+
+**Gateway header**: 1 connected (9002)
+
+**Socket test**: `ss -tanp | grep 4002 | grep ESTAB`
+
+**Tests**: `test_phase4a_fix.py` - run when you suspect regressions in async/connectivity/perf. The test's critical gates are listed (parallel perf, ib async warnings, latency target).
 
 ## PHASE 3 CRITICAL REQUIREMENTS - MANDATORY COMPLIANCE
 

@@ -6,7 +6,7 @@ from datetime import datetime
 sys.path.insert(0, os.path.expanduser('~'))
 
 try:
-    from ib_insync import IB, Future, MarketOrder, LimitOrder, StopOrder, Contract, ContractDetails
+    from ib_insync import IB, util, Future, MarketOrder, LimitOrder, StopOrder, Contract, ContractDetails
 except Exception as e:
     print("[orders_bridge] ib_insync not available:", e, file=sys.stderr)
     IB=None
@@ -112,7 +112,7 @@ def submit_order(dec):
         "reason": dec.get("reason")
     })
 
-from ib_insync import IB, Future, MarketOrder
+from ib_insync import IB, util, Future, MarketOrder
 
 def _qualify_front_month(ib, symbol: str):
     exch = 'COMEX' if symbol in ('GC','MGC') else 'CME'
@@ -292,7 +292,7 @@ def _get_ib():
     global ORD_IB
     with IB_LOCK:
         if ORD_IB is None:
-            from ib_insync import IB
+            from ib_insync import IB, util
             ORD_IB = IB()
             ORD_IB.errorEvent += lambda *a, **k: None
         if not ORD_IB.isConnected():
@@ -300,13 +300,22 @@ def _get_ib():
         return ORD_IB
 
 def _ping_loop():
+    backoff = 2
     while True:
         try:
             ib = _get_ib()
-            ib.reqCurrentTime()
-        except Exception:
-            # try to reconnect next tick
-            pass
+            if ib.isConnected():
+                ib.reqCurrentTime()
+                backoff = 2  # Reset backoff on success
+            else:
+                print(f"[orders_bridge] Not connected, waiting {backoff}s", flush=True)
+                _time.sleep(backoff)
+                backoff = min(backoff * 2, 30)
+                continue
+        except Exception as e:
+            print(f"[orders_bridge] Ping error: {e}", flush=True)
+            _time.sleep(backoff)
+            backoff = min(backoff * 2, 30)
         _time.sleep(PING_INTERVAL)
 
 # spawn pinger on startup if KEEP_CONNECTED

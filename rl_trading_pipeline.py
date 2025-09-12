@@ -159,6 +159,7 @@ import datetime
 from market_data_config import MAX_DAILY_LOSS_PCT, MAX_TRADES_PER_DAY
 from ib_insync import MarketOrder
 from market_data_ibkr_adapter import IBKRIngestor
+from orders_single_client import attach_ib, place_bracket_order
 import psutil
 from feature_engineering import classify_news_type
 from sklearn.linear_model import LogisticRegression
@@ -250,7 +251,7 @@ def fetch_ibkr_news_for_tickers(tickers, lookback_hours=24, max_results=200):
         _news_id = int(os.getenv("IBKR_CLIENT_ID_NEWS", os.getenv("IBKR_CLIENT_ID", "9000"))) + 100
         ib.connect(IBKR_HOST, IBKR_PORT, clientId=_news_id, timeout=10)
     except Exception:
-        # If IB Gateway isn’t ready, return empty DF; pipeline will continue with MarketAux
+        # If IB Gateway isn't ready, return empty DF; pipeline will continue with MarketAux
         return pd.DataFrame(columns=['published_at','title','description','tickers','provider','source'])
 
     # Discover provider codes you have access to
@@ -703,6 +704,12 @@ class RLTradingPipeline:
         try:
             logging.info("Initializing IBKR connection...")
             self.market_data_adapter = IBKRIngestor()
+            attach_ib(self.market_data_adapter.ib)
+            if os.getenv("PIPELINE_KEEPALIVE","1") == "1" and not hasattr(self, "_keepalive_started"):
+                import threading
+                threading.Thread(target=_ib_keepalive_loop, args=(self.market_data_adapter.ib,), daemon=True).start()
+                self._keepalive_started = True
+                logging.info("IB keepalive thread started")
             logging.info("IBKR connection established successfully")
         except Exception as e:
             logging.error(f"Failed to initialize IBKR connection: {e}")
@@ -1192,9 +1199,10 @@ class RLTradingPipeline:
                 processing_start_time = time.time()
                 
                 # Phase 4A Feature Flag
-                ENABLE_PARALLEL_PROCESSING = self.config.get('ENABLE_PARALLEL_PROCESSING', True)
-                use_optimized_parallel = self.config.get("use_optimized_parallel", True)
-                use_sequential = self.config.get("use_sequential_processing", False)
+                # MODIFIED: Force sequential to avoid IB rate limits
+                ENABLE_PARALLEL_PROCESSING = self.config.get('ENABLE_PARALLEL_PROCESSING', False)  # Changed to False
+                use_optimized_parallel = self.config.get("use_optimized_parallel", False)  # Changed to False
+                use_sequential = self.config.get("use_sequential_processing", True)  # Changed to True
                 
                 if ENABLE_PARALLEL_PROCESSING and not use_sequential:
                     logging.info("PHASE4A-FIX: Using async parallel processing")
@@ -2470,3 +2478,41 @@ if __name__ == "__main__":
         pipeline.run()
         # Sleep for 2 minutes (adjust as needed)
         time.sleep(120)
+
+
+import os, threading, time
+def _ib_keepalive_loop(ib):
+    backoff = 2
+    while True:
+        try:
+            if not ib.isConnected():
+                ib.disconnect()
+                ib.connect(os.getenv("IBKR_HOST","127.0.0.1"),
+                           int(os.getenv("IBKR_PORT","4002")),
+                           clientId=int(os.getenv("IBKR_CLIENT_ID","9002")),
+                           timeout=30)
+                backoff = 2
+            else:
+                _ = ib.reqCurrentTime()
+                backoff = 2
+            time.sleep(30)
+        except Exception:
+            try: ib.disconnect()
+            except: pass
+            time.sleep(min(backoff, 30))
+            backoff = min(backoff*2, 30)
+
+
+def _execute_order_single_client(symbol:str, side:str, qty:int):
+    try:
+        stop_ticks = int(os.getenv("STOP_TICKS","8"))
+        take_ticks = int(os.getenv("TAKE_TICKS","16"))
+        tif        = os.getenv("TIF","DAY")
+        entry_type = os.getenv("ENTRY_TYPE","MKT")
+        limit_off  = int(os.getenv("LIMIT_OFFSET_TICKS","0"))
+        res = place_bracket_order(symbol, side, qty,
+                                  stop_ticks=stop_ticks, take_ticks=take_ticks,
+                                  tif=tif, order_type=entry_type, limit_offset_ticks=limit_off)
+        print("[single_client_order]", res, flush=True)
+    except Exception as e:
+        print("[single_client_order][ERROR]", e, flush=True)
