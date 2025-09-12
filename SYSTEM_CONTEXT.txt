@@ -1,0 +1,370 @@
+================================================================================
+                    AI TRADING SYSTEM - OPERATIONAL CONTEXT
+================================================================================
+
+This file contains critical operational knowledge and context that isn't 
+explicitly documented in the code but is essential for understanding and 
+operating the system effectively.
+
+================================================================================
+1. RUNTIME ENVIRONMENT CONFIGURATION
+================================================================================
+
+CRITICAL ENVIRONMENT VARIABLES:
+--------------------------------
+# IBKR Connection
+export IBKR_HOST=127.0.0.1      # IB Gateway host (always localhost on EC2)
+export IBKR_PORT=4002           # 4001=live trading, 4002=paper trading
+export IBKR_CLIENT_ID=9002      # Main pipeline client ID (never change)
+
+# Order Execution Control Gates (ALL must be 1 to execute orders)
+export ALLOW_ORDERS=0           # Master kill switch (0=no orders, 1=allow)
+export DRY_RUN=1               # 0=send real orders, 1=simulation only
+export ENABLE_ORDER_EXEC=0     # Pipeline-level order gate
+
+# AWS Configuration
+AWS_REGION=us-east-1           # S3 bucket region
+S3_BUCKET=omega-singularity-ml # Historical data and model storage
+
+# System Behavior
+PIPELINE_KEEPALIVE=1           # Keep IBKR connection alive
+MAX_MEMORY_MB=6000             # Memory limit before triggering cleanup
+DECISION_LATENCY_MS=100        # Max acceptable decision latency
+
+CLIENT ID CONVENTIONS:
+----------------------
+9002 - Main pipeline (market data + orders) - NEVER run two processes with this
+9102 - Temporary test client - disconnect immediately after use
+Never reuse clientId across processes or you'll get connection blocks
+
+================================================================================
+2. OPERATIONAL PROCEDURES
+================================================================================
+
+VERIFY IB GATEWAY HEALTH:
+-------------------------
+# Check connection status
+ss -tanp | grep 4002 | grep ESTAB  # Should show ONE Python process
+
+# VNC to IB Gateway (password: 123456)
+vncviewer localhost:5901
+# Header should show: "API Client: 1 connected (9002)"
+
+# Test connection programmatically
+python3 smoke_ib_connect.py
+
+RESTART IB GATEWAY (When Stuck):
+---------------------------------
+# Quick restart script (recommended)
+~/bin/restart_ibgw_and_rearm.sh
+
+# Manual restart if script fails
+pkill -15 -f "Xvfb|x11vnc|fluxbox|Jts/ibgateway"
+sleep 2
+pkill -9 -f "Xvfb|x11vnc|fluxbox|Jts/ibgateway"
+
+# Start desktop environment
+Xvfb :1 -screen 0 1920x1080x24 -nolisten tcp &
+DISPLAY=:1 fluxbox &
+x11vnc -display :1 -rfbport 5900 -localhost -forever -shared &
+
+# Start IB Gateway
+tmux new-session -d -s ibgw "DISPLAY=:1 ~/Jts/ibgateway/1039/ibgateway"
+sleep 20  # Wait for initialization
+
+# Re-arm API in VNC
+1. Configure → API → Precautions → Apply → OK
+2. Configure → API → Settings → Apply
+3. If still failing: Change port 4002→4003→Apply→4002→Apply→OK
+
+CHECK IF ORDERS ARE EXECUTING:
+-------------------------------
+# Check audit log for recent trades
+tail -f ~/trade_audit_log.jsonl | jq '.'
+
+# Monitor pipeline decisions
+tail -f ~/logs/pipeline.log | grep -E "TRADING_DECISION|single_client_order"
+
+# Check order status in database
+sqlite3 ~/orders/orders.db "SELECT * FROM orders ORDER BY timestamp DESC LIMIT 5;"
+
+================================================================================
+3. SYSTEM STATE & HISTORY
+================================================================================
+
+CURRENT STATUS:
+---------------
+- Mode: Paper trading active (port 4002)
+- Phase: Phase 3 enhanced system deployed
+- Memory Usage: Target <6GB on m5.large instance
+- Daily Limits: 20 trades/day, 2% max loss, 3 contract position limit
+
+SYSTEM EVOLUTION:
+-----------------
+Phase 1: Basic RL implementation with PPO
+Phase 2: Added SAC, RecurrentPPO, enhanced environment
+Phase 3: Ensemble learning, meta-learning, online learning
+Phase 4: Performance optimization, memory management
+
+KNOWN ISSUES & WORKAROUNDS:
+----------------------------
+1. "Half-armed API" - Gateway accepts connection but times out
+   Fix: Re-arm via VNC (see restart procedure above)
+
+2. "connectAsync was never awaited" warnings
+   Fix: System uses synchronous connect() in non-async code
+
+3. Memory creep over time
+   Fix: Automatic cleanup triggers at 6GB usage
+
+4. Second client connection blocked
+   Fix: Only use clientId=9002 for main pipeline
+
+PERFORMANCE BENCHMARKS:
+-----------------------
+- Decision Latency: <100ms required
+- Memory Usage: <6GB hard limit
+- Market Data Fetch: <2s for 1-day bars
+- Order Execution: <500ms from decision to submission
+
+================================================================================
+4. INTEGRATION POINTS
+================================================================================
+
+AWS S3 STRUCTURE:
+-----------------
+omega-singularity-ml/
+├── market_data/          # Historical price data
+│   ├── ES/              # S&P 500 futures
+│   ├── NQ/              # Nasdaq futures
+│   └── [symbol]/        # Other symbols
+├── models/              # Trained RL models
+│   ├── sac/
+│   ├── ppo/
+│   └── ensemble/
+├── features/            # Feature store cache
+└── backups/            # System backups
+
+DOCKER CONTAINERS:
+------------------
+- IB Gateway: Running on host (not Docker anymore)
+- Monitoring: Grafana + PostgreSQL (optional)
+
+VNC ACCESS:
+-----------
+Host: localhost:5901
+Password: 123456
+Purpose: Manual IB Gateway configuration and monitoring
+
+DATABASE SCHEMAS:
+-----------------
+orders.db:
+- orders table: id, symbol, side, quantity, order_type, status, timestamp
+- executions table: order_id, exec_time, price, quantity, commission
+
+trade_audit_log.jsonl:
+- JSON lines format with: timestamp, symbol, action, quantity, price, pnl, reason
+
+================================================================================
+5. TESTING PROTOCOLS
+================================================================================
+
+BEFORE ENABLING LIVE TRADING:
+------------------------------
+1. Run core verification (MUST pass 6/6):
+   python3 verify_trading_intelligence.py
+
+2. Test production readiness (MUST pass 100%):
+   python3 test_production_readiness.py
+
+3. Run full demo (MUST complete without errors):
+   python3 demo_complete_trading_intelligence.py
+
+4. Paper trade for 24 hours minimum:
+   - Must execute 10+ trades
+   - No system crashes
+   - Positive or neutral P&L trend
+
+INTERPRETING TEST FAILURES:
+----------------------------
+"RL Implementation" fail: Check algorithm initialization
+"Trading Environment" fail: Verify gym environment setup
+"Decision Making" fail: Check model prediction pipeline
+"Learning Capability" fail: Verify training loop
+"Paper Trading" fail: Check IBKR connection
+"Memory Management" fail: System using >6GB RAM
+
+CRITICAL ACCEPTANCE CRITERIA:
+------------------------------
+✓ All 6 core intelligence tests passing
+✓ Memory usage <6GB throughout testing
+✓ Decision latency <100ms average
+✓ IBKR connection stable for 1+ hours
+✓ No "connectAsync" warnings in logs
+✓ Orders appear in audit log when armed
+
+================================================================================
+6. DATA FLOW MAPPINGS
+================================================================================
+
+SYMBOL CONVERSIONS:
+-------------------
+User Symbol → IBKR Contract
+ES1! → ES futures (S&P 500 E-mini, front month)
+NQ1! → NQ futures (Nasdaq 100 E-mini, front month)
+GBPUSD → 6B futures (British Pound)
+EURUSD → 6E futures (Euro)
+AUDUSD → 6A futures (Australian Dollar)
+XAUUSD → GC futures (Gold)
+
+DECISION PIPELINE:
+------------------
+1. Market Data Fetch (IBKRIngestor)
+   ↓
+2. Feature Engineering (technical indicators + news)
+   ↓
+3. RL Model Prediction (SAC/PPO/Ensemble)
+   ↓
+4. Risk Management Check
+   ↓
+5. Order Execution (if all gates pass)
+   ↓
+6. Audit Logging
+
+FEATURE SOURCES:
+----------------
+- Price Data: IBKR real-time bars
+- Technical: 50+ indicators (SMA, RSI, MACD, etc.)
+- News: MarketAux, Alpha Vantage, IBKR fundamentals
+- Market Microstructure: Spread, volume, volatility
+
+MODEL MODES:
+------------
+Training Mode: Learns from paper trading results
+Inference Mode: Makes predictions without learning
+Ensemble Mode: Combines multiple model predictions
+Meta-Learning: Selects best algorithm dynamically
+
+================================================================================
+7. SAFETY MECHANISMS
+================================================================================
+
+CIRCUIT BREAKERS:
+-----------------
+1. Daily Loss Limit: -2% stops all trading
+2. Trade Count Limit: 20 trades/day maximum
+3. Position Limit: 3 contracts max exposure
+4. Order Size Limit: 2 contracts per order
+5. Memory Limit: Disable features if >6GB
+6. Latency Limit: Skip trade if decision >100ms
+
+ROLLBACK TRIGGERS:
+------------------
+- Memory usage >6000 MB → Disable Phase 3 features
+- Verification tests <6/6 → Revert to last working state
+- IBKR disconnected >5min → Stop trading
+- Unexpected exception → Fallback to rule-based agent
+
+RISK CONFIGURATIONS:
+--------------------
+Location: market_data_config.py
+- MAX_DAILY_LOSS_PCT = 0.02
+- MAX_TRADES_PER_DAY = 20
+- MAX_POSITION_EXPOSURE = 3
+- MAX_ORDER_SIZE = 2
+
+ORDER EXECUTION GATES:
+----------------------
+All must be true for orders to fire:
+1. ALLOW_ORDERS == 1
+2. DRY_RUN == 0
+3. ENABLE_ORDER_EXEC == 1
+4. Daily loss < 2%
+5. Trade count < 20
+6. Position within limits
+
+================================================================================
+8. COMMON COMMANDS
+================================================================================
+
+MONITORING:
+-----------
+# Watch live decisions
+tail -f ~/logs/pipeline.log | grep TRADING_DECISION
+
+# Check system resources
+free -h; df -h; top -bn1 | head -20
+
+# Monitor IBKR connection
+watch -n1 'ss -tanp | grep 4002'
+
+# View recent trades
+tail -10 ~/trade_audit_log.jsonl | jq '.symbol, .action, .pnl'
+
+DEBUGGING:
+----------
+# Test IBKR connection
+python3 -c "from ib_insync import IB; ib=IB(); ib.connect('127.0.0.1',4002,9002); print(ib.isConnected()); ib.disconnect()"
+
+# Check feature generation
+python3 -c "from feature_engineering import FeatureEngineer; fe=FeatureEngineer(); print(fe.calculate_indicators(None))"
+
+# Verify model loading
+python3 -c "from algorithm_selector import AlgorithmSelector; als=AlgorithmSelector(); print(als.select_algorithm())"
+
+S3 OPERATIONS:
+--------------
+# List models
+aws s3 ls s3://omega-singularity-ml/models/ --recursive
+
+# Download latest model
+aws s3 cp s3://omega-singularity-ml/models/sac/latest.zip ./
+
+# Upload training data
+aws s3 sync ./data/ s3://omega-singularity-ml/market_data/
+
+DATABASE QUERIES:
+-----------------
+# Today's trades
+sqlite3 ~/orders/orders.db "SELECT * FROM orders WHERE date(timestamp)=date('now');"
+
+# P&L summary
+sqlite3 ~/orders/orders.db "SELECT symbol, SUM(pnl) FROM executions GROUP BY symbol;"
+
+# Failed orders
+sqlite3 ~/orders/orders.db "SELECT * FROM orders WHERE status='FAILED';"
+
+================================================================================
+9. QUICK REFERENCE
+================================================================================
+
+START PAPER TRADING:
+--------------------
+export IBKR_PORT=4002
+export ALLOW_ORDERS=1
+export DRY_RUN=0
+export ENABLE_ORDER_EXEC=1
+python3 run_adaptive_trading.py --mode paper_trading
+
+STOP ALL TRADING:
+-----------------
+export ALLOW_ORDERS=0
+# OR
+pkill -f run_adaptive_trading
+
+VIEW LOGS:
+----------
+Pipeline: ~/logs/pipeline.log
+Audit: ~/trade_audit_log.jsonl
+IBKR: ~/ibkr_market_data.log
+Errors: ~/logs/errors.log
+
+EMERGENCY SHUTDOWN:
+-------------------
+export ALLOW_ORDERS=0
+pkill -f python
+~/bin/restart_ibgw_and_rearm.sh
+
+================================================================================
+                              END OF CONTEXT
+================================================================================
