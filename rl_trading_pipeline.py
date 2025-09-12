@@ -158,6 +158,7 @@ from market_data_config import MAX_POSITION_EXPOSURE
 import datetime
 from market_data_config import MAX_DAILY_LOSS_PCT, MAX_TRADES_PER_DAY
 from ib_insync import MarketOrder
+from order_safety_wrapper import safe_place_order
 from market_data_ibkr_adapter import IBKRIngestor
 from orders_single_client import attach_ib, place_bracket_order
 import psutil
@@ -377,7 +378,12 @@ def execute_trade(ib, contract, action, quantity):
     quantity: int
     """
     order = MarketOrder(action, quantity)
-    trade = ib.placeOrder(contract, order)
+    # Extract symbol from contract for safety wrapper
+    symbol = contract.symbol if hasattr(contract, 'symbol') else contract.localSymbol
+    trade = safe_place_order(ib, contract, order, symbol=symbol, side=action, quantity=quantity)
+    
+    # Structured logging for order gate
+    logger.info(f"[order_gate] symbol={symbol} side={action} qty={quantity} status=submitted")
     print(f"Order submitted: {action} {quantity} {contract.localSymbol}")
     return trade
 
@@ -806,7 +812,7 @@ class RLTradingPipeline:
         else:
             feature_str = str(features)
         
-        return hashlib.md5(feature_str.encode()).hexdigest()[:16]
+        return hashlib.sha256(feature_str.encode()).hexdigest()[:16]
     
     def _get_cached_prediction(self, model_name, ticker, features):
         """Get cached prediction if available and not expired"""

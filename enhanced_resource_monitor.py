@@ -182,7 +182,7 @@ class EnhancedResourceMonitor:
             import socket
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(2)  # 2 second timeout
-            result = sock.connect_ex(('127.0.0.1', 4004))
+            result = sock.connect_ex(('127.0.0.1', 4002))
             sock.close()
             return result == 0
         except:

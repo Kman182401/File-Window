@@ -3,9 +3,9 @@ from datetime import datetime, timedelta
 import pandas as pd
 import os
 
-# PHASE4A-Port-Fix: Use environment variables for IBKR connection with 4004 default
+# Use environment variables for IBKR connection with 4002 default (paper trading)
 _IB_HOST = os.getenv('IBKR_HOST', '127.0.0.1')
-_IB_PORT = int(os.getenv('IBKR_PORT', '4004'))  # Changed from hardcoded 4002 to env var with 4004 default
+_IB_PORT = int(os.getenv('IBKR_PORT', '4002'))  # Standardized to 4002 for paper trading
 _IB_CLIENT_ID = int(os.getenv('IBKR_CLIENT_ID', '101'))
 
 # Provider codes: common free sources; adjust if your account has others enabled

@@ -14,9 +14,9 @@ MAX_POSITION_EXPOSURE = 3  # e.g., never hold more than 3 contracts long or shor
 MAX_ORDER_SIZE = 2  # e.g., never send an order for more than 2 contracts
 
 # ───────────────────────────────── IBKR connection ─────────────────────────────────
-# Hosted IB Gateway (Docker) publishes API on localhost:4004
+# IB Gateway publishes API on localhost:4002 (paper trading) or 4001 (live)
 IBKR_HOST = "127.0.0.1"
-IBKR_PORT = 4002        # IB Gateway native API port on the EC2 host
+IBKR_PORT = 4002        # IB Gateway API port (4002 for paper trading)
 IBKR_CLIENT_ID = 9002   # default client id (can be overridden by env IBKR_CLIENT_ID)
 
 # Connection/retry settings

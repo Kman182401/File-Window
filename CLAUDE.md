@@ -20,6 +20,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Data Pipeline Engineer**: S3 operations, data ingestion, ETL processes
 - **Infrastructure Optimizer**: Memory >5GB, performance issues, AWS/Docker operations
 
+## GPT-Files Repository
+
+**IMPORTANT**: The `gpt-files-repo` directory is specifically maintained for ChatGPT to analyze and gain a complete understanding of this EC2 trading system. Claude Code must ensure this repository stays up-to-date with current system configuration, code, and documentation to enable effective cross-AI collaboration. Run `~/sync_gpt_files.sh` regularly to synchronize files.
+
 ## Core Architecture
 
 This is an AI-powered algorithmic trading system that integrates with Interactive Brokers (IBKR) for live market data and trading execution. The system uses reinforcement learning (PPO) for trading decisions and operates on futures contracts (ES, NQ, currency futures, gold).
