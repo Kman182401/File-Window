@@ -4,44 +4,26 @@
 
 # System path setup
 import sys
+
 sys.path.append('/home/ubuntu')
 
 # Core Security and Configuration
-from config.secrets_manager import get_secrets_manager, get_api_key, get_ibkr_connection
-from config.master_config import get_config, config_get, config_set
-
-# Memory Management
-from utils.memory_manager import get_memory_manager, memory_efficient, auto_cleanup
-
-# Exception Handling and Resilience
-from utils.exception_handler import (
-    get_error_recovery_manager,
-    retry_on_exception,
-    circuit_breaker,
-    fallback_on_error,
-    IBKRConnectionError,
-    DataFetchError,
-    ModelTrainingError,
-    OrderExecutionError,
-    RiskLimitExceededError
-)
-
-# IBKR Health Monitoring
-from utils.ibkr_health_monitor import IBKRHealthMonitor
-
-# Performance Monitoring
-from monitoring.performance_tracker import get_performance_tracker
-from monitoring.trade_analytics import TradeAnalytics
+from config.master_config import get_config
+from config.secrets_manager import get_secrets_manager
 from monitoring.client.ingest_hooks import log_ingest
 
+# IBKR Health Monitoring
+# Performance Monitoring
+from monitoring.performance_tracker import get_performance_tracker
+
 # Audit Logging
-from utils.audit_logger import (
-    get_audit_logger,
-    audit_log,
-    audit_trade,
-    AuditEventType,
-    AuditSeverity
-)
+from utils.audit_logger import AuditEventType, AuditSeverity, audit_log, get_audit_logger
+
+# Exception Handling and Resilience
+from utils.exception_handler import get_error_recovery_manager
+
+# Memory Management
+from utils.memory_manager import get_memory_manager
 
 # Initialize global managers (singleton instances)
 memory_manager = get_memory_manager()
@@ -71,28 +53,26 @@ try:
     from market_data_utils import RealTimeFeatureStore
 except Exception:
     # Use memory-managed version from memory_manager
-    from utils.memory_manager import MemoryTrackedDict
-    
+
     class RealTimeFeatureStore:
         def __init__(self, max_rows_per_key=5000, max_memory_mb=500):
             self._store = {}
             self.max_rows_per_key = max_rows_per_key
             self.max_memory_mb = max_memory_mb
             self._total_rows = 0
-            
+
         def _estimate_memory_usage(self):
             """Estimate memory usage in MB"""
             total_mb = sum(
-                df.memory_usage(deep=True).sum() / (1024 * 1024) 
-                for df in self._store.values() 
+                df.memory_usage(deep=True).sum() / (1024 * 1024)
+                for df in self._store.values()
                 if hasattr(df, 'memory_usage')
             )
             return total_mb
-            
+
         def _cleanup_if_needed(self):
             """Smart cleanup: remove oldest rows if memory or row limits exceeded"""
-            import pandas as pd
-            
+
             # Check memory usage
             if self._estimate_memory_usage() > self.max_memory_mb:
                 # Remove 25% of oldest data from each key
@@ -101,31 +81,31 @@ except Exception:
                     if len(df) > 100:  # Only cleanup if substantial data
                         keep_rows = int(len(df) * 0.75)
                         self._store[key] = df.tail(keep_rows).copy()
-                        
+
             # Check row limits per key
             for key in list(self._store.keys()):
                 df = self._store[key]
                 if len(df) > self.max_rows_per_key:
                     self._store[key] = df.tail(self.max_rows_per_key).copy()
-                    
+
         def update(self, key, features_dict):
             import pandas as pd
             # Store as a growing DataFrame; coerce to numeric where possible
             df = self._store.get(key)
             row = pd.DataFrame([features_dict])
-            
+
             if df is None:
                 self._store[key] = row
             else:
                 # Use efficient concatenation with memory optimization
                 self._store[key] = pd.concat([df, row], ignore_index=True).infer_objects(copy=False)
-                
+
             self._total_rows += 1
-            
+
             # Periodic cleanup (every 100 updates)
             if self._total_rows % 100 == 0:
                 self._cleanup_if_needed()
-                
+
         def get(self, key):
             val = self._store.get(key)
             if val is None:
@@ -134,11 +114,11 @@ except Exception:
                 import pandas as pd
                 return pd.DataFrame([val])
             return val
-            
+
         def clear(self):
             self._store.clear()
             self._total_rows = 0
-            
+
         def get_memory_stats(self):
             """Get memory usage statistics"""
             return {
@@ -147,41 +127,34 @@ except Exception:
                 'memory_usage_mb': self._estimate_memory_usage(),
                 'rows_per_key': {k: len(v) for k, v in self._store.items() if hasattr(v, '__len__')}
             }
-            
-# Initialize with memory management  
+
+# Initialize with memory management
 feature_store = RealTimeFeatureStore(max_rows_per_key=3000, max_memory_mb=300)
 
-from market_data_config import IBKR_SYMBOLS as DEFAULT_TICKERS
-from sklearn.metrics.pairwise import cosine_similarity
-from fetch_and_merge_news import get_combined_news
-from market_data_config import MAX_POSITION_EXPOSURE
 import datetime
-from market_data_config import MAX_DAILY_LOSS_PCT, MAX_TRADES_PER_DAY
-from ib_insync import MarketOrder
-from order_safety_wrapper import safe_place_order
-from market_data_ibkr_adapter import IBKRIngestor
-from orders_single_client import attach_ib, place_bracket_order
-import psutil
-from feature_engineering import classify_news_type
-from sklearn.linear_model import LogisticRegression
-import joblib
 import os
-import numpy as np
-import random
-import math
-import json
-from datetime import datetime, timedelta
-from dateutil import parser as date_parser
-from collections import deque
-from typing import List, Dict, Any, Tuple, Optional
-import boto3
-import io
 import sys
 import time
 import traceback
-from datetime import datetime
-from typing import Any, Dict
-from feature_engineering import generate_features, add_technical_indicators, process_ticker, list_s3_files, read_s3_file
+from datetime import datetime, timedelta
+from typing import Any
+
+import boto3
+import joblib
+import numpy as np
+import psutil
+from ib_insync import MarketOrder
+from sklearn.linear_model import LogisticRegression
+
+from feature_engineering import (
+    generate_features,
+)
+from market_data_config import IBKR_SYMBOLS as DEFAULT_TICKERS
+from market_data_config import MAX_DAILY_LOSS_PCT, MAX_POSITION_EXPOSURE, MAX_TRADES_PER_DAY
+from market_data_ibkr_adapter import IBKRIngestor
+from order_safety_wrapper import safe_place_order
+from orders_single_client import attach_ib, place_bracket_order
+
 try:
     from ingest_to_s3 import upload_file_to_s3
 except Exception:
@@ -190,34 +163,37 @@ except Exception:
         s3 = boto3.client("s3")
         s3.upload_file(local_path, bucket, key)
 
-from market_data_ibkr_adapter import IBKRIngestor
 
-from feature_engineering import generate_features
-from audit_logging_utils import log_trade_results
+import logging
 
-from stable_baselines3 import PPO
-from stable_baselines3.common.env_checker import check_env
 import gymnasium as gym
 import pandas as pd  # <-- Ensure pandas is imported for mock data
-import logging
 from colorlog import ColoredFormatter
-
-import warnings
+from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.env_checker import check_env
 
-import logging
+from audit_logging_utils import log_trade_results
+
 logger = logging.getLogger(__name__)
 
 LAST_TRAINED_FILE = "last_trained_time.txt"
 
-from news_ingestion_marketaux import fetch_marketaux_news, normalize_marketaux_news
-from news_data_utils import engineer_news_features
 
 from market_data_config import (
-    IBKR_HOST, IBKR_PORT, IBKR_CLIENT_ID, IBKR_SYMBOLS, IBKR_LOG_LEVEL,
-    IBKR_RETRY_INTERVAL, IBKR_TIMEOUT, IBKR_MARKET_DATA_TYPE,
-    IBKR_LOGGING_ENABLED, IBKR_LOG_FILE, IBKR_DYNAMIC_SUBSCRIPTION,
-    IBKR_RESOURCE_MONITORING, IBKR_POLL_INTERVAL
+    IBKR_CLIENT_ID,
+    IBKR_DYNAMIC_SUBSCRIPTION,
+    IBKR_HOST,
+    IBKR_LOG_FILE,
+    IBKR_LOG_LEVEL,
+    IBKR_LOGGING_ENABLED,
+    IBKR_MARKET_DATA_TYPE,
+    IBKR_POLL_INTERVAL,
+    IBKR_PORT,
+    IBKR_RESOURCE_MONITORING,
+    IBKR_RETRY_INTERVAL,
+    IBKR_SYMBOLS,
+    IBKR_TIMEOUT,
 )
 
 try:
@@ -238,9 +214,11 @@ def fetch_ibkr_news_for_tickers(tickers, lookback_hours=24, max_results=200):
     ['published_at','title','description','tickers','provider','source']
     """
     import re
+    from datetime import datetime
+
     import pandas as pd
-    from datetime import datetime, timedelta
     from ib_insync import IB
+
     from market_data_ibkr_adapter import IBKRIngestor
 
     rows = []
@@ -381,7 +359,7 @@ def execute_trade(ib, contract, action, quantity):
     # Extract symbol from contract for safety wrapper
     symbol = contract.symbol if hasattr(contract, 'symbol') else contract.localSymbol
     trade = safe_place_order(ib, contract, order, symbol=symbol, side=action, quantity=quantity)
-    
+
     # Structured logging for order gate
     logger.info(f"[order_gate] symbol={symbol} side={action} qty={quantity} status=submitted")
     print(f"Order submitted: {action} {quantity} {contract.localSymbol}")
@@ -521,19 +499,24 @@ _last_ts_by_symbol = {}
 
 def count_gaps(index, bar_secs: int = 60) -> int:
     """Count missing bars in a time series"""
-    if len(index) < 2:
+    if index is None or len(index) < 2:
         return 0
-    # Assumes a monotonic, timezone-aware DatetimeIndex
-    span = (index[-1] - index[0]).total_seconds()
-    expected = int(span // bar_secs) + 1
-    missing = expected - len(index)
-    return max(0, missing)
+    try:
+        # Assumes a monotonic, timezone-aware DatetimeIndex
+        span = (index[-1] - index[0]).total_seconds()
+        expected = int(span // bar_secs) + 1
+        missing = expected - len(index)
+        return max(0, missing)
+    except (IndexError, KeyError, AttributeError) as e:
+        import logging
+        logging.warning(f"count_gaps error: {e}, returning 0")
+        return 0
 
 def emit_ingest_event_if_new(symbol: str, df, latency_ms: int) -> None:
     """Log market ingestion event if we have new data"""
     if df is None or df.empty:
         return
-    
+
     # Get the last timestamp from the data
     if 'timestamp' in df.columns:
         last_ts = df['timestamp'].max()
@@ -542,21 +525,21 @@ def emit_ingest_event_if_new(symbol: str, df, latency_ms: int) -> None:
     else:
         # If no timestamp column or index, log anyway
         last_ts = pd.Timestamp.now()
-    
+
     # Check if this is new data
     if _last_ts_by_symbol.get(symbol) is not None and last_ts <= _last_ts_by_symbol[symbol]:
         return  # Skip if not new data
-    
+
     _last_ts_by_symbol[symbol] = last_ts
-    
+
     # Count gaps in the data
     if isinstance(df.index, pd.DatetimeIndex):
         gaps = count_gaps(df.index, bar_secs=60)
     elif 'timestamp' in df.columns:
-        gaps = count_gaps(pd.to_datetime(df['timestamp']), bar_secs=60) 
+        gaps = count_gaps(pd.to_datetime(df['timestamp']), bar_secs=60)
     else:
         gaps = 0
-    
+
     try:
         # Log the ingestion event
         log_ingest(symbol=symbol, bars=len(df), gaps=gaps, lat_ms=latency_ms)
@@ -662,11 +645,9 @@ class TradingEnv(gym.Env):
     def render(self, mode='human'):
         pass
 
-import re
-import joblib
-import boto3
 import os
-from stable_baselines3 import PPO
+import re
+
 
 def load_all_models(bucket, run_id):
     """
@@ -704,8 +685,32 @@ def load_all_models(bucket, run_id):
             models[ticker]["PPO"] = model
     return models
 
+def _ib_keepalive_loop(ib):
+    """Keepalive loop for IB connection"""
+    import os
+    import time
+    backoff = 2
+    while True:
+        try:
+            if not ib.isConnected():
+                ib.disconnect()
+                ib.connect(os.getenv("IBKR_HOST","127.0.0.1"),
+                           int(os.getenv("IBKR_PORT","4002")),
+                           clientId=int(os.getenv("IBKR_CLIENT_ID","9002")),
+                           timeout=30)
+                backoff = 2
+            else:
+                _ = ib.reqCurrentTime()
+                backoff = 2
+            time.sleep(30)
+        except Exception:
+            try: ib.disconnect()
+            except: pass
+            time.sleep(min(backoff, 30))
+            backoff = min(backoff*2, 30)
+
 class RLTradingPipeline:
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: dict[str, Any]):
         self.config = config
         try:
             logging.info("Initializing IBKR connection...")
@@ -728,10 +733,10 @@ class RLTradingPipeline:
         self.status = "initialized"
         self.last_error = None
         self.notification_hook = None  # Extensibility: notification system
-        
+
         # Memory management
         self._memory_cleanup_interval = 50  # Cleanup every N iterations
-        
+
         # Enhanced resource monitoring for m5.large production safety
         try:
             from enhanced_resource_monitor import EnhancedResourceMonitor, ResourceThresholds
@@ -745,7 +750,7 @@ class RLTradingPipeline:
             logging.warning(f"Enhanced monitoring failed to initialize: {e}")
             self.resource_monitor = None
         self._iteration_count = 0
-        
+
         # Model caching system for faster inference
         self._model_cache = {}
         self._prediction_cache = {}
@@ -763,47 +768,48 @@ class RLTradingPipeline:
             'percent': process.memory_percent(),
             'available_mb': psutil.virtual_memory().available / (1024 * 1024)
         }
-    
+
     def _cleanup_memory(self):
         """Perform comprehensive memory cleanup"""
         import gc
+
         import pandas as pd
-        
+
         # Force garbage collection
         collected = gc.collect()
-        
+
         # Clean feature store
         if hasattr(feature_store, '_cleanup_if_needed'):
             feature_store._cleanup_if_needed()
-        
+
         # Clean prediction cache
         self._clear_expired_cache()
-        
+
         # Clear pandas categorical caches
         if hasattr(pd.api.types, 'CategoricalDtype'):
             try:
                 pd.api.types.pandas_dtype.clear_cache()
             except:
                 pass  # Method might not exist in all pandas versions
-        
+
         logging.info(f"Memory cleanup: collected {collected} objects")
-        
+
         # Log memory stats
         memory_stats = self._get_memory_usage()
         feature_stats = feature_store.get_memory_stats() if hasattr(feature_store, 'get_memory_stats') else {}
         logging.info(f"Memory usage: {memory_stats['rss_mb']:.1f}MB RSS, {memory_stats['percent']:.1f}%")
         if feature_stats:
             logging.info(f"Feature store: {feature_stats['memory_usage_mb']:.1f}MB, {feature_stats['total_rows']} rows")
-    
+
     def _get_cache_key(self, model_name, ticker, feature_hash):
         """Generate a cache key for model predictions"""
         return f"{model_name}_{ticker}_{feature_hash}"
-    
+
     def _hash_features(self, features):
         """Create a hash of feature data for caching"""
         import hashlib
-        import numpy as np
-        
+
+
         if hasattr(features, 'values'):
             # DataFrame or Series
             feature_str = str(features.values.tobytes())
@@ -811,75 +817,75 @@ class RLTradingPipeline:
             feature_str = str(features)
         else:
             feature_str = str(features)
-        
+
         return hashlib.sha256(feature_str.encode()).hexdigest()[:16]
-    
+
     def _get_cached_prediction(self, model_name, ticker, features):
         """Get cached prediction if available and not expired"""
         import time
-        
+
         feature_hash = self._hash_features(features)
         cache_key = self._get_cache_key(model_name, ticker, feature_hash)
-        
+
         if cache_key in self._prediction_cache:
             cached_data = self._prediction_cache[cache_key]
-            
+
             # Check if cache entry is still valid (TTL)
             if time.time() - cached_data['timestamp'] < self._cache_ttl_seconds:
                 return cached_data['prediction']
             else:
                 # Remove expired entry
                 del self._prediction_cache[cache_key]
-        
+
         return None
-    
+
     def _cache_prediction(self, model_name, ticker, features, prediction):
         """Cache a model prediction"""
         import time
-        
+
         feature_hash = self._hash_features(features)
         cache_key = self._get_cache_key(model_name, ticker, feature_hash)
-        
+
         # Implement LRU-like behavior: if cache is full, remove oldest entries
         if len(self._prediction_cache) >= self._cache_max_size:
             # Remove oldest 20% of cache entries
             sorted_items = sorted(
-                self._prediction_cache.items(), 
+                self._prediction_cache.items(),
                 key=lambda x: x[1]['timestamp']
             )
             remove_count = max(1, len(sorted_items) // 5)
             for old_key, _ in sorted_items[:remove_count]:
                 del self._prediction_cache[old_key]
-        
+
         self._prediction_cache[cache_key] = {
             'prediction': prediction,
             'timestamp': time.time()
         }
-    
+
     def _clear_expired_cache(self):
         """Remove expired cache entries"""
         import time
-        
+
         current_time = time.time()
         expired_keys = [
             key for key, data in self._prediction_cache.items()
             if current_time - data['timestamp'] > self._cache_ttl_seconds
         ]
-        
+
         for key in expired_keys:
             del self._prediction_cache[key]
-        
+
         if expired_keys:
             logging.info(f"Cleared {len(expired_keys)} expired cache entries")
-    
+
     def _predict_with_cache(self, model, model_name, ticker, features, deterministic=True):
         """Make prediction with caching for faster inference"""
-        
+
         # Try to get cached prediction first
         cached_pred = self._get_cached_prediction(model_name, ticker, features)
         if cached_pred is not None:
             return cached_pred
-        
+
         # Make new prediction
         if hasattr(model, 'predict'):
             if model_name == 'PPO' or 'PPO' in model_name:
@@ -890,16 +896,16 @@ class RLTradingPipeline:
                 prediction = model.predict(features)
         else:
             raise ValueError(f"Model {model_name} does not have a predict method")
-        
+
         # Cache the prediction
         self._cache_prediction(model_name, ticker, features, prediction)
-        
+
         return prediction
-    
+
     def _process_ticker_parallel(self, ticker):
         """Process a single ticker (for parallel execution)"""
         import time
-        
+
         start_time = time.time()
         result = {
             'ticker': ticker,
@@ -910,18 +916,18 @@ class RLTradingPipeline:
             'labels': None,
             'processing_time': 0
         }
-        
+
         try:
             logging.info(f"Fetching data for {ticker}...")
             df = self.market_data_adapter.fetch_data(ticker)
-            
+
             if df is None or df.empty:
                 result['error'] = f"No data for {ticker}"
                 return result
-            
+
             result['data'] = df
             logging.info(f"{ticker} raw data shape: {df.shape}")
-            
+
             # Feature engineering
             try:
                 X, y = generate_features(df)
@@ -932,19 +938,19 @@ class RLTradingPipeline:
             except Exception as fe_error:
                 result['error'] = f"Feature engineering failed for {ticker}: {str(fe_error)}"
                 logging.error(f"Feature engineering error for {ticker}: {fe_error}")
-                
+
         except Exception as e:
             result['error'] = f"Data fetching failed for {ticker}: {str(e)}"
             logging.error(f"Data fetching error for {ticker}: {e}")
-        
+
         result['processing_time'] = time.time() - start_time
         return result
-    
+
     async def _process_ticker_async(self, ticker):
         """Process a single ticker asynchronously (for async parallel execution)"""
-        import time
         import asyncio
-        
+        import time
+
         start_time = time.time()
         result = {
             'ticker': ticker,
@@ -955,21 +961,21 @@ class RLTradingPipeline:
             'labels': None,
             'processing_time': 0
         }
-        
+
         try:
             logging.info(f"PHASE4A-FIX: Async fetching data for {ticker}...")
-            
+
             # Run the sync fetch_data in an executor to avoid blocking
             loop = asyncio.get_event_loop()
             df = await loop.run_in_executor(None, self.market_data_adapter.fetch_data, ticker)
-            
+
             if df is None or df.empty:
                 result['error'] = f"No data for {ticker}"
                 return result
-            
+
             result['data'] = df
             logging.info(f"PHASE4A-FIX: {ticker} raw data shape: {df.shape}")
-            
+
             # Feature engineering (also run in executor for CPU-intensive work)
             try:
                 X, y = await loop.run_in_executor(None, generate_features, df)
@@ -980,28 +986,26 @@ class RLTradingPipeline:
             except Exception as fe_error:
                 result['error'] = f"Feature engineering failed for {ticker}: {str(fe_error)}"
                 logging.error(f"PHASE4A-FIX: Feature engineering error for {ticker}: {fe_error}")
-                
+
         except Exception as e:
             result['error'] = f"Data fetching failed for {ticker}: {str(e)}"
             logging.error(f"PHASE4A-FIX: Data fetching error for {ticker}: {e}")
-        
+
         result['processing_time'] = time.time() - start_time
         return result
-    
+
     def _process_tickers_parallel(self, tickers, max_workers=None):
         """Process multiple tickers in parallel using ProcessPoolExecutor to avoid asyncio issues"""
-        from concurrent.futures import ProcessPoolExecutor, as_completed
-        import os
-        
+
         if max_workers is None:
             # Use both CPU cores but leave some headroom for m5.large
             max_workers = min(2, len(tickers))
-        
+
         results = {}
         successful_results = []
-        
+
         logging.info(f"Processing {len(tickers)} tickers in parallel (max_workers={max_workers})...")
-        
+
         # For now, fall back to sequential processing due to asyncio complexity
         # This still benefits from the optimized feature engineering pipeline
         for ticker in tickers:
@@ -1012,16 +1016,16 @@ class RLTradingPipeline:
                 logging.info(f"✓ {ticker}: processed in {result['processing_time']:.2f}s")
             else:
                 logging.warning(f"✗ {ticker}: {result['error']}")
-        
+
         total_time = sum(r['processing_time'] for r in results.values())
         avg_time = total_time / len(results) if results else 0
         success_count = sum(1 for r in results.values() if r['success'])
-        
+
         logging.info(f"Sequential processing complete: {success_count}/{len(tickers)} successful")
         logging.info(f"Total processing time: {total_time:.2f}s, Average per ticker: {avg_time:.2f}s")
-        
+
         return results
-    
+
     def _process_tickers_sequential_batched(self, tickers, batch_size=2):
         """
         Process tickers in sequential batches for memory efficiency on m5.large
@@ -1031,48 +1035,48 @@ class RLTradingPipeline:
         """
         import gc
         import time
-        
+
         results = {}
         total_start_time = time.time()
-        
+
         # Split tickers into batches
         batches = [tickers[i:i+batch_size] for i in range(0, len(tickers), batch_size)]
-        
+
         logging.info(f"🔧 Sequential batch processing: {len(tickers)} tickers in {len(batches)} batches (size={batch_size})")
-        
+
         for batch_idx, batch_tickers in enumerate(batches):
             batch_start_time = time.time()
-            
+
             logging.info(f"Processing batch {batch_idx + 1}/{len(batches)}: {batch_tickers}")
-            
+
             # Process batch using existing method
             batch_results = {}
             for ticker in batch_tickers:
                 result = self._process_ticker_parallel(ticker)
                 batch_results[ticker] = result
                 results[ticker] = result
-                
+
                 if result['success']:
                     logging.info(f"✓ {ticker}: processed in {result['processing_time']:.2f}s")
                 else:
                     logging.warning(f"✗ {ticker}: {result['error']}")
-            
+
             batch_time = time.time() - batch_start_time
-            
+
             # Force garbage collection between batches to free memory
             collected = gc.collect()
             logging.info(f"Batch {batch_idx + 1} complete in {batch_time:.2f}s, freed {collected} objects")
-            
+
             # Memory cleanup between batches
             if hasattr(self, '_cleanup_memory'):
                 self._cleanup_memory()
-        
+
         total_time = time.time() - total_start_time
         success_count = sum(1 for r in results.values() if r['success'])
-        
+
         logging.info(f"Sequential batch processing complete: {success_count}/{len(tickers)} successful")
         logging.info(f"Total time: {total_time:.2f}s (avg {total_time/len(tickers):.2f}s/ticker)")
-        
+
         return results
 
     def run(self):
@@ -1080,13 +1084,13 @@ class RLTradingPipeline:
         phase4a_start_time = time.time()
         logger.info("PHASE4A: Starting execution with optimizations enabled")
         logger.info(f"PHASE4A: Config - Parallel={self.config.get('ENABLE_PARALLEL_PROCESSING', True)}, Optimized Features={os.getenv('USE_OPTIMIZED_FEATURES', 'true')}")
-        
+
         self.status = "running"
         log_trade_results(f"pipeline_start: run_id={self.run_id}")
         try:
             self._main_loop()
             self.status = "completed"
-            
+
             # PHASE4A: Performance results
             phase4a_elapsed = time.time() - phase4a_start_time
             logger.info(f"PHASE4A: Execution completed in {phase4a_elapsed:.2f} seconds")
@@ -1094,7 +1098,7 @@ class RLTradingPipeline:
                 logger.warning(f"PHASE4A: Target <2s missed. Actual: {phase4a_elapsed:.2f}s")
             else:
                 logger.info(f"PHASE4A: SUCCESS - Target <2s achieved! ({phase4a_elapsed:.2f}s)")
-            
+
             log_trade_results(f"pipeline_complete: run_id={self.run_id}")
         except Exception as e:
             self.status = "failed"
@@ -1109,7 +1113,7 @@ class RLTradingPipeline:
                 logger.warning(f"PHASE4A: Target <2s missed. Actual: {phase4a_elapsed:.2f}s")
             else:
                 logger.info(f"PHASE4A: Time target met despite failure ({phase4a_elapsed:.2f}s)")
-            
+
             logger.error(f"Pipeline failed: {e}")
             self.notify(f"Pipeline failed: {e}")
             raise
@@ -1128,12 +1132,12 @@ class RLTradingPipeline:
             try:
                 self._iteration_count += 1
                 logging.info(f"Starting main loop iteration {self._iteration_count}...")
-                
+
                 # Periodic memory cleanup
                 if self._iteration_count % self._memory_cleanup_interval == 0:
                     logging.info("Performing memory cleanup...")
                     self._cleanup_memory()
-                
+
                 logging.info("Fetching market data...")
                 # List of tickers you want to fetch (using your mapping for yfinance)
                 tickers = self.config.get("tickers", DEFAULT_TICKERS)
@@ -1161,24 +1165,25 @@ class RLTradingPipeline:
                 # Use parallel processing for data fetching and feature engineering
                 if self.config.get("use_mock_data", False):
                     raise ValueError("Mock data is disabled. Using only real IBKR data.")
-                
+
                 # SAFETY CHECK: Historical training integration with market hours detection
                 if self.config.get("enable_historical_training", False):
                     try:
-                        from market_hours_detector import is_historical_training_safe, MarketHoursDetector
+                        from market_hours_detector import (
+                            MarketHoursDetector,
+                        )
                         detector = MarketHoursDetector()
-                        
+
                         # Get detailed schedule info
                         schedule = detector.create_training_schedule()
-                        
+
                         if schedule['is_safe_now']:
                             logging.info(f"✅ HISTORICAL TRAINING ENABLED: {schedule['reason']}")
                             logging.info(f"⏰ Max safe duration: {schedule['max_safe_duration_hours']:.1f} hours")
-                            
+
                             # Import and use historical replay system
-                            from historical_replay import HistoricalReplay, ReplayConfig, ReplayMode
-                            from replay_gym_env import ReplayTradingEnv
-                            
+                            from historical_replay import ReplayConfig, ReplayMode
+
                             # Configure historical replay for training
                             replay_config = ReplayConfig(
                                 replay_mode=ReplayMode.RANDOM_WINDOW,
@@ -1186,35 +1191,36 @@ class RLTradingPipeline:
                                 lookback_days=30,
                                 max_memory_mb=500  # Limit for m5.large
                             )
-                            
+
                             logging.info("🔄 Switching to HISTORICAL TRAINING MODE")
                             # Historical training will be handled by existing replay system
-                            
+
                         else:
                             logging.info(f"❌ HISTORICAL TRAINING DISABLED: {schedule['reason']}")
                             if schedule['next_market_open']:
                                 logging.info(f"⏰ Next safe window: {schedule['next_market_open']}")
-                                
+
                     except Exception as e:
                         logging.error(f"Historical training safety check failed: {e}")
                         logging.info("Continuing with live IBKR data only")
-                
+
                 # PHASE 4A OPTIMIZATION: Enhanced parallel processing with ThreadPoolExecutor
                 # Direct ThreadPoolExecutor integration with performance timing
                 import time
                 processing_start_time = time.time()
-                
+
                 # Phase 4A Feature Flag
                 # MODIFIED: Force sequential to avoid IB rate limits
                 ENABLE_PARALLEL_PROCESSING = self.config.get('ENABLE_PARALLEL_PROCESSING', False)  # Changed to False
                 use_optimized_parallel = self.config.get("use_optimized_parallel", False)  # Changed to False
                 use_sequential = self.config.get("use_sequential_processing", True)  # Changed to True
-                
+
                 if ENABLE_PARALLEL_PROCESSING and not use_sequential:
                     logging.info("PHASE4A-FIX: Using async parallel processing")
                     import asyncio
+
                     import nest_asyncio
-                    
+
                     async def process_all_tickers_async():
                         tasks = []
                         for ticker in tickers:
@@ -1222,8 +1228,8 @@ class RLTradingPipeline:
                             task = self._process_ticker_async(ticker)
                             tasks.append(task)
                         results = await asyncio.gather(*tasks, return_exceptions=True)
-                        return dict(zip(tickers, results))
-                    
+                        return dict(zip(tickers, results, strict=False))
+
                     try:
                         # Handle event loop properly
                         try:
@@ -1241,11 +1247,11 @@ class RLTradingPipeline:
                             # No event loop, create one
                             logging.info(f"PHASE4A-FIX: No event loop found ({re}), creating new one")
                             parallel_results = asyncio.run(process_all_tickers_async())
-                        
+
                         # Log success
                         success_count = sum(1 for r in parallel_results.values() if isinstance(r, dict) and r.get('success', False))
                         logging.info(f"PHASE4A-FIX: Async parallel processing complete: {success_count}/{len(tickers)} successful")
-                        
+
                     except Exception as e:
                         logging.error(f"PHASE4A-FIX: Async parallel processing failed: {e}")
                         logging.info("PHASE4A-FIX: Falling back to sequential processing")
@@ -1263,18 +1269,18 @@ class RLTradingPipeline:
                 else:
                     logging.info("PHASE4A: Sequential processing (fallback) with batch_size=2")
                     parallel_results = self._process_tickers_sequential_batched(tickers, batch_size=2)
-                
+
                 processing_end_time = time.time()
                 processing_duration = processing_end_time - processing_start_time
                 logging.info(f"PHASE4A: Total processing time: {processing_duration:.2f} seconds")
-                
+
                 # Extract results for further processing
                 raw_data = {}
                 features = {}
                 labels = {}
                 X_train = pd.DataFrame()
                 y_train = pd.Series(dtype=np.float32)
-                
+
                 for ticker, result in parallel_results.items():
                     if result['success']:
                         raw_data[ticker] = result['data']
@@ -1283,7 +1289,7 @@ class RLTradingPipeline:
                             labels[ticker] = result['labels']
                         logging.info(f"✓ {ticker}: data and features ready")
                         print(f"{ticker} columns: {result['data'].columns}")
-                        
+
                         # Log market ingestion event for dashboard
                         processing_time_ms = int(result.get('processing_time', 0) * 1000)
                         emit_ingest_event_if_new(ticker, result['data'], processing_time_ms)
@@ -1294,7 +1300,7 @@ class RLTradingPipeline:
                 # --- Regime Detection and PPO Training (Post-Parallel Processing) ---
                 for ticker in features.keys():
                     df = raw_data[ticker]  # Get the raw data for regime detection
-                    
+
                     # --- Regime Detection and Alerting ---
                     try:
                         regime = detect_regime(df['close'])
@@ -1315,7 +1321,7 @@ class RLTradingPipeline:
                     if ticker in features and ticker in labels:
                         X_train, y_train = features[ticker], labels[ticker]
                         logging.info(f"{ticker}: features and labels updated from parallel processing")
-                
+
                 # Log resource usage after parallel processing
                 cpu = psutil.cpu_percent()
                 mem = psutil.virtual_memory().percent
@@ -1336,6 +1342,7 @@ class RLTradingPipeline:
                 # This enriches each ticker's market DataFrame in raw_data with simple news features.
                 try:
                     import os
+
                     from fetch_and_merge_news import get_combined_news
                     from market_data_config import IBKR_SYMBOLS
 
@@ -1418,7 +1425,7 @@ class RLTradingPipeline:
 
                 # Load last trained timestamp/index
                 try:
-                    with open(LAST_TRAINED_FILE, "r") as f:
+                    with open(LAST_TRAINED_FILE) as f:
                         last_trained_time = f.read().strip()
                         if last_trained_time:
                             # Convert to int (or pd.to_datetime if using datetime)
@@ -1478,8 +1485,12 @@ class RLTradingPipeline:
                             )
 
                 # --- ML Model Training and Prediction Block ---
-                from sklearn.linear_model import SGDClassifier, Perceptron, PassiveAggressiveClassifier
                 from sklearn.ensemble import RandomForestClassifier
+                from sklearn.linear_model import (
+                    PassiveAggressiveClassifier,
+                    Perceptron,
+                    SGDClassifier,
+                )
                 logging.warning("ML SYSTEM: Running ML model training and prediction for all tickers.")
                 from sklearn.metrics import accuracy_score, confusion_matrix
 
@@ -1722,7 +1733,7 @@ class RLTradingPipeline:
                                 X_test_pred = X_test.drop(columns=cols_to_drop)
                             else:
                                 X_test_pred = X_test
-                                
+
                             # Use cached prediction for faster inference
                             ml_preds = self._predict_with_cache(model, model_name, ticker, X_test_pred)
                             ml_preds = np.array(ml_preds).flatten()
@@ -2106,10 +2117,10 @@ class RLTradingPipeline:
             except Exception as _e:
                 logging.warning(f"Failed to load previous PPO for {ticker}: {_e}. Starting fresh.")
                 # Optimized PPO for m5.large memory efficiency
-                model = PPO("MlpPolicy", env, verbose=0, 
+                model = PPO("MlpPolicy", env, verbose=0,
                            n_steps=1024, batch_size=32, n_epochs=8)
         else:
-            # Optimized PPO for m5.large memory efficiency  
+            # Optimized PPO for m5.large memory efficiency
             model = PPO("MlpPolicy", env, verbose=0,
                        n_steps=1024, batch_size=32, n_epochs=8)
 
@@ -2207,8 +2218,8 @@ class RLTradingPipeline:
         """Enhanced ensemble training with diverse hyperparameters"""
         self.ensemble_models = []
         self.model_weights = []  # Track model performance for weighted voting
-        
-        # Optimized hyperparameters for m5.large memory efficiency  
+
+        # Optimized hyperparameters for m5.large memory efficiency
         param_sets = [
             {'learning_rate': 3e-4, 'n_steps': 1024, 'batch_size': 32, 'n_epochs': 8},  # OPTIMIZED: Reduced memory usage
             {'learning_rate': 1e-4, 'n_steps': 512, 'batch_size': 16, 'n_epochs': 5},   # OPTIMIZED: Ultra-light for stability
@@ -2216,33 +2227,33 @@ class RLTradingPipeline:
             {'learning_rate': 2e-4, 'n_steps': 768, 'batch_size': 24, 'n_epochs': 6},   # OPTIMIZED: Medium efficiency
             {'learning_rate': 4e-4, 'n_steps': 512, 'batch_size': 16, 'n_epochs': 8}    # OPTIMIZED: Memory-safe fallback
         ]
-        
+
         for i in range(n_models):
             env = TradingEnv(train_data)
-            
+
             if diverse_params and i < len(param_sets):
                 params = param_sets[i]
                 model = PPO("MlpPolicy", env, verbose=0, seed=i, **params)
             else:
                 model = PPO("MlpPolicy", env, verbose=0, seed=i)
-            
+
             # Train and evaluate performance
             model.learn(total_timesteps=15000)  # Increased training steps
-            
+
             # Evaluate model performance for weighting
             performance = self._evaluate_model_performance(model, train_data)
             self.model_weights.append(performance)
-            
+
             self.ensemble_models.append(model)
             logging.info(f"Trained ensemble model {i+1}/{n_models}, performance: {performance:.4f}")
-            
+
         # Normalize weights
         total_weight = sum(self.model_weights)
         if total_weight > 0:
             self.model_weights = [w / total_weight for w in self.model_weights]
         else:
             self.model_weights = [1.0 / n_models] * n_models
-            
+
         logging.info(f"Trained enhanced ensemble of {n_models} PPO models with weighted voting")
 
     def _evaluate_model_performance(self, model, data, max_steps=500):
@@ -2252,14 +2263,14 @@ class RLTradingPipeline:
         done = False
         total_reward = 0
         steps = 0
-        
+
         while not done and steps < max_steps:
             action, _ = model.predict(obs, deterministic=True)
             obs, reward, terminated, truncated, info = env.step(action)
             done = terminated or truncated
             total_reward += reward
             steps += 1
-            
+
         # Normalize by steps for fair comparison
         return total_reward / max(steps, 1)
 
@@ -2270,17 +2281,17 @@ class RLTradingPipeline:
         done = False
         total_reward = 0
         actions = []
-        
+
         # Track ensemble statistics
         high_confidence_trades = 0
         low_confidence_holds = 0
-        
+
         while not done:
             # Get predictions from all models with their probabilities
             model_predictions = []
             for i, model in enumerate(self.ensemble_models):
                 action, log_prob = model.predict(obs, deterministic=False)
-                
+
                 # Handle confidence score calculation safely
                 if log_prob is not None:
                     try:
@@ -2292,36 +2303,36 @@ class RLTradingPipeline:
                         confidence_score = 0.5  # Default moderate confidence
                 else:
                     confidence_score = 0.5  # Default when no probability available
-                
+
                 model_predictions.append({
                     'action': action,
                     'confidence': confidence_score,
                     'weight': self.model_weights[i]
                 })
-            
+
             # Calculate weighted votes for each action
             action_scores = {0: 0.0, 1: 0.0, 2: 0.0}  # hold, buy, sell
             total_weighted_confidence = 0.0
-            
+
             for pred in model_predictions:
                 action = int(pred['action'])
                 weighted_score = pred['weight'] * pred['confidence']
                 action_scores[action] += weighted_score
                 total_weighted_confidence += weighted_score
-            
+
             # Find best action and calculate ensemble confidence
             best_action = max(action_scores, key=action_scores.get)
             best_score = action_scores[best_action]
             ensemble_confidence = best_score / max(total_weighted_confidence, 1e-6)
-            
+
             # Apply confidence thresholding with risk management
             final_action = best_action
-            
+
             if ensemble_confidence < confidence_threshold:
                 # Low confidence: default to hold (conservative approach)
                 final_action = 0
                 low_confidence_holds += 1
-                
+
             elif best_action != 0 and ensemble_confidence > confidence_threshold:
                 # High confidence non-hold action
                 # Additional risk check: avoid high-risk actions in volatile conditions
@@ -2333,7 +2344,7 @@ class RLTradingPipeline:
                         high_confidence_trades += 1
                 else:
                     high_confidence_trades += 1
-            
+
             # Execute action
             obs, reward, terminated, truncated, info = env.step(final_action)
             done = terminated or truncated
@@ -2343,36 +2354,36 @@ class RLTradingPipeline:
                 'confidence': ensemble_confidence,
                 'original_action': best_action
             })
-        
+
         # Log ensemble performance statistics
         total_actions = len(actions)
         if total_actions > 0:
             avg_confidence = np.mean([a['confidence'] for a in actions])
-            logging.info(f"Ensemble trading complete:")
+            logging.info("Ensemble trading complete:")
             logging.info(f"  High confidence trades: {high_confidence_trades}/{total_actions} ({100*high_confidence_trades/total_actions:.1f}%)")
             logging.info(f"  Low confidence holds: {low_confidence_holds}/{total_actions} ({100*low_confidence_holds/total_actions:.1f}%)")
             logging.info(f"  Average confidence: {avg_confidence:.3f}")
             logging.info(f"  Total reward: {total_reward:.4f}")
-        
+
         return total_reward, actions
-    
+
     def _calculate_volatility_position_size(self, price_data, base_size=1, lookback_period=20, target_volatility=0.15):
         """Calculate position size based on volatility using Kelly Criterion approach"""
         import pandas as pd
-        
+
         if len(price_data) < lookback_period:
             return base_size
-            
+
         # Calculate recent returns
         prices = pd.Series(price_data[-lookback_period:])
         returns = prices.pct_change().dropna()
-        
+
         if len(returns) < 2:
             return base_size
-            
+
         # Calculate historical volatility (annualized)
         volatility = returns.std() * np.sqrt(252)  # 252 trading days per year
-        
+
         # Volatility-based position sizing
         if volatility > 0:
             # Scale position inversely with volatility
@@ -2380,13 +2391,13 @@ class RLTradingPipeline:
             vol_multiplier = np.clip(vol_multiplier, 0.1, 3.0)  # Limit between 10% and 300% of base size
         else:
             vol_multiplier = 1.0
-            
+
         # Kelly Criterion enhancement (simplified)
         if len(returns) > 5:
             win_rate = (returns > 0).mean()
             avg_win = returns[returns > 0].mean() if (returns > 0).any() else 0
             avg_loss = abs(returns[returns < 0].mean()) if (returns < 0).any() else 0.01
-            
+
             if avg_loss > 0:
                 kelly_ratio = (win_rate * avg_win - (1 - win_rate) * avg_loss) / avg_win
                 kelly_ratio = np.clip(kelly_ratio, 0.1, 1.0)  # Conservative Kelly
@@ -2394,25 +2405,25 @@ class RLTradingPipeline:
                 kelly_ratio = 0.5
         else:
             kelly_ratio = 0.5
-            
+
         # Combine volatility and Kelly sizing
         smart_size = base_size * vol_multiplier * kelly_ratio
         smart_size = np.clip(smart_size, 0.1, base_size * 2)  # Never more than 2x or less than 10% of base
-        
+
         return round(smart_size, 2)
-    
+
     def _get_market_regime_multiplier(self, price_data, lookback=30):
         """Adjust position size based on market regime (trending vs mean-reverting)"""
         if len(price_data) < lookback:
             return 1.0
-            
+
         prices = pd.Series(price_data[-lookback:])
-        
+
         # Calculate trend strength (R-squared of linear regression)
         x = np.arange(len(prices))
         correlation = np.corrcoef(x, prices)[0, 1]
         trend_strength = correlation ** 2
-        
+
         # In strong trending markets, increase position size slightly
         # In choppy markets, decrease position size
         if trend_strength > 0.7:  # Strong trend
@@ -2421,7 +2432,7 @@ class RLTradingPipeline:
             return 0.8
         else:  # Moderate trend
             return 1.0
-    
+
     def get_smart_position_size(self, ticker, current_price_data, base_position=1):
         """
         Calculate optimal position size based on multiple factors:
@@ -2432,31 +2443,31 @@ class RLTradingPipeline:
         """
         # Base volatility sizing
         vol_size = self._calculate_volatility_position_size(
-            current_price_data, 
+            current_price_data,
             base_size=base_position,
             target_volatility=0.12  # 12% target annual volatility
         )
-        
+
         # Market regime adjustment
         regime_multiplier = self._get_market_regime_multiplier(current_price_data)
-        
+
         # Portfolio exposure check (don't over-concentrate)
         try:
             from market_data_config import MAX_POSITION_EXPOSURE
             max_position = MAX_POSITION_EXPOSURE
         except:
             max_position = 3
-            
+
         # Final smart position size
         smart_position = vol_size * regime_multiplier
         smart_position = min(smart_position, max_position)  # Respect risk limits
         smart_position = max(smart_position, 0.1)  # Minimum position size
-        
+
         logging.info(f"Smart position sizing for {ticker}:")
         logging.info(f"  Volatility size: {vol_size:.2f}")
         logging.info(f"  Regime multiplier: {regime_multiplier:.2f}")
         logging.info(f"  Final position: {smart_position:.2f}")
-        
+
         return smart_position
 
 # Example config for testing (use canonical IBKR futures defined in market_data_config)
@@ -2473,7 +2484,6 @@ default_config = {
     "drift_detection_threshold": 10.0  # Relaxed for mock data; set to 3.0 for production
 }
 
-import time
 import os
 
 data_dir = os.getenv("DATA_DIR", "/home/ubuntu/data")
@@ -2484,29 +2494,6 @@ if __name__ == "__main__":
         pipeline.run()
         # Sleep for 2 minutes (adjust as needed)
         time.sleep(120)
-
-
-import os, threading, time
-def _ib_keepalive_loop(ib):
-    backoff = 2
-    while True:
-        try:
-            if not ib.isConnected():
-                ib.disconnect()
-                ib.connect(os.getenv("IBKR_HOST","127.0.0.1"),
-                           int(os.getenv("IBKR_PORT","4002")),
-                           clientId=int(os.getenv("IBKR_CLIENT_ID","9002")),
-                           timeout=30)
-                backoff = 2
-            else:
-                _ = ib.reqCurrentTime()
-                backoff = 2
-            time.sleep(30)
-        except Exception:
-            try: ib.disconnect()
-            except: pass
-            time.sleep(min(backoff, 30))
-            backoff = min(backoff*2, 30)
 
 
 def _execute_order_single_client(symbol:str, side:str, qty:int):

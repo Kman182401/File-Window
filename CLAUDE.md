@@ -494,3 +494,4 @@ if any([
 - ✅ Improve performance over time
 
 **Any change that breaks these guarantees will be automatically rolled back.**
+- From now on when restarting the Gateway only restart the Gateway and leave the VNC display untouched unless explicitlly told otherwise and if you feel restarting the display is ever necessary let me know because I am not opposed to it at all id just like to avoind it if possible.

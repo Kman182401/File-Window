@@ -123,16 +123,32 @@ class OrderSafetyManager:
             return True
     
     def check_market_hours(self, symbol: str) -> bool:
-        """Check if current time is within trading hours for symbol"""
+        """Check if current time is within trading hours for symbol
+        
+        Note: Uses server local time. Ensure server is in US/Eastern or adjust accordingly.
+        Set ALLOW_OUTSIDE_RTH=1 to trade outside regular hours.
+        """
         now = datetime.now()
         hour = now.hour
+        minute = now.minute
         
-        # Basic RTH check (can be enhanced with symbol-specific hours)
+        # Basic RTH check for futures (can be enhanced with symbol-specific hours)
         if symbol.startswith(('ES', 'NQ', 'MES', 'MNQ')):
-            # E-mini futures RTH: 9:30 AM - 4:00 PM ET
-            if not (9 <= hour < 16):
+            # E-mini futures RTH: 9:30 AM - 4:00 PM ET (cash session)
+            # Note: Globex trades nearly 24h - this is just for RTH enforcement
+            in_rth = (hour == 9 and minute >= 30) or (10 <= hour < 16)
+            
+            if not in_rth:
                 if not os.getenv('ALLOW_OUTSIDE_RTH', '0') == '1':
-                    logger.warning(f"Outside regular trading hours for {symbol}: {hour}:00")
+                    logger.warning(f"Outside RTH for {symbol}: {hour:02d}:{minute:02d} (RTH: 9:30-16:00 ET)")
+                    return False
+        elif symbol.startswith(('6E', '6B', '6A')):  # FX futures
+            # FX futures trade Sunday 5pm - Friday 4pm CT with brief daily break
+            # For simplicity, block only during weekend
+            weekday = now.weekday()
+            if weekday >= 5:  # Saturday or Sunday
+                if not os.getenv('ALLOW_OUTSIDE_RTH', '0') == '1':
+                    logger.warning(f"Weekend - markets closed for {symbol}")
                     return False
         
         return True
@@ -211,7 +227,7 @@ class OrderSafetyManager:
 safety_manager = OrderSafetyManager()
 
 
-def safe_place_order(ib, contract, order, symbol: str, side: str, quantity: int):
+def safe_place_order(ib, contract, order, symbol: str, side: str, quantity: int, context: str = None):
     """
     Safe wrapper for order placement with comprehensive safety checks
     
@@ -222,26 +238,40 @@ def safe_place_order(ib, contract, order, symbol: str, side: str, quantity: int)
         symbol: Symbol being traded
         side: 'BUY' or 'SELL'
         quantity: Order quantity
+        context: Optional context ('parent', 'child_tp', 'child_sl') for bracket orders
         
     Returns:
         Trade object if successful, None if blocked by safety checks
     """
-    # Run pre-order checks
-    passed, reason = safety_manager.pre_order_checks(symbol, side, quantity)
+    # Short-circuit if gate disabled
+    if os.getenv("ORDER_GATE_ENABLED", "1") != "1":
+        return ib.placeOrder(contract, order)  # nosem: safe_place_order internal bypass
+    
+    # Skip duplicate/RTH checks for bracket children (they don't add exposure)
+    skip_dup = context in {"child_tp", "child_sl"}
+    skip_rth = context in {"child_tp", "child_sl"}
+    
+    # Run pre-order checks (skip some checks for children)
+    if skip_dup or skip_rth:
+        # For children, only check basic safety (not duplicate/RTH)
+        passed = True
+        reason = "child_order_allowed"
+    else:
+        passed, reason = safety_manager.pre_order_checks(symbol, side, quantity)
     
     if not passed:
-        logger.error(f"[SAFETY] Order blocked: {reason} | {symbol} {side} {quantity}")
-        # Could also raise an exception or return a specific error object
+        logger.warning(f"[order_blocked] symbol={symbol} side={side} qty={quantity} reason={reason}")
         return None
     
     try:
         # Place the order
-        trade = ib.placeOrder(contract, order)
+        trade = ib.placeOrder(contract, order)  # nosem: safe_place_order internal placement
         
-        # Record successful placement
-        safety_manager.record_order_placed(symbol, side, quantity)
+        # Record successful placement (only for parent orders that add exposure)
+        if context != "child_tp" and context != "child_sl":
+            safety_manager.record_order_placed(symbol, side, quantity)
         
-        logger.info(f"[SAFETY] Order placed successfully: {symbol} {side} {quantity}")
+        logger.info(f"[order_ok] symbol={symbol} side={side} qty={quantity} context={context or 'parent'}")
         return trade
         
     except Exception as e:

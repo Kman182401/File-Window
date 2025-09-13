@@ -1,0 +1,4 @@
+# file: /home/ubuntu/order_safety_wrapper.py
+# hypothesis_version: 6.138.15
+
+[0.0, 100000.0, '0', '0.02', '1', '1!', '2', '20', '3', '5', '6A', '6B', '6E', 'ALLOW_OUTSIDE_RTH', 'BUY', 'DEDUP_WINDOW_SECONDS', 'ERROR_THRESHOLD', 'ERROR_WINDOW_MINUTES', 'ES', 'GC', 'MAX_DAILY_LOSS_PCT', 'MAX_ORDER_SIZE', 'MAX_TRADES_PER_DAY', 'MES', 'MGC', 'MNQ', 'NQ', 'ORDER_GATE_ENABLED', 'checks_passed', 'child_order_allowed', 'child_sl', 'child_tp', 'duplicate_order', 'outside_market_hours', 'safe_place_order', 'safety_manager', 'symbol_not_allowed']

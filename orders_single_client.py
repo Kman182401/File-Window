@@ -1,7 +1,11 @@
 from typing import Optional, Tuple
 import os, time
+import logging
 from ib_insync import IB, MarketOrder, LimitOrder, StopOrder
 from market_data_ibkr_adapter import get_ibkr_front_month_contract
+from order_safety_wrapper import safe_place_order
+
+logger = logging.getLogger(__name__)
 
 _ib: Optional[IB] = None
 
@@ -85,7 +89,16 @@ def place_bracket_order(symbol: str, side: str, qty: int,
         return {"placed": False, "dry_run": True, "entry": entry_px, "tp": tp_px, "sl": sl_px,
                 "symbol": symbol, "side": side, "qty": qty}
 
-    trade = _ib.placeOrder(contract, parent)
+    # Wrap parent order with safety checks (this creates exposure)
+    symbol_name = getattr(contract, "symbol", getattr(contract, "localSymbol", ""))
+    trade = safe_place_order(_ib, contract, parent, 
+                           symbol=symbol_name, side=side, quantity=qty, context="parent")
+    
+    if trade is None:
+        logger.warning(f"[bracket_parent_blocked] {symbol_name} {side} x{qty}")
+        return {"placed": False, "blocked": True, "reason": "safety_check_failed",
+                "symbol": symbol, "side": side, "qty": qty}
+    
     while not trade.orderStatus or not trade.orderStatus.status:
         _ib.sleep(0.05)
     parent_id = trade.order.orderId
@@ -95,6 +108,8 @@ def place_bracket_order(symbol: str, side: str, qty: int,
     take.ocaGroup = f"OCA_{int(time.time()*1000)}"
     stop.ocaGroup = take.ocaGroup
 
+    # Children stay direct (they manage exposure, don't create it)
+    # Could wrap with context="child_tp" and context="child_sl" for consistency
     _ib.placeOrder(contract, take)
     _ib.placeOrder(contract, stop)
 

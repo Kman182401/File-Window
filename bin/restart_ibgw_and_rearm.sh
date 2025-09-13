@@ -12,7 +12,12 @@ x11vnc -display :1 -rfbport 5900 -localhost -forever -shared -repeat -ncache 10 
 tmux kill-session -t ibgw 2>/dev/null || true
 tmux new-session -d -s ibgw -n ibgw "bash -lc 'DISPLAY=:1 ~/Jts/ibgateway/1039/ibgateway'"
 echo
-echo "Now do this in VNC (localhost:5901):"
+echo "VNC server running on localhost:5900 (EC2 side)"
+echo "To connect from your laptop:"
+echo "  ssh -L 5901:127.0.0.1:5900 ubuntu@<EC2_HOST>"
+echo "  Then open VNC viewer to localhost:5901"
+echo ""
+echo "After connecting, do this in VNC:"
 echo "  1) Configure → API → Precautions → Apply → OK"
 echo "  2) Configure → API → Settings → Apply; flip 4002→4003→Apply→4002→Apply→OK"
 echo "Then run: IBKR_CLIENT_ID=9003 python3 ~/smoke_ib_connect.py"
