@@ -124,26 +124,42 @@ class IBKRIngestor:
         normalized = symbol.strip().upper()
         return self.SYMBOL_ALIASES.get(normalized, symbol)
 
-    def __init__(self, host=None, port=None, clientId=None):
+    def __init__(self, host=None, port=None, clientId=None, ib=None):
         import os
         import time
         import threading
-        
+
         # Get connection params from config or environment
         self.host = host or config_get("ibkr.host") or os.getenv("IBKR_HOST", "127.0.0.1")
         self.port = int(port or config_get("ibkr.port") or os.getenv("IBKR_PORT", "4002"))
         self.clientId = int(clientId or config_get("ibkr.client_id") or os.getenv("IBKR_CLIENT_ID", "9002"))
-        
-        # Initialize health monitor (can be disabled for testing)
-        if not os.getenv('DISABLE_HEALTH_MONITOR'):
+
+        # Initialize health monitor ONLY if not in single-socket mode AND not using external IB
+        self.health_monitor = None
+
+        # Check if we should skip monitor (single-socket mode or external IB provided)
+        disable_monitor = os.getenv("DISABLE_HEALTH_MONITOR", "0") in ("1", "true", "True", "YES", "yes")
+
+        if not disable_monitor and ib is None:
+            # Only spawn monitor if NOT in single-socket mode AND not using external IB
             global health_monitor
-            health_monitor = IBKRHealthMonitor(self.host, self.port, self.clientId)
-            health_monitor.start_monitoring()
+            self.health_monitor = IBKRHealthMonitor(self.host, self.port, self.clientId)
+            health_monitor = self.health_monitor
+            self.health_monitor.start_monitoring()
+            print(f"[IBKRIngestor] Health monitor started (host={self.host}, port={self.port})")
         else:
-            print("[IBKRIngestor] Health monitor disabled for testing")
-        
-        self.ib = IB()
-        self.connected = False
+            print(f"[IBKRIngestor] Health monitor disabled (single-socket mode={disable_monitor}, external IB={ib is not None})")
+
+        # Use provided IB connection or create new one
+        if ib is not None:
+            self.ib = ib
+            self.connected = ib.isConnected()
+            self.external_ib = True
+            print(f"[IBKRIngestor] Using external IB connection (connected={self.connected})")
+        else:
+            self.ib = IB()
+            self.connected = False
+            self.external_ib = False
         self.auto_reconnect = True
         self.reconnect_attempts = 0
         self.max_reconnect_attempts = config_get("ibkr.retry_attempts", 10)
@@ -159,18 +175,24 @@ class IBKRIngestor:
             details={"client_id": self.clientId}
         )
         
-        # Initial connection with enhanced error handling
-        self._connect()
-        
-        # Start auto-reconnect monitor thread (can be disabled for testing)
-        if not os.getenv('DISABLE_HEALTH_MONITOR'):
+        # Initial connection with enhanced error handling (skip if using external IB)
+        if not self.external_ib:
+            self._connect()
+
+        # Start auto-reconnect monitor thread (can be disabled for testing or external IB)
+        if not os.getenv('DISABLE_HEALTH_MONITOR') and not self.external_ib:
             self._monitor_thread = threading.Thread(target=self._connection_monitor, daemon=True)
             self._monitor_thread.start()
         else:
-            print("[IBKRIngestor] Connection monitor thread disabled for testing")
+            print("[IBKRIngestor] Connection monitor thread disabled")
         
     def _connect(self):
         """Internal connection method with retry logic."""
+        # If using external IB connection, don't try to reconnect
+        if self.external_ib:
+            self.connected = self.ib.isConnected()
+            return self.connected
+
         with self._connection_lock:
             try:
                 if self.connected and self.ib.isConnected():
@@ -229,6 +251,15 @@ class IBKRIngestor:
                 
     def ensure_connected(self):
         """Ensure connection is active before operations."""
+        # If using external IB connection, just check if it's connected
+        if self.external_ib:
+            self.connected = self.ib.isConnected()
+            if not self.connected:
+                print(f"[IBKRIngestor] External IB connection lost! Connected={self.connected}")
+                # Don't try to reconnect - let the single socket handler deal with it
+                raise RuntimeError("External IB connection lost - single socket handler should manage reconnection")
+            return self.connected
+
         if not self.connected or not self.ib.isConnected():
             print("[IBKRIngestor] Connection not active, reconnecting...")
             return self._connect()

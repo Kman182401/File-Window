@@ -7,6 +7,99 @@ import sys
 
 sys.path.append('/home/ubuntu')
 
+# --- SOCKET CONNECT TRACER (TEMP) ---
+import socket, traceback, time, os, pathlib, signal
+_orig_sock_connect = socket.socket.connect
+_orig_sock_connect_ex = socket.socket.connect_ex
+TRACE_LOG = pathlib.Path.home() / "logs" / "ib_connect_traces.log"
+TRACE_LOG.parent.mkdir(parents=True, exist_ok=True)
+
+def _connect_tracer(self, addr):
+    try:
+        host, port = addr
+    except Exception:
+        return _orig_sock_connect(self, addr)
+    if str(host) in ("127.0.0.1","::1","localhost") and int(port) == int(os.getenv("IBKR_PORT","4002")):
+        with TRACE_LOG.open("a") as f:
+            f.write(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] socket.connect({host}:{port})\n")
+            traceback.print_stack(file=f, limit=30)
+    return _orig_sock_connect(self, addr)
+
+def _connect_ex_tracer(self, addr):
+    try:
+        host, port = addr
+    except Exception:
+        return _orig_sock_connect_ex(self, addr)
+    if str(host) in ("127.0.0.1","::1","localhost") and int(port) == int(os.getenv("IBKR_PORT","4002")):
+        with TRACE_LOG.open("a") as f:
+            f.write(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] socket.connect_ex({host}:{port})\n")
+            traceback.print_stack(file=f, limit=30)
+    return _orig_sock_connect_ex(self, addr)
+
+socket.socket.connect = _connect_tracer
+socket.socket.connect_ex = _connect_ex_tracer
+# --- END SOCKET CONNECT TRACER ---
+
+# --- IB GUARD (TEMP) ---
+from ib_insync import IB
+_first_ib = True
+_first_connect = True
+
+_orig_IB_init = IB.__init__
+def _guarded_ib_init(self, *a, **k):
+    global _first_ib
+    if _first_ib:
+        _first_ib = False
+    else:
+        print("\n[IB-GUARD] SECOND IB() CONSTRUCTOR DETECTED at", time.strftime("%H:%M:%S"))
+        traceback.print_stack(limit=30)
+    return _orig_IB_init(self, *a, **k)
+IB.__init__ = _guarded_ib_init
+
+_orig_connect = IB.connect
+def _guarded_connect(self, *a, **k):
+    global _first_connect
+    if _first_connect:
+        _first_connect = False
+    else:
+        print("\n[IB-GUARD] ADDITIONAL connect() CALL DETECTED at", time.strftime("%H:%M:%S"))
+        traceback.print_stack(limit=30)
+    return _orig_connect(self, *a, **k)
+IB.connect = _guarded_connect
+# --- END IB GUARD ---
+
+# --- FAULTHANDLER (ensure 'signal' is imported) ---
+import faulthandler
+faulthandler.register(signal.SIGUSR1, all_threads=True, chain=True)
+# --- END FAULTHANDLER ---
+
+# Single Socket Integration
+import atexit
+from ib_single_socket import (
+    init_ib, get_ib, disconnect,
+    fetch_historical_data, place_order_safe,
+    get_positions, apply_pacing,
+    enforce_single_connection, export_training_data
+)
+from asserts import anti_dilution_asserts, anti_overfit_asserts
+
+# Setup clean shutdown (prevents CLOSE-WAIT sockets)
+def _clean_shutdown(signum=None, frame=None):
+    """Clean shutdown on signal or exit"""
+    try:
+        ib = get_ib()
+        if ib and ib.isConnected():
+            print("\nDisconnecting IB connection...")
+            disconnect()
+    except Exception:
+        pass
+    sys.exit(0)  # Use sys.exit for proper cleanup (not os._exit)
+
+# Register clean shutdown handlers
+signal.signal(signal.SIGINT, _clean_shutdown)
+signal.signal(signal.SIGTERM, _clean_shutdown)
+atexit.register(lambda: disconnect())
+
 # Core Security and Configuration
 from config.master_config import get_config
 from config.secrets_manager import get_secrets_manager
@@ -208,86 +301,21 @@ MAX_ORDER_SIZE = int(os.getenv("MAX_ORDER_SIZE", "1"))
 # ---- IBKR news helpers (historical news + article text) ----
 def fetch_ibkr_news_for_tickers(tickers, lookback_hours=24, max_results=200):
     """
-    Best-effort IBKR Historical News fetch for the given tickers.
-    Works with whatever news providers your account is entitled to.
-    Returns a pandas.DataFrame with columns:
-    ['published_at','title','description','tickers','provider','source']
+    DISABLED: News ingestion temporarily disabled to maintain single socket pattern.
+    This function was creating multiple IB connections which violates the single socket requirement.
+    Returns empty DataFrame to maintain compatibility.
     """
-    import re
-    from datetime import datetime
-
     import pandas as pd
-    from ib_insync import IB
+    # Return empty DataFrame immediately without creating any IB connections
+    return pd.DataFrame(columns=['published_at','title','description','tickers','provider','source'])
 
-    from market_data_ibkr_adapter import IBKRIngestor
-
-    rows = []
-
-    # Connect (separate lightweight session for news)
-    ib = IB()
-    try:
-        import os
-        _news_id = int(os.getenv("IBKR_CLIENT_ID_NEWS", os.getenv("IBKR_CLIENT_ID", "9000"))) + 100
-        ib.connect(IBKR_HOST, IBKR_PORT, clientId=_news_id, timeout=10)
-    except Exception:
-        # If IB Gateway isn't ready, return empty DF; pipeline will continue with MarketAux
-        return pd.DataFrame(columns=['published_at','title','description','tickers','provider','source'])
-
-    # Discover provider codes you have access to
-    try:
-        providers = ib.reqNewsProviders() or []
-    except Exception:
-        providers = []
-    provider_codes = ",".join(p.code for p in providers) if providers else ""
-    if not provider_codes:
-        ib.disconnect()
-        return pd.DataFrame(columns=['published_at','title','description','tickers','provider','source'])
-
-    # Use your existing adapter to resolve exact (qualified) contracts quickly
-    ingestor = IBKRIngestor(host=IBKR_HOST, port=IBKR_PORT, clientId=_news_id + 1)
-
-    end_dt = datetime.utcnow()
-    start_dt = end_dt - timedelta(hours=lookback_hours)
-
-    for tvsym in tickers:
-        try:
-            contract = ingestor._get_contract(tvsym)  # nearest non‑expired, qualified
-            conId = contract.conId
-            items = ib.reqHistoricalNews(
-                conId=conId,
-                providerCodes=provider_codes,
-                startDateTime=start_dt,
-                endDateTime=end_dt,
-                totalResults=max_results,
-                options=[]
-            ) or []
-            for it in items:
-                # Pull full article text when available
-                try:
-                    article = ib.reqNewsArticle(it.providerCode, it.articleId)
-                    text = getattr(article, "articleText", "") or ""
-                except Exception:
-                    text = ""
-                # strip simple html if present
-                text_clean = re.sub(r"<[^>]+>", " ", text).strip()
-                # build row
-                rows.append({
-                    "published_at": pd.to_datetime(getattr(it, "time", end_dt), utc=True),
-                    "title": getattr(it, "headline", "") or "",
-                    "description": text_clean if text_clean else getattr(it, "headline", ""),
-                    "tickers": [tvsym],
-                    "provider": it.providerCode,
-                    "source": "IBKR"
-                })
-        except Exception:
-            # keep going on ticker errors; we’re in learning mode
-            continue
-
-    ib.disconnect()
-    if not rows:
-        return pd.DataFrame(columns=['published_at','title','description','tickers','provider','source'])
-    df = pd.DataFrame(rows).sort_values("published_at")
-    return df
+def fetch_ibkr_news_for_tickers_DISABLED(tickers, lookback_hours=24, max_results=200):
+    """
+    DISABLED: Original implementation removed to prevent connection creation.
+    """
+    import pandas as pd
+    # Return empty DataFrame immediately - no IB connections
+    return pd.DataFrame(columns=['published_at','title','description','tickers','provider','source'])
 
 def _sanitize_features(X: pd.DataFrame) -> pd.DataFrame:
     """Keep only numeric features; convert timestamp to unix; fill NaNs."""
@@ -713,10 +741,40 @@ class RLTradingPipeline:
     def __init__(self, config: dict[str, Any]):
         self.config = config
         try:
-            logging.info("Initializing IBKR connection...")
-            self.market_data_adapter = IBKRIngestor()
-            attach_ib(self.market_data_adapter.ib)
-            if os.getenv("PIPELINE_KEEPALIVE","1") == "1" and not hasattr(self, "_keepalive_started"):
+            logging.info("Initializing single socket IBKR connection...")
+
+            # Enforce single connection (will error if another process is using 9002)
+            enforce_single_connection()
+
+            # Initialize the single shared connection
+            shared_ib = init_ib(
+                host=os.getenv("IBKR_HOST", "127.0.0.1"),
+                port=int(os.getenv("IBKR_PORT", "4002")),
+                client_id=int(os.getenv("IBKR_CLIENT_ID", "9002"))
+            )
+
+            # Pass shared connection to IBKRIngestor
+            self.market_data_adapter = IBKRIngestor(ib=shared_ib)
+            # attach_ib disabled - single socket pattern manages connection
+            # attach_ib(self.market_data_adapter.ib)
+
+            logging.info(f"✅ Single socket initialized (clientId={shared_ib.client.clientId})")
+
+            # Run anti-dilution checks ONCE at startup
+            symbols_to_check = getattr(self, 'tickers', ['ES1!', 'NQ1!'])
+            if len(symbols_to_check) > int(os.getenv("MAX_BASELINE_SYMBOLS", "2")):
+                logging.warning(f"Limiting symbols from {len(symbols_to_check)} to baseline max")
+                self.tickers = symbols_to_check[:int(os.getenv("MAX_BASELINE_SYMBOLS", "2"))]
+
+            # Verify drift is disabled
+            from optimized_trading_config import DRIFT_CONFIG
+            if DRIFT_CONFIG.get("enabled", False):
+                logging.warning("Disabling drift detection for baseline")
+                DRIFT_CONFIG["enabled"] = False
+
+            # Keepalive disabled - single socket pattern handles connection
+            # The keepalive loop was causing reconnection conflicts
+            if False and os.getenv("PIPELINE_KEEPALIVE","1") == "1" and not hasattr(self, "_keepalive_started"):
                 import threading
                 threading.Thread(target=_ib_keepalive_loop, args=(self.market_data_adapter.ib,), daemon=True).start()
                 self._keepalive_started = True
@@ -738,17 +796,22 @@ class RLTradingPipeline:
         self._memory_cleanup_interval = 50  # Cleanup every N iterations
 
         # Enhanced resource monitoring for m5.large production safety
-        try:
-            from enhanced_resource_monitor import EnhancedResourceMonitor, ResourceThresholds
-            self.resource_monitor = EnhancedResourceMonitor(
-                thresholds=ResourceThresholds(),
-                cleanup_callback=self._cleanup_memory
-            )
-            self.resource_monitor.start_monitoring(interval_seconds=5)
-            logging.info("✅ Enhanced resource monitoring enabled")
-        except Exception as e:
-            logging.warning(f"Enhanced monitoring failed to initialize: {e}")
+        # SINGLE SOCKET MODE: Skip resource monitor when disabled
+        if os.getenv("DISABLE_HEALTH_MONITOR") == "1":
+            logging.info("Resource monitoring disabled (single-socket mode)")
             self.resource_monitor = None
+        else:
+            try:
+                from enhanced_resource_monitor import EnhancedResourceMonitor, ResourceThresholds
+                self.resource_monitor = EnhancedResourceMonitor(
+                    thresholds=ResourceThresholds(),
+                    cleanup_callback=self._cleanup_memory
+                )
+                self.resource_monitor.start_monitoring(interval_seconds=5)
+                logging.info("✅ Enhanced resource monitoring enabled")
+            except Exception as e:
+                logging.warning(f"Enhanced monitoring failed to initialize: {e}")
+                self.resource_monitor = None
         self._iteration_count = 0
 
         # Model caching system for faster inference
@@ -1118,12 +1181,9 @@ class RLTradingPipeline:
             self.notify(f"Pipeline failed: {e}")
             raise
         finally:
-            # Always drop the IBKR socket before the next while-True cycle
-            try:
-                if hasattr(self, "market_data_adapter") and getattr(self.market_data_adapter, "ib", None):
-                    self.market_data_adapter.ib.disconnect()
-            except Exception:
-                pass
+            # SINGLE SOCKET MODE: Do NOT disconnect between cycles - keep connection alive
+            # The connection should persist across pipeline runs
+            pass
 
     def _main_loop(self):
         global last_retrain_times
@@ -2124,10 +2184,14 @@ class RLTradingPipeline:
             model = PPO("MlpPolicy", env, verbose=0,
                        n_steps=1024, batch_size=32, n_epochs=8)
 
-        # 4) Learn
-        model.learn(total_timesteps=10000, callback=ppo_logger)
-        self.ppo_model = model
-        ppo_logger.print_summary()
+        # 4) Learn (skip in single-socket mode to prevent CPU starvation)
+        if os.getenv("TRAIN_OFFLINE_ONLY", "1") in ("1", "true", "True"):
+            logging.info("Skipping in-loop RL training (offline-only in single-socket baseline)")
+            self.ppo_model = model
+        else:
+            model.learn(total_timesteps=10000, callback=ppo_logger)
+            self.ppo_model = model
+            ppo_logger.print_summary()
 
         # 5) Save & upload current model
         if save_path is None:
@@ -2489,11 +2553,36 @@ import os
 data_dir = os.getenv("DATA_DIR", "/home/ubuntu/data")
 
 if __name__ == "__main__":
+    # Create pipeline ONCE with single socket connection
+    pipeline = RLTradingPipeline(default_config)
+
+    # Run pipeline in a loop, reusing the same connection
     while True:
-        pipeline = RLTradingPipeline(default_config)
-        pipeline.run()
-        # Sleep for 2 minutes (adjust as needed)
-        time.sleep(120)
+        try:
+            pipeline.run()
+
+            # During sleep, send periodic keepalive to maintain connection
+            sleep_duration = 120
+            keepalive_interval = 30
+
+            for _ in range(sleep_duration // keepalive_interval):
+                time.sleep(keepalive_interval)
+                # Send keepalive ping via existing connection
+                logging.info("Keepalive tick - checking connection...")
+                if hasattr(pipeline, 'market_data_adapter') and pipeline.market_data_adapter.ib.isConnected():
+                    try:
+                        current_time = pipeline.market_data_adapter.ib.reqCurrentTime()
+                        logging.info(f"Keepalive ping sent successfully - server time: {current_time}")
+                    except Exception as e:
+                        logging.warning(f"Keepalive failed: {e}")
+                        break
+                else:
+                    logging.warning("Keepalive: Connection not available")
+
+        except Exception as e:
+            logging.error(f"Pipeline run failed: {e}")
+            logging.error("Exiting due to connection loss - restart required")
+            sys.exit(1)  # Exit cleanly so systemd/supervisor can restart
 
 
 def _execute_order_single_client(symbol:str, side:str, qty:int):

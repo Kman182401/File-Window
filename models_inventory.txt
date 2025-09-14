@@ -1,0 +1,13 @@
+total 316
+drwxrwxr-x  2 ubuntu ubuntu   4096 Sep 13 03:53 .
+drwxr-xr-x 76 ubuntu ubuntu  77824 Sep 13 04:03 ..
+-rw-rw-r--  1 ubuntu ubuntu     55 Jul 21 20:47 features.json
+-rw-rw-r--  1 ubuntu ubuntu      2 Sep 13 03:53 performance_history.json
+-rw-rw-r--  1 ubuntu ubuntu 147270 Sep 13 03:53 ppo_trading_model.zip
+-rw-rw-r--  1 ubuntu ubuntu  77273 Jul 21 20:47 rf_model.joblib
+-rw-rw-r--  1 ubuntu ubuntu   1603 Sep 13 03:53 vec_normalize.pkl
+
+# Model Details
+
+PPO Model: 144K	/home/ubuntu/models/ppo_trading_model.zip
+VecNorm: 4.0K	/home/ubuntu/models/vec_normalize.pkl

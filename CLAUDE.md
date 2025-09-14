@@ -495,3 +495,114 @@ if any([
 
 **Any change that breaks these guarantees will be automatically rolled back.**
 - From now on when restarting the Gateway only restart the Gateway and leave the VNC display untouched unless explicitlly told otherwise and if you feel restarting the display is ever necessary let me know because I am not opposed to it at all id just like to avoind it if possible.
+<!-- START: VNC_SSH_IBGW_PLAYBOOK -->
+## 🛠️ VNC/SSH Tunnel & IB Gateway — Incident Playbook (Last updated: 2025-09-13)
+
+**Scope:** Fix recurring `VNC connection refused` by ensuring SSH tunnel is up, the remote VNC service is actually listening, and IB Gateway can be operated after maintenance. This codifies the steps that worked in production on m5.large.
+
+### Invariants & Known-Good Defaults
+- OS user: `ubuntu`
+- **IBKR Paper** API port: **4002** (do **not** default to 4004).
+- Canonical clientId: **9002**
+- VNC stack on EC2: `Xvfb :1`, `fluxbox`, `x11vnc -rfbport 5900 -localhost ...`
+- IB Gateway run in tmux session `ibgw` (manual re-arm via VNC).
+- Safe launcher: `~/bin/run_pipeline_safely.sh` (probes/backoff, prevents socket storms).
+- CPU guards: `OMP/MKL/OPENBLAS=1`, `nice -n 5`, `taskset -c 0-1`.
+
+### Symptom
+- VNC viewer shows **"connection refused by computer"** OR SSH tunnel fails/hangs.
+
+### Root-Cause Patterns (observed)
+1) **Wrong EC2 public IP** after stop/start (no Elastic IP).
+2) **Security Group** does not allow inbound TCP 22 from **current** client IP.
+3) **x11vnc not listening** on EC2 (`127.0.0.1:5900`).
+4) During **IBKR nightly maintenance** (~late US evening), IBGW login loops with "server error, will retry…".
+5) Shell panes dying due to `set -euo pipefail` + fragile commands (fixed via safe wrappers).
+
+### Decision Tree
+```text
+If VNC says "refused":
+  └─> First prove SSH works to correct public IP on 22
+      ├─ Laptop: nc -vz <EC2_PUBLIC_IP> 22  → success? yes → open tunnel
+      │                                       no  → fix SG/NACL or network egress
+      └─ If SSH OK but VNC refused → fix x11vnc on EC2 (ensure LISTEN 127.0.0.1:5900)
+```
+
+### Laptop — SSH tunnel (run locally, keep terminal open)
+```bash
+# Current EC2 public IPv4 (confirmed working 2025-09-13): 18.116.196.223
+ssh -v -o ExitOnForwardFailure=yes \
+    -L 5901:127.0.0.1:5900 \
+    -i ~/.ssh/Kody.pem \
+    ubuntu@18.116.196.223
+# If 5901 busy: use -L 5905:127.0.0.1:5900 and VNC → localhost:5905
+# Note: Update IP if instance is stopped/started without Elastic IP
+```
+
+### EC2 — Verify VNC server (x11vnc) is listening
+```bash
+ss -tlnp | grep ":5900" || {
+  pkill -f x11vnc 2>/dev/null || true
+  x11vnc -display :1 -rfbport 5900 -localhost -forever -shared -repeat -ncache 10 -o /tmp/x11vnc.log &
+  sleep 2
+  ss -tlnp | grep ":5900" || tail -n 100 /tmp/x11vnc.log
+}
+# If needed:
+pkill -f "Xvfb|fluxbox" 2>/dev/null || true
+Xvfb :1 -screen 0 1920x1080x24 -nolisten tcp >/tmp/xvfb.log 2>&1 &
+sleep 1
+DISPLAY=:1 fluxbox >/tmp/fluxbox.log 2>&1 &
+sleep 1
+```
+
+### IB Gateway re-arm (Paper)
+1. In VNC: Configure → **API → Settings** → Enable ActiveX/Socket, **Port 4002**, Trusted IP `127.0.0.1`, SSL off, Read-Only off → **Apply → OK**
+2. Configure → **API → Precautions** → **Apply → OK** (close modals)
+3. If odd, do the quick **port flip**: 4002→Apply→4003→Apply→4002→Apply→OK
+4. Probe attach (safe):
+```bash
+python3 - <<'PY'
+from ib_insync import IB; ib=IB()
+print('Connected:', bool(ib.connect('127.0.0.1',4002,clientId=9002,timeout=12)))
+ib.disconnect()
+PY
+```
+
+### IBKR nightly maintenance behavior
+- Gateway may loop with **"Attempt X: server error, will retry in 10 seconds…"**.
+- Action: wait 10–20 minutes; once back, re-arm (Settings & Precautions → Apply/OK), then probe attach.
+
+### Prevent it from recurring
+- **Elastic IP**: Allocate + associate to the instance so public IP doesn't change.
+- **Security Group**: allow inbound TCP 22 from current client IP (/32), not just historic IP.
+- Keep `x11vnc` restricted to `-localhost`.
+- Keep code defaults at **4002** for Paper; change ports via env only.
+
+### Shell stability (why terminals used to die)
+- Use safe wrappers (no exit 1 on no-match): `~/bin/safe_commands.sh`, `~/bin/safe_aliases.sh`.
+- Avoid ending scripts with fragile `grep`/`ss` pipelines under `set -e`; add `|| true` or use `awk` counters.
+- Diagnostic once: `~/bin/diagnose_exit.sh` (ERR trap + set -x) to locate a failing line.
+
+### Post-maintenance acceptance (5 lines)
+```bash
+ss -tlnp | egrep '(:4002)\b' || echo "no listener"
+ss -tanp | awk '/:4002/ {a[$1]++} END{for(k in a) printf "%-12s %d\n",k,a[k]; if(!NR) print "no sockets"}'
+tail -n 120 ~/logs/pipeline.log | egrep -i 'Connected|clientId|TRADING_DECISION|Sharpe|CAGR|drift|PSI' | tail -n 40
+free -h
+ps aux --sort=-%cpu | head -8
+```
+
+### What Claude Code must ask the user to do (cannot do autonomously)
+- Confirm the **current EC2 public IP** in AWS Console if port 22 hangs.
+- Update the **Security Group** to allow SSH from the user's **current** public IP.
+- If the network blocks 22, try a different network (e.g., mobile hotspot).
+- Allocate an **Elastic IP** to avoid future IP changes.
+- In VNC, manually re-arm API after maintenance (Settings/Precautions → Apply/OK).
+
+### Do-Not-Do list
+- Do **not** hardcode 4004 as default; Paper = 4002 (env override allowed).
+- Do **not** kill `tmux server` from within a pane (use targeted `tmux kill-session -t ibgw`).
+- Do **not** hammer `reqHistoricalData` without 200–300 ms jitter across tickers.
+
+<!-- END: VNC_SSH_IBGW_PLAYBOOK -->
+- Any time an IB Gateway API connection fails do not move on or try another approach, pause the process and prompt the user for a port reset to see if that fixes the issue.  Also whenever an API connection to IB Gateway is successful always run another test ~30 seconds-1 minute after the successful connection to ensure the connection is persisting if intended.

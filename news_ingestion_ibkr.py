@@ -19,8 +19,15 @@ def _connect():
 
 def fetch_ibkr_news(lookback_hours=24, max_results=200):
     """
-    Returns a DataFrame with columns:
-    ['title','summary','published_at','tickers','entities','sentiment_score','source','url','keywords']
+    DISABLED: News ingestion temporarily disabled to maintain single socket pattern.
+    Returns empty DataFrame to maintain compatibility.
+    """
+    # Return empty DataFrame immediately without creating any IB connections
+    return pd.DataFrame(columns=['title','summary','published_at','tickers','entities','sentiment_score','source','url','keywords'])
+
+def fetch_ibkr_news_DISABLED(lookback_hours=24, max_results=200):
+    """
+    Original implementation - kept for reference but not used.
     """
     ib = _connect()
     try:
