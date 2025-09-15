@@ -74,6 +74,12 @@ class MarketAwareDataManager:
         self.window_mins = int(os.getenv('MARKET_WINDOW_MINS', '360'))
         self.fallback_mins = int(os.getenv('FALLBACK_MINUTES', '120'))
 
+        # Bootstrapping knobs: widen window for the first N minutes after startup
+        self._start_utc = datetime.now(timezone.utc)
+        self.boot_duration_mins = int(os.getenv('MARKET_BOOT_DURATION_MINS', '60'))
+        self.boot_window_mins = int(os.getenv('MARKET_BOOT_WINDOW_MINS', '1440'))
+        self.boot_fallback_mins = int(os.getenv('MARKET_BOOT_FALLBACK_MINS', '240'))
+
     # Pass-through to underlying IB adapter when needed (e.g., health/keepalive utilities)
     @property
     def ib(self):
@@ -84,35 +90,52 @@ class MarketAwareDataManager:
         # Decide route
         route, reason = self._decide_route(symbol)
 
+        # Determine effective windows considering bootstrapping period
+        eff_window, eff_tail = self._effective_windows()
+
         if route == 'live':
-            live_df = self._fetch_live(symbol, self.window_mins)
+            live_df = self._fetch_live(symbol, eff_window)
             # Optional blend at open: add small fallback tail if available
-            if self.fallback_mins > 0:
-                hist_tail = self._load_historical(symbol, self.fallback_mins)
+            if eff_tail > 0:
+                hist_tail = self._load_historical(symbol, eff_tail)
                 blended = _dedupe_concat([hist_tail, live_df])
-                out = self._trim_window(blended, self.window_mins)
+                out = self._trim_window(blended, eff_window)
             else:
-                out = self._trim_window(live_df, self.window_mins)
+                out = self._trim_window(live_df, eff_window)
             try:
                 logging.warning(
                     f"[data-route] symbol={symbol} source=live reason={reason} "
-                    f"bars={len(out)} req_window_mins={self.window_mins} tail_blend_mins={self.fallback_mins}"
+                    f"bars={len(out)} req_window_mins={eff_window} tail_blend_mins={eff_tail}"
                 )
             except Exception:
                 pass
             return out
 
         # historical route
-        hist_df = self._load_historical(symbol, self.window_mins + self.fallback_mins)
-        out = self._trim_window(hist_df, self.window_mins)
+        hist_df = self._load_historical(symbol, eff_window + eff_tail)
+        out = self._trim_window(hist_df, eff_window)
         try:
             logging.warning(
                 f"[data-route] symbol={symbol} source=historical reason={reason} "
-                f"bars={len(out)} req_window_mins={self.window_mins}"
+                f"bars={len(out)} req_window_mins={eff_window}"
             )
         except Exception:
             pass
         return out
+
+    def _effective_windows(self) -> Tuple[int, int]:
+        """Return (effective_window_mins, effective_fallback_tail_mins) honoring boot duration."""
+        try:
+            now = datetime.now(timezone.utc)
+            elapsed = (now - self._start_utc).total_seconds() / 60.0
+            if elapsed < self.boot_duration_mins:
+                # Use widened window during bootstrapping if larger than base
+                win = max(self.window_mins, self.boot_window_mins)
+                tail = max(self.fallback_mins, self.boot_fallback_mins)
+                return win, tail
+        except Exception:
+            pass
+        return self.window_mins, self.fallback_mins
 
     # Internals
     def _decide_route(self, symbol: str) -> Tuple[str, str]:
