@@ -1603,7 +1603,7 @@ class RLTradingPipeline:
                         frows = 0 if X is None else len(X)
                         lrows = 0 if y is None else len(y)
                         ppo_min = 21  # because we drop to label-aligned and need >20 rows
-                        logging.info(f"[bars] ticker={tkr} features_rows={frows} labels_rows={lrows} ppo_min_rows={ppo_min}")
+                        logging.warning(f"[bars] ticker={tkr} features_rows={frows} labels_rows={lrows} ppo_min_rows={ppo_min}")
                 except Exception:
                     pass
 
