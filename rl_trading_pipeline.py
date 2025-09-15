@@ -245,6 +245,7 @@ from feature_engineering import (
 from market_data_config import IBKR_SYMBOLS as DEFAULT_TICKERS
 from market_data_config import MAX_DAILY_LOSS_PCT, MAX_POSITION_EXPOSURE, MAX_TRADES_PER_DAY
 from market_data_ibkr_adapter import IBKRIngestor
+from market_aware_data_manager import MarketAwareDataManager
 from order_safety_wrapper import safe_place_order
 from orders_single_client import attach_ib, place_bracket_order
 
@@ -737,6 +738,34 @@ def _ib_keepalive_loop(ib):
             time.sleep(min(backoff, 30))
             backoff = min(backoff*2, 30)
 
+def align_X_y(X, y, required_cols=None, name=""):
+    """Ensure X and y are properly aligned with consistent shape and indices"""
+    # 1) Ensure deterministic order and unique index
+    X = X.copy()
+    X = X.loc[~X.index.duplicated()].sort_index()
+    y = y.loc[~y.index.duplicated()].sort_index()
+
+    # 2) Reindex y to X
+    y = y.reindex(X.index)
+
+    # 3) Enforce a stable feature set (train-time columns)
+    if required_cols is not None:
+        X = X.reindex(columns=required_cols, fill_value=0)
+
+    # 4) Final sanity: remove rows with any NaN in X after enforcement
+    good = ~X.isna().any(axis=1)
+    if not good.all():
+        X, y = X.loc[good], y.loc[good]
+
+    # 5) Assertions & helpful logs
+    if len(X) != len(y):
+        raise ValueError(f"[ALIGN:{name}] len(X)={len(X)} != len(y)={len(y)}")
+    if len(X) == 0:
+        raise ValueError(f"[ALIGN:{name}] empty dataset after alignment")
+
+    logging.debug(f"[ALIGN:{name}] X.shape={X.shape}, y.shape={y.shape}")
+    return X, y
+
 class RLTradingPipeline:
     def __init__(self, config: dict[str, Any]):
         self.config = config
@@ -753,8 +782,9 @@ class RLTradingPipeline:
                 client_id=int(os.getenv("IBKR_CLIENT_ID", "9002"))
             )
 
-            # Pass shared connection to IBKRIngestor
-            self.market_data_adapter = IBKRIngestor(ib=shared_ib)
+            # Pass shared connection to IBKRIngestor but route via market-aware manager
+            underlying_ib_adapter = IBKRIngestor(ib=shared_ib)
+            self.market_data_adapter = MarketAwareDataManager(underlying_ib_adapter)
             # attach_ib disabled - single socket pattern manages connection
             # attach_ib(self.market_data_adapter.ib)
 
@@ -1488,8 +1518,10 @@ class RLTradingPipeline:
                     with open(LAST_TRAINED_FILE) as f:
                         last_trained_time = f.read().strip()
                         if last_trained_time:
-                            # Convert to int (or pd.to_datetime if using datetime)
-                            last_trained_time = int(last_trained_time)
+                            # Convert to datetime for proper comparison
+                            last_trained_time = pd.to_datetime(last_trained_time, utc=True, errors="coerce")
+                            if pd.isna(last_trained_time):
+                                last_trained_time = None
                 except FileNotFoundError:
                     last_trained_time = None
 
@@ -1498,14 +1530,56 @@ class RLTradingPipeline:
 
                 for ticker, df in raw_data.items():
                     X, y = generate_features(df)
-                    if last_trained_time and "timestamp" in X.columns:
-                        if np.issubdtype(X["timestamp"].dtype, np.datetime64):
-                            last_trained_time = pd.to_datetime(last_trained_time)
-                        else:
-                            last_trained_time = int(last_trained_time)
-                        X = X[X["timestamp"] > last_trained_time]
-                        y = y.loc[X.index]
-                    logging.info(f"{ticker} features shape: {X.shape}, labels shape: {y.shape}")
+                    # PHASE4A-DEBUG: Log initial shapes
+                    logging.info(f"[DEBUG] {ticker} initial features shape: {X.shape if X is not None else 'None'}, labels shape: {y.shape if y is not None else 'None'}")
+
+                    if last_trained_time and X is not None and "timestamp" in X.columns:
+                        try:
+                            # last_trained_time is already a datetime from reading the file
+                            t = last_trained_time
+
+                            if not pd.isna(t):
+                                ts = pd.to_datetime(X["timestamp"], utc=True, errors="coerce")
+                                pre = len(X)
+                                mask = ts > t
+                                if mask.any():
+                                    X = X.loc[mask]
+                                    y = y.loc[X.index]
+                                    logging.info(f"[DEBUG] timestamp filter: {pre} -> {len(X)} rows (threshold={t})")
+                                else:
+                                    logging.info(f"[DEBUG] No rows after {t}; using fallback")
+                                    # Fallback: keep a small recent window so training/eval has data even when market is closed
+                                    N = int(os.getenv("FALLBACK_MINUTES", "240"))
+                                    X = X.iloc[-N:] if len(X) > N else X
+                                    y = y.loc[X.index]
+                                    logging.info(f"[DEBUG] Using last {len(X)} rows as fallback")
+                            else:
+                                logging.info(f"[DEBUG] Invalid timestamp threshold, skipping filter")
+
+                            # Additional failsafe for empty data
+                            if len(X) == 0:
+                                N = int(os.getenv("FALLBACK_MINUTES", "240"))
+                                logging.warning(f"[DEBUG] Filter emptied all data; regenerating features")
+                                X, y = generate_features(df)
+                                if X is not None and len(X) > N:
+                                    X = X.iloc[-N:]
+                                    y = y.loc[X.index]
+                                logging.info(f"[DEBUG] Fallback generated {len(X) if X is not None else 0} rows")
+                        except Exception as e:
+                            logging.warning(f"[DEBUG] Timestamp filter error: {e}, using unfiltered data")
+                            # Keep original data on error
+                    else:
+                        logging.info(f"[DEBUG] no timestamp filter applied for {ticker}")
+
+                    # Align X and y after timestamp filtering
+                    if X is not None and y is not None and not X.empty and not y.empty:
+                        try:
+                            X, y = align_X_y(X, y, name=f"{ticker}:post-filter")
+                        except ValueError as e:
+                            logging.warning(f"Alignment failed after timestamp filter for {ticker}: {e}")
+                            continue
+
+                    logging.info(f"{ticker} features shape: {X.shape if X is not None else 'None'}, labels shape: {y.shape if y is not None else 'None'}")
                     if X is None or X.empty or y is None or y.empty:
                         logging.warning(f"No features/labels for {ticker} after feature engineering, skipping.")
                         continue
@@ -1589,13 +1663,31 @@ class RLTradingPipeline:
                     y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
 
                     # Drop any datetime or identifier columns from features
+                    from pandas.api.types import is_datetime64_any_dtype
                     cols_to_drop = []
                     for col in X_train.columns:
-                        if np.issubdtype(X_train[col].dtype, np.datetime64) or col in ["datetime", "timestamp"]:
+                        if is_datetime64_any_dtype(X_train[col]) or col in ["datetime", "timestamp"]:
                             cols_to_drop.append(col)
                     if cols_to_drop:
                         X_train = X_train.drop(columns=cols_to_drop)
                         X_test = X_test.drop(columns=cols_to_drop)
+
+                    # Align X and y to ensure consistent shapes
+                    try:
+                        X_train, y_train = align_X_y(X_train, y_train, name=f"{ticker}:train")
+                        X_test, y_test = align_X_y(X_test, y_test, name=f"{ticker}:test")
+                    except ValueError as e:
+                        logging.warning(f"Alignment failed for {ticker}: {e}")
+                        continue
+
+                    # Model-level sanity checks
+                    if len(X_train) < 100:
+                        logging.warning(f"[ML:{ticker}] Not enough training rows ({len(X_train)}). Skipping.")
+                        continue
+
+                    if y_train.nunique() < 2:
+                        logging.warning(f"[ML:{ticker}] Single-class labels in training data. Skipping.")
+                        continue
 
                     if X_train.empty or X_test.empty or y_train.empty or y_test.empty:
                         logging.warning(f"Not enough data for {ticker}: X_train={len(X_train)}, X_test={len(X_test)}. Skipping.")
@@ -1701,8 +1793,13 @@ class RLTradingPipeline:
                         max_timestamps.append(X["timestamp"].max())
                 if max_timestamps:
                     last_trained_time = max(max_timestamps)
+                    # Save as ISO format string for consistent reading/writing
                     with open(LAST_TRAINED_FILE, "w") as f:
-                        f.write(str(last_trained_time))
+                        # Convert to string in ISO format
+                        if hasattr(last_trained_time, 'isoformat'):
+                            f.write(last_trained_time.isoformat())
+                        else:
+                            f.write(str(last_trained_time))
 
                 # --- End ML Model Block ---
 
@@ -1785,9 +1882,10 @@ class RLTradingPipeline:
                             preds.append(rl_preds)
                         else:
                             # Drop any datetime or identifier columns from features before prediction
+                            from pandas.api.types import is_datetime64_any_dtype
                             cols_to_drop = []
                             for col in X_test.columns:
-                                if np.issubdtype(X_test[col].dtype, np.datetime64) or col in ["datetime", "timestamp"]:
+                                if is_datetime64_any_dtype(X_test[col]) or col in ["datetime", "timestamp"]:
                                     cols_to_drop.append(col)
                             if cols_to_drop:
                                 X_test_pred = X_test.drop(columns=cols_to_drop)
@@ -2003,9 +2101,10 @@ class RLTradingPipeline:
                             continue
 
                         # Drop any datetime or identifier columns from features before prediction
+                        from pandas.api.types import is_datetime64_any_dtype
                         cols_to_drop = []
                         for col in X_test.columns:
-                            if np.issubdtype(X_test[col].dtype, np.datetime64) or col in ["datetime", "timestamp"]:
+                            if is_datetime64_any_dtype(X_test[col]) or col in ["datetime", "timestamp"]:
                                 cols_to_drop.append(col)
                         if cols_to_drop:
                             X_test_pred = X_test.drop(columns=cols_to_drop)
@@ -2016,9 +2115,10 @@ class RLTradingPipeline:
                         ml_preds = {}
                         for name, model in fitted_models.get(ticker, {}).items():
                             # Drop any datetime or identifier columns from features before prediction
+                            from pandas.api.types import is_datetime64_any_dtype
                             cols_to_drop = []
                             for col in X_test.columns:
-                                if np.issubdtype(X_test[col].dtype, np.datetime64) or col in ["datetime", "timestamp"]:
+                                if is_datetime64_any_dtype(X_test[col]) or col in ["datetime", "timestamp"]:
                                     cols_to_drop.append(col)
                             X_test_pred = X_test.drop(columns=cols_to_drop) if cols_to_drop else X_test
                             ml_preds[name] = self._predict_with_cache(model, name, ticker, X_test_pred)
@@ -2089,10 +2189,43 @@ class RLTradingPipeline:
                 break  # Success, exit retry loop
 
             except Exception as e:
-                retries += 1
-                logging.warning(f"Error in pipeline loop (attempt {retries}): {e}")
-                log_trade_results(f"pipeline_retry: run_id={self.run_id}, attempt={retries}, error={str(e)}, traceback={traceback.format_exc()}")
-                self.notify(f"Pipeline error (attempt {retries}): {e}")
+                # Check if this is a connection error vs other errors
+                import socket
+
+                def _is_connection_error(err):
+                    """Determine if error is actually a connection issue"""
+                    msg = str(err).lower()
+                    return isinstance(err, (ConnectionError, TimeoutError, socket.error)) \
+                        or "peer closed" in msg or "timeout" in msg or "connection refused" in msg \
+                        or "connect call failed" in msg
+
+                if _is_connection_error(e):
+                    retries += 1
+                    logging.error(f"IB connection error in pipeline loop (attempt {retries}): {e}")
+                    log_trade_results(f"pipeline_retry: run_id={self.run_id}, attempt={retries}, error={str(e)}, traceback={traceback.format_exc()}")
+                    self.notify(f"Pipeline connection error (attempt {retries}): {e}")
+                else:
+                    # Non-connection error (e.g., dtype issues, ML errors) - log but don't exit
+                    logging.warning(f"Non-connection error (continuing): {e}")
+                    logging.debug(f"Error details: {traceback.format_exc()}")
+
+                    # ML/data shape errors - skip iteration but continue pipeline
+                    if any(err in str(e) for err in ["datetime64", "Cannot interpret", "inconsistent numbers of samples",
+                                                      "shape", "ValueError", "[ALIGN:"]):
+                        logging.info(f"Skipping iteration due to data/ML error: {e}")
+                        time.sleep(1)  # Brief pause before continuing
+                        continue  # Don't increment retry, just skip this iteration
+                    else:
+                        # Other non-connection errors - count retries but don't exit immediately
+                        retries += 1
+                        logging.warning(f"Error in pipeline loop (attempt {retries}): {e}")
+                        log_trade_results(f"pipeline_retry: run_id={self.run_id}, attempt={retries}, error={str(e)}, traceback={traceback.format_exc()}")
+                        self.notify(f"Pipeline error (attempt {retries}): {e}")
+
+                        # Only fail after many retries for non-connection errors
+                        if retries >= self.max_retries * 2:  # Double threshold for non-connection errors
+                            logging.error(f"Too many non-connection errors ({retries}). Stopping pipeline.")
+                            raise
                 prev_key = get_latest_model_key(self.config['s3_bucket'], "models/", exclude_run_id=self.run_id)
                 if prev_key:
                     model = load_model_from_s3(self.config['s3_bucket'], prev_key)
@@ -2580,9 +2713,22 @@ if __name__ == "__main__":
                     logging.warning("Keepalive: Connection not available")
 
         except Exception as e:
-            logging.error(f"Pipeline run failed: {e}")
-            logging.error("Exiting due to connection loss - restart required")
-            sys.exit(1)  # Exit cleanly so systemd/supervisor can restart
+            # Check if this is truly a connection error
+            import socket
+
+            msg = str(e).lower()
+            is_connection_error = isinstance(e, (ConnectionError, TimeoutError, socket.error)) \
+                or "peer closed" in msg or "timeout" in msg or "connection refused" in msg \
+                or "connect call failed" in msg
+
+            if is_connection_error:
+                logging.error(f"Pipeline run failed due to connection loss: {e}")
+                logging.error("Exiting due to connection loss - restart required")
+                sys.exit(1)  # Exit cleanly so systemd/supervisor can restart
+            else:
+                logging.error(f"Pipeline run failed: {e}")
+                logging.error("Exiting due to non-connection error")
+                sys.exit(2)  # Different exit code for non-connection errors
 
 
 def _execute_order_single_client(symbol:str, side:str, qty:int):

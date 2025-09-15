@@ -331,6 +331,10 @@ def generate_features(df):
     Labels: 1 if next close > current close, else 0.
     Enhanced with performance tracking and memory management.
     """
+    # PHASE4A-FIX: Add debug logging for input
+    if hasattr(df, 'shape'):
+        logger.info(f"[FE] generate_features input shape: {df.shape}")
+
     with performance_tracker.track_operation("generate_features"):
         # Ensure required columns are present and correct type
         required_columns = ["open", "high", "low", "close", "volume"]
@@ -348,21 +352,73 @@ def generate_features(df):
     else:
         df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
     # Drop rows with missing values in required columns
-    df = df.dropna(subset=required_columns + ["timestamp"])
+    # PHASE4A-FIX: Only drop rows with missing CRITICAL values
+    critical_columns = ["close", "volume"]
+    initial_len = len(df)
+    df = df.dropna(subset=critical_columns + ["timestamp"])
+    if len(df) < initial_len:
+        logger.info(f"[FE] Dropped {initial_len - len(df)} rows with missing critical values")
 
     df = add_technical_indicators(df.copy())
     # Ensure a timestamp column exists for incremental learning
     if "datetime" in df.columns:
         df["timestamp"] = pd.to_datetime(df["datetime"])
-    elif df.index.name is not None and np.issubdtype(df.index.dtype, np.datetime64):
-        df["timestamp"] = df.index
+    elif isinstance(df.index, pd.DatetimeIndex):
+        # Handle timezone-aware datetime index properly
+        df["timestamp"] = df.index.tz_convert('UTC') if df.index.tz else df.index.tz_localize('UTC')
+    elif df.index.name is not None:
+        # Use pandas type checking instead of numpy for tz-aware compatibility
+        from pandas.api.types import is_datetime64_any_dtype
+        if is_datetime64_any_dtype(df.index):
+            df["timestamp"] = pd.DatetimeIndex(df.index).tz_localize('UTC') if df.index.tz is None else df.index
     else:
         df["timestamp"] = np.arange(len(df))
-    df = df.dropna()
+
+    # PHASE4A-FIX: Smart filtering instead of blanket dropna()
+    # Only drop rows where essential features are NaN
+    essential_features = ["close", "volume", "returns"]
+    pre_filter_len = len(df)
+
+    # First, ensure returns column exists
+    if "returns" not in df.columns:
+        df["returns"] = df["close"].pct_change()
+
+    # Drop only rows with NaN in essential features
+    df = df.dropna(subset=[col for col in essential_features if col in df.columns])
+
+    # Forward-fill remaining NaNs in non-essential columns
+    df = df.fillna(method='ffill').fillna(0)
+
+    if len(df) < pre_filter_len:
+        logger.info(f"[FE] Smart filter: kept {len(df)}/{pre_filter_len} rows")
+
     # Binary classification: 1 if next close > current close, else 0
     df['label'] = (df['close'].shift(-1) > df['close']).astype(int)
     features = df.drop(['label'], axis=1).iloc[:-1]
     labels = df['label'].iloc[:-1]
+
+    # PHASE4A-FIX: Guarantee UTC datetime index and timestamp column
+    # Handle various index types
+    if not isinstance(features.index, pd.DatetimeIndex):
+        features.index = pd.DatetimeIndex(features.index)
+
+    # Convert to UTC safely
+    try:
+        if features.index.tz is None:
+            features.index = features.index.tz_localize("UTC")
+        else:
+            features.index = features.index.tz_convert("UTC")
+    except Exception as e:
+        logger.warning(f"[FE] Timezone conversion issue: {e}, using naive datetime")
+        # If conversion fails, ensure we at least have datetime index
+        features.index = pd.DatetimeIndex(features.index.tz_localize(None) if features.index.tz else features.index)
+
+    # Ensure we expose timestamp as datetime (keep as datetime, not int for proper comparisons)
+    features["timestamp"] = features.index  # Keep as datetime with UTC timezone
+
+    # PHASE4A-FIX: Log final output shape
+    logger.info(f"[FE] generate_features output: features.shape={features.shape}, labels.shape={labels.shape}")
+
     return features, labels
 
     print(df.columns)
