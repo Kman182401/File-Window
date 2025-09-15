@@ -365,7 +365,7 @@ class PaperTradingExecutor:
         df['vol_sma_20'] = df['volume'].rolling(window=20).mean()
         
         # Fill NaN values
-        df.fillna(method='ffill', inplace=True)
+        df.ffill(inplace=True)
         
         self.market_data[symbol] = df
     

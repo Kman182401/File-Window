@@ -30,6 +30,7 @@ import pandas as pd
 import pytz
 
 from market_hours_detector import MarketHoursDetector
+import logging
 
 
 def _to_utc_index(df: pd.DataFrame) -> pd.DataFrame:
@@ -89,12 +90,29 @@ class MarketAwareDataManager:
             if self.fallback_mins > 0:
                 hist_tail = self._load_historical(symbol, self.fallback_mins)
                 blended = _dedupe_concat([hist_tail, live_df])
-                return self._trim_window(blended, self.window_mins)
-            return self._trim_window(live_df, self.window_mins)
+                out = self._trim_window(blended, self.window_mins)
+            else:
+                out = self._trim_window(live_df, self.window_mins)
+            try:
+                logging.info(
+                    f"[data-route] symbol={symbol} source=live reason={reason} "
+                    f"bars={len(out)} req_window_mins={self.window_mins} tail_blend_mins={self.fallback_mins}"
+                )
+            except Exception:
+                pass
+            return out
 
         # historical route
         hist_df = self._load_historical(symbol, self.window_mins + self.fallback_mins)
-        return self._trim_window(hist_df, self.window_mins)
+        out = self._trim_window(hist_df, self.window_mins)
+        try:
+            logging.info(
+                f"[data-route] symbol={symbol} source=historical reason={reason} "
+                f"bars={len(out)} req_window_mins={self.window_mins}"
+            )
+        except Exception:
+            pass
+        return out
 
     # Internals
     def _decide_route(self, symbol: str) -> Tuple[str, str]:
