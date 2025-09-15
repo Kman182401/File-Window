@@ -37,3 +37,31 @@
 - IBKR single‑client mode: reserve `clientId=9002`; gate orders with `ENABLE_ORDER_EXEC`, `ALLOW_ORDERS`, `DRY_RUN` (keep disabled for tests).
 - Keep `gpt-files-repo/` synchronized (`./sync_gpt_files.sh`) after system changes to support cross‑AI collaboration.
 
+## Tooling Preferences (Speed)
+
+- Prefer ripgrep for content search
+  - `rg -n --no-heading --color=never "<pattern>" -- <paths>`
+  - Filenames only: `rg -l "<pattern>"`
+  - Case-insensitive: add `-i`
+
+- Prefer fd for file discovery
+  - List files: `fd -H -t f .`
+  - By glob/name: `fd -H "<glob>" <dir>`
+  - Directories: `fd -H -t d .`
+  - Note: On Debian/Ubuntu the binary may be `fdfind`; a symlink to `fd` is acceptable.
+
+- Prefer jq for JSON processing
+  - `jq -r '<filter>' <file.json>`
+
+- Repo-aware listing when `.git` is present
+  - `git ls-files` (fast, respects `.gitignore`)
+
+- Read limits and ergonomics
+  - Read files in chunks ≤ 250 lines per read.
+  - Avoid ANSI color in outputs (use `--color=never`).
+  - Quote patterns/paths containing spaces.
+
+- Fallbacks if tools unavailable
+  - `rg` → `grep -Rns --binary-files=without-match "<pattern>" -- <paths>`
+  - `fd` → `find . -type f -name "<glob>"`
+  - Prefer installing `rg`/`fd`/`jq` rather than relying on slower fallbacks.
