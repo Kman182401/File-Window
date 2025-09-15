@@ -1595,6 +1595,18 @@ class RLTradingPipeline:
                         logging.warning(f"[feature-store] update failed for {ticker}: {_e}")
                 logging.info("Features engineered successfully.")
 
+                # Per-ticker diagnostics prior to ML/RL thresholds
+                try:
+                    for tkr in features:
+                        X = features.get(tkr)
+                        y = labels.get(tkr)
+                        frows = 0 if X is None else len(X)
+                        lrows = 0 if y is None else len(y)
+                        ppo_min = 21  # because we drop to label-aligned and need >20 rows
+                        logging.info(f"[bars] ticker={tkr} features_rows={frows} labels_rows={lrows} ppo_min_rows={ppo_min}")
+                except Exception:
+                    pass
+
 
                 # === DRIFT DETECTION BLOCK ===
                 # AI_ASSISTANT_TODO: CRITICAL REMINDER!
