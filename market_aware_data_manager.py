@@ -94,7 +94,7 @@ class MarketAwareDataManager:
             else:
                 out = self._trim_window(live_df, self.window_mins)
             try:
-                logging.info(
+                logging.warning(
                     f"[data-route] symbol={symbol} source=live reason={reason} "
                     f"bars={len(out)} req_window_mins={self.window_mins} tail_blend_mins={self.fallback_mins}"
                 )
@@ -106,7 +106,7 @@ class MarketAwareDataManager:
         hist_df = self._load_historical(symbol, self.window_mins + self.fallback_mins)
         out = self._trim_window(hist_df, self.window_mins)
         try:
-            logging.info(
+            logging.warning(
                 f"[data-route] symbol={symbol} source=historical reason={reason} "
                 f"bars={len(out)} req_window_mins={self.window_mins}"
             )
