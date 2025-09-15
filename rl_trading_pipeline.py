@@ -7,66 +7,68 @@ import sys
 
 sys.path.append('/home/ubuntu')
 
-# --- SOCKET CONNECT TRACER (TEMP) ---
 import socket, traceback, time, os, pathlib, signal
-_orig_sock_connect = socket.socket.connect
-_orig_sock_connect_ex = socket.socket.connect_ex
-TRACE_LOG = pathlib.Path.home() / "logs" / "ib_connect_traces.log"
-TRACE_LOG.parent.mkdir(parents=True, exist_ok=True)
+# --- SOCKET CONNECT TRACER (optional) ---
+if os.getenv("SOCKET_TRACE", "0") in ("1", "true", "True"):
+    _orig_sock_connect = socket.socket.connect
+    _orig_sock_connect_ex = socket.socket.connect_ex
+    TRACE_LOG = pathlib.Path.home() / "logs" / "ib_connect_traces.log"
+    TRACE_LOG.parent.mkdir(parents=True, exist_ok=True)
 
-def _connect_tracer(self, addr):
-    try:
-        host, port = addr
-    except Exception:
+    def _connect_tracer(self, addr):
+        try:
+            host, port = addr
+        except Exception:
+            return _orig_sock_connect(self, addr)
+        if str(host) in ("127.0.0.1","::1","localhost") and int(port) == int(os.getenv("IBKR_PORT","4002")):
+            with TRACE_LOG.open("a") as f:
+                f.write(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] socket.connect({host}:{port})\n")
+                traceback.print_stack(file=f, limit=30)
         return _orig_sock_connect(self, addr)
-    if str(host) in ("127.0.0.1","::1","localhost") and int(port) == int(os.getenv("IBKR_PORT","4002")):
-        with TRACE_LOG.open("a") as f:
-            f.write(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] socket.connect({host}:{port})\n")
-            traceback.print_stack(file=f, limit=30)
-    return _orig_sock_connect(self, addr)
 
-def _connect_ex_tracer(self, addr):
-    try:
-        host, port = addr
-    except Exception:
+    def _connect_ex_tracer(self, addr):
+        try:
+            host, port = addr
+        except Exception:
+            return _orig_sock_connect_ex(self, addr)
+        if str(host) in ("127.0.0.1","::1","localhost") and int(port) == int(os.getenv("IBKR_PORT","4002")):
+            with TRACE_LOG.open("a") as f:
+                f.write(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] socket.connect_ex({host}:{port})\n")
+                traceback.print_stack(file=f, limit=30)
         return _orig_sock_connect_ex(self, addr)
-    if str(host) in ("127.0.0.1","::1","localhost") and int(port) == int(os.getenv("IBKR_PORT","4002")):
-        with TRACE_LOG.open("a") as f:
-            f.write(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] socket.connect_ex({host}:{port})\n")
-            traceback.print_stack(file=f, limit=30)
-    return _orig_sock_connect_ex(self, addr)
 
-socket.socket.connect = _connect_tracer
-socket.socket.connect_ex = _connect_ex_tracer
-# --- END SOCKET CONNECT TRACER ---
+    socket.socket.connect = _connect_tracer
+    socket.socket.connect_ex = _connect_ex_tracer
+# --- END optional SOCKET CONNECT TRACER ---
 
-# --- IB GUARD (TEMP) ---
 from ib_insync import IB
-_first_ib = True
-_first_connect = True
+# --- IB GUARD (optional) ---
+if os.getenv("IB_GUARD", "0") in ("1", "true", "True"):
+    _first_ib = True
+    _first_connect = True
 
-_orig_IB_init = IB.__init__
-def _guarded_ib_init(self, *a, **k):
-    global _first_ib
-    if _first_ib:
-        _first_ib = False
-    else:
-        print("\n[IB-GUARD] SECOND IB() CONSTRUCTOR DETECTED at", time.strftime("%H:%M:%S"))
-        traceback.print_stack(limit=30)
-    return _orig_IB_init(self, *a, **k)
-IB.__init__ = _guarded_ib_init
+    _orig_IB_init = IB.__init__
+    def _guarded_ib_init(self, *a, **k):
+        global _first_ib
+        if _first_ib:
+            _first_ib = False
+        else:
+            print("\n[IB-GUARD] SECOND IB() CONSTRUCTOR DETECTED at", time.strftime("%H:%M:%S"))
+            traceback.print_stack(limit=30)
+        return _orig_IB_init(self, *a, **k)
+    IB.__init__ = _guarded_ib_init
 
-_orig_connect = IB.connect
-def _guarded_connect(self, *a, **k):
-    global _first_connect
-    if _first_connect:
-        _first_connect = False
-    else:
-        print("\n[IB-GUARD] ADDITIONAL connect() CALL DETECTED at", time.strftime("%H:%M:%S"))
-        traceback.print_stack(limit=30)
-    return _orig_connect(self, *a, **k)
-IB.connect = _guarded_connect
-# --- END IB GUARD ---
+    _orig_connect = IB.connect
+    def _guarded_connect(self, *a, **k):
+        global _first_connect
+        if _first_connect:
+            _first_connect = False
+        else:
+            print("\n[IB-GUARD] ADDITIONAL connect() CALL DETECTED at", time.strftime("%H:%M:%S"))
+            traceback.print_stack(limit=30)
+        return _orig_connect(self, *a, **k)
+    IB.connect = _guarded_connect
+# --- END optional IB GUARD ---
 
 # --- FAULTHANDLER (ensure 'signal' is imported) ---
 import faulthandler
