@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
 """
-Market-Aware Data Manager
+Market‑Aware Data Manager
 
-Routes data requests between live IBKR and historical (S3/local) based on
-market hours, with optional blending around open/close transitions.
+Selects the data source per iteration: live IBKR during open hours,
+historical (S3/local) otherwise. Optionally blends a recent tail to smooth
+transitions. Returns DataFrames with a UTC DatetimeIndex named 'timestamp'.
 
 Environment flags (precedence high→low):
-  - FORCE_LIVE_DATA=1         Always use live IBKR
-  - FORCE_HISTORICAL_DATA=1   Always use historical fallback
-  - MARKET_AWARE_MODE=1       Auto-select by market hours (default)
+  • FORCE_LIVE_DATA=1         Always use live IBKR
+  • FORCE_HISTORICAL_DATA=1   Always use historical fallback
+  • MARKET_AWARE_MODE=1       Auto-select by market hours (default)
 
-Other knobs:
-  - MARKET_WINDOW_MINS       Target bar window in minutes (default 360)
-  - FALLBACK_MINUTES         Extra minutes to pull from fallback for blending (default 120)
-  - USE_RTH                  Not used (futures use extended hours); defaults False
-
-Returns pandas DataFrames with a UTC DatetimeIndex named 'timestamp'.
+Window knobs:
+  • MARKET_WINDOW_MINS        Target window in minutes (default 360)
+  • FALLBACK_MINUTES          Extra tail for blending (default 120)
+  • Boot window (first minutes after start): MARKET_BOOT_* overrides
 """
 
 from __future__ import annotations
 
+# Imports
 import io
 import os
 import gzip
@@ -33,6 +33,7 @@ from market_hours_detector import MarketHoursDetector
 import logging
 
 
+# Helpers: time index utilities
 def _to_utc_index(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame()
@@ -62,6 +63,7 @@ def _dedupe_concat(dfs: List[pd.DataFrame]) -> pd.DataFrame:
     return out
 
 
+# Manager: routes requests and applies blending
 class MarketAwareDataManager:
     def __init__(self, ingestor, detector: Optional[MarketHoursDetector] = None):
         self.ingestor = ingestor  # Expected to expose fetch_data(symbol, duration, barSize, ...)

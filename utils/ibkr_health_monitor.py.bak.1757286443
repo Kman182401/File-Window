@@ -1,0 +1,411 @@
+"""
+IBKR Gateway Health Monitoring and Management System
+
+Real-time monitoring of Interactive Brokers Gateway/TWS connections with
+automatic health checks, connection quality metrics, and failover support.
+
+Author: AI Trading System
+Version: 2.0.0
+"""
+
+import os
+import time
+import threading
+import logging
+import asyncio
+from typing import Dict, Any, Optional, List, Callable
+from datetime import datetime, timedelta
+from collections import deque
+from dataclasses import dataclass, field
+from enum import Enum
+import subprocess
+import psutil
+
+logger = logging.getLogger(__name__)
+
+
+class ConnectionHealth(Enum):
+    """Connection health status levels"""
+    HEALTHY = "healthy"          # All checks passing
+    DEGRADED = "degraded"        # Some issues but functional
+    UNHEALTHY = "unhealthy"      # Major issues, needs attention
+    DISCONNECTED = "disconnected" # No connection
+    RECONNECTING = "reconnecting" # Attempting to reconnect
+
+
+@dataclass
+class HealthMetrics:
+    """Container for connection health metrics"""
+    timestamp: datetime = field(default_factory=datetime.now)
+    status: ConnectionHealth = ConnectionHealth.DISCONNECTED
+    latency_ms: float = 0.0
+    message_rate: float = 0.0
+    error_rate: float = 0.0
+    last_heartbeat: Optional[datetime] = None
+    uptime_seconds: float = 0.0
+    reconnect_count: int = 0
+    docker_container_healthy: bool = False
+    gateway_process_running: bool = False
+    port_accessible: bool = False
+    api_version: Optional[int] = None
+
+
+class IBKRHealthMonitor:
+    """
+    Comprehensive health monitoring for IBKR connections
+    """
+    
+    def __init__(self, host: str = "127.0.0.1", port: int = 4002, 
+                 client_id: int = 9002, check_interval: int = 30):
+        """
+        Initialize health monitor
+        
+        Args:
+            host: IBKR Gateway host
+            port: IBKR Gateway port
+            client_id: Client ID for connections
+            check_interval: Seconds between health checks
+        """
+        self.host = host
+        self.port = port
+        self.client_id = client_id
+        self.check_interval = check_interval
+        
+        # Monitoring state
+        self.monitoring_active = False
+        self.monitor_thread = None
+        self.health_history = deque(maxlen=100)
+        self.current_health = HealthMetrics()
+        self.connection_start_time = None
+        self.last_successful_check = None
+        
+        # Callbacks
+        self.health_callbacks = []
+        self.alert_callbacks = []
+        
+        # Docker container name (from CLAUDE.md)
+        self.docker_container = "ibkr-ibkr-gateway-1"
+        
+        logger.info(f"IBKRHealthMonitor initialized for {host}:{port}")
+    
+    def check_docker_container(self) -> bool:
+        """Check if Docker container is running"""
+        try:
+            result = subprocess.run(
+                ["docker", "ps", "--format", "{{.Names}}"],
+                capture_output=True, text=True, timeout=5
+            )
+            return self.docker_container in result.stdout
+        except Exception as e:
+            logger.debug(f"Docker check failed: {e}")
+            return False
+    
+    def check_port_accessibility(self) -> bool:
+        """Check if port is accessible"""
+        import socket
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(5)
+            result = sock.connect_ex((self.host, self.port))
+            sock.close()
+            return result == 0
+        except Exception as e:
+            logger.debug(f"Port check failed: {e}")
+            return False
+    
+    def check_gateway_process(self) -> bool:
+        """Check if IB Gateway process is running"""
+        try:
+            # Check inside docker container
+            result = subprocess.run(
+                ["docker", "exec", self.docker_container, "ps", "aux"],
+                capture_output=True, text=True, timeout=5
+            )
+            return "ibgateway" in result.stdout.lower() or "java" in result.stdout
+        except Exception:
+            # Fallback to local process check
+            for proc in psutil.process_iter(['name', 'cmdline']):
+                try:
+                    if 'ibgateway' in proc.name().lower():
+                        return True
+                    if proc.cmdline() and any('ibgateway' in arg.lower() 
+                                            for arg in proc.cmdline()):
+                        return True
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+            return False
+    
+    def check_socat_forwarding(self) -> Dict[str, Any]:
+        """Check socat port forwarding configuration"""
+        try:
+            result = subprocess.run(
+                ["docker", "exec", self.docker_container, "ps", "aux"],
+                capture_output=True, text=True, timeout=5
+            )
+            
+            socat_info = {}
+            if "socat" in result.stdout:
+                # Extract socat configuration
+                for line in result.stdout.split('\n'):
+                    if 'socat' in line:
+                        if '4002' in line:
+                            socat_info['forwarding'] = 'Port 4002 (paper trading)'
+                        elif '4001' in line:
+                            socat_info['forwarding'] = 'Port 4001 (live trading)'
+                        socat_info['active'] = True
+                        break
+            else:
+                socat_info['active'] = False
+                
+            return socat_info
+        except Exception as e:
+            logger.debug(f"Socat check failed: {e}")
+            return {'active': False, 'error': str(e)}
+    
+    def perform_health_check(self) -> HealthMetrics:
+        """Perform comprehensive health check"""
+        metrics = HealthMetrics(timestamp=datetime.now())
+        
+        # Check Docker container
+        metrics.docker_container_healthy = self.check_docker_container()
+        
+        # Check port accessibility
+        metrics.port_accessible = self.check_port_accessibility()
+        
+        # Check Gateway process
+        metrics.gateway_process_running = self.check_gateway_process()
+        
+        # Check IB connection
+        if metrics.port_accessible:
+            try:
+                from ib_insync import IB, util
+                ib = IB()
+                
+                # PHASE4A-FIX: IB connection using proper async handling
+                try:
+                    # Ensure ib_insync event loop is running for health monitor
+                    util.startLoop()
+                    logger.debug("Health monitor started ib_insync event loop")
+                    
+                    # Use sync connect with proper event loop
+                    ib.connect(self.host, self.port, clientId=self.client_id + 1000, 
+                              timeout=10)
+                    logger.debug("Health monitor connected successfully using util.startLoop")
+                    
+                except Exception as connect_error:
+                    logger.debug(f"Health monitor connection failed: {connect_error}")
+                    # Don't re-raise, just mark as failed
+                
+                # Connection successful
+                metrics.status = ConnectionHealth.HEALTHY
+                metrics.api_version = ib.client.serverVersion() if hasattr(ib.client, 'serverVersion') else None
+                metrics.last_heartbeat = datetime.now()
+                
+                # Calculate latency (simple ping)
+                start = time.time()
+                ib.reqCurrentTime()
+                metrics.latency_ms = (time.time() - start) * 1000
+                
+                ib.disconnect()
+                
+                self.last_successful_check = datetime.now()
+                
+            except Exception as e:
+                logger.debug(f"IB connection check failed: {e}")
+                
+                if metrics.docker_container_healthy and metrics.gateway_process_running:
+                    metrics.status = ConnectionHealth.DEGRADED
+                else:
+                    metrics.status = ConnectionHealth.DISCONNECTED
+        else:
+            metrics.status = ConnectionHealth.DISCONNECTED
+        
+        # Calculate uptime
+        if self.connection_start_time and metrics.status == ConnectionHealth.HEALTHY:
+            metrics.uptime_seconds = (datetime.now() - self.connection_start_time).total_seconds()
+        
+        # Store metrics
+        self.health_history.append(metrics)
+        self.current_health = metrics
+        
+        # Trigger callbacks if health changed
+        if len(self.health_history) > 1:
+            prev_status = self.health_history[-2].status
+            if metrics.status != prev_status:
+                self._trigger_health_callbacks(metrics)
+                
+                # Alert on critical changes
+                if metrics.status in [ConnectionHealth.UNHEALTHY, ConnectionHealth.DISCONNECTED]:
+                    self._trigger_alert_callbacks(metrics)
+        
+        return metrics
+    
+    def _trigger_health_callbacks(self, metrics: HealthMetrics):
+        """Trigger registered health callbacks"""
+        for callback in self.health_callbacks:
+            try:
+                callback(metrics)
+            except Exception as e:
+                logger.error(f"Health callback failed: {e}")
+    
+    def _trigger_alert_callbacks(self, metrics: HealthMetrics):
+        """Trigger alert callbacks for critical issues"""
+        for callback in self.alert_callbacks:
+            try:
+                callback(metrics)
+            except Exception as e:
+                logger.error(f"Alert callback failed: {e}")
+    
+    def register_health_callback(self, callback: Callable[[HealthMetrics], None]):
+        """Register callback for health status changes"""
+        self.health_callbacks.append(callback)
+    
+    def register_alert_callback(self, callback: Callable[[HealthMetrics], None]):
+        """Register callback for critical alerts"""
+        self.alert_callbacks.append(callback)
+    
+    def start_monitoring(self):
+        """Start automatic health monitoring"""
+        if self.monitoring_active:
+            return
+        
+        self.monitoring_active = True
+        self.connection_start_time = datetime.now()
+        
+        def monitor_loop():
+            while self.monitoring_active:
+                try:
+                    self.perform_health_check()
+                    time.sleep(self.check_interval)
+                except Exception as e:
+                    logger.error(f"Health check error: {e}")
+                    time.sleep(self.check_interval)
+        
+        self.monitor_thread = threading.Thread(target=monitor_loop, daemon=True)
+        self.monitor_thread.start()
+        
+        logger.info(f"Health monitoring started (interval: {self.check_interval}s)")
+    
+    def stop_monitoring(self):
+        """Stop health monitoring"""
+        self.monitoring_active = False
+        if self.monitor_thread:
+            self.monitor_thread.join(timeout=5)
+        logger.info("Health monitoring stopped")
+    
+    def get_health_report(self) -> Dict[str, Any]:
+        """Generate comprehensive health report"""
+        recent_metrics = list(self.health_history)[-10:] if self.health_history else []
+        
+        # Calculate statistics
+        if recent_metrics:
+            avg_latency = sum(m.latency_ms for m in recent_metrics) / len(recent_metrics)
+            health_percentage = sum(1 for m in recent_metrics 
+                                   if m.status == ConnectionHealth.HEALTHY) / len(recent_metrics) * 100
+        else:
+            avg_latency = 0
+            health_percentage = 0
+        
+        report = {
+            'timestamp': datetime.now().isoformat(),
+            'current_status': self.current_health.status.value,
+            'connection': {
+                'host': self.host,
+                'port': self.port,
+                'client_id': self.client_id,
+                'api_version': self.current_health.api_version
+            },
+            'health_checks': {
+                'docker_container': self.current_health.docker_container_healthy,
+                'gateway_process': self.current_health.gateway_process_running,
+                'port_accessible': self.current_health.port_accessible
+            },
+            'metrics': {
+                'average_latency_ms': round(avg_latency, 2),
+                'health_percentage': round(health_percentage, 2),
+                'uptime_seconds': self.current_health.uptime_seconds,
+                'reconnect_count': self.current_health.reconnect_count,
+                'last_successful_check': self.last_successful_check.isoformat() 
+                                        if self.last_successful_check else None
+            },
+            'socat_status': self.check_socat_forwarding()
+        }
+        
+        return report
+    
+    def diagnose_connection_issues(self) -> List[str]:
+        """Diagnose and provide recommendations for connection issues"""
+        issues = []
+        recommendations = []
+        
+        metrics = self.current_health
+        
+        if not metrics.docker_container_healthy:
+            issues.append("Docker container not running")
+            recommendations.append("Run: cd /home/ubuntu/ibkr && docker compose restart")
+        
+        if not metrics.gateway_process_running:
+            issues.append("IB Gateway process not running")
+            recommendations.append("Check container logs: docker logs ibkr-ibkr-gateway-1")
+        
+        if not metrics.port_accessible:
+            issues.append(f"Port {self.port} not accessible")
+            recommendations.append("Check firewall/iptables rules")
+            recommendations.append("Verify socat forwarding: docker exec ibkr-ibkr-gateway-1 ps aux | grep socat")
+        
+        socat_status = self.check_socat_forwarding()
+        if not socat_status.get('active'):
+            issues.append("Socat port forwarding not active")
+            recommendations.append(
+                'Fix socat: docker exec ibkr-ibkr-gateway-1 bash -c '
+                '"pkill socat; nohup socat -d -d TCP-LISTEN:8888,fork TCP:127.0.0.1:4002 > /tmp/socat.log 2>&1 &"'
+            )
+        
+        if metrics.status == ConnectionHealth.DISCONNECTED and not issues:
+            issues.append("Connection refused despite services running")
+            recommendations.append("Wait 20 seconds for full initialization")
+            recommendations.append("Check IB Gateway login status in container")
+        
+        return {
+            'issues': issues,
+            'recommendations': recommendations,
+            'diagnosis_time': datetime.now().isoformat()
+        }
+
+
+if __name__ == "__main__":
+    # Self-test
+    print("IBKR Health Monitor Self-Test")
+    print("=" * 50)
+    
+    monitor = IBKRHealthMonitor()
+    
+    print("\nPerforming health check...")
+    metrics = monitor.perform_health_check()
+    
+    print(f"Status: {metrics.status.value}")
+    print(f"Docker container: {'✓' if metrics.docker_container_healthy else '✗'}")
+    print(f"Gateway process: {'✓' if metrics.gateway_process_running else '✗'}")
+    print(f"Port accessible: {'✓' if metrics.port_accessible else '✗'}")
+    
+    if metrics.api_version:
+        print(f"API Version: {metrics.api_version}")
+    
+    print("\nHealth Report:")
+    report = monitor.get_health_report()
+    for key, value in report['health_checks'].items():
+        print(f"  {key}: {value}")
+    
+    print("\nDiagnostics:")
+    diagnosis = monitor.diagnose_connection_issues()
+    if diagnosis['issues']:
+        print("  Issues found:")
+        for issue in diagnosis['issues']:
+            print(f"    - {issue}")
+        print("  Recommendations:")
+        for rec in diagnosis['recommendations']:
+            print(f"    - {rec}")
+    else:
+        print("  No issues detected")
+    
+    print("\nSelf-test complete!")

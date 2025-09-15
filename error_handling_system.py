@@ -3,7 +3,7 @@
 Comprehensive Error Handling and Fallback System
 
 Production-grade error handling, circuit breakers, and fallback mechanisms
-for the AI trading system. Ensures system stability and graceful degradation.
+for the trading system. Ensures stability and graceful degradation.
 """
 
 import logging

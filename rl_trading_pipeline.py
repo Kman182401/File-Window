@@ -1,14 +1,21 @@
-# ============================================================================
-# ENHANCED IMPORTS - Trading System v2.0
-# ============================================================================
+"""
+Trading Pipeline Orchestration
 
+Coordinates data routing (live vs. historical), feature engineering, and
+modeling stages (ML, RL, meta/ensemble) with monitoring and audit logging.
+Operates long‑running using a single IBKR socket.
+"""
+
+# =============================================================================
+# Imports and Path Setup
+# =============================================================================
 # System path setup
 import sys
 
 sys.path.append('/home/ubuntu')
 
 import socket, traceback, time, os, pathlib, signal
-# --- SOCKET CONNECT TRACER (optional) ---
+# --- Optional Socket Connect Tracer ---
 if os.getenv("SOCKET_TRACE", "0") in ("1", "true", "True"):
     _orig_sock_connect = socket.socket.connect
     _orig_sock_connect_ex = socket.socket.connect_ex
@@ -39,10 +46,10 @@ if os.getenv("SOCKET_TRACE", "0") in ("1", "true", "True"):
 
     socket.socket.connect = _connect_tracer
     socket.socket.connect_ex = _connect_ex_tracer
-# --- END optional SOCKET CONNECT TRACER ---
+# --- End Optional Socket Connect Tracer ---
 
 from ib_insync import IB
-# --- IB GUARD (optional) ---
+# --- Optional IB Guard (warns on repeated constructors/connect) ---
 if os.getenv("IB_GUARD", "0") in ("1", "true", "True"):
     _first_ib = True
     _first_connect = True
@@ -68,14 +75,16 @@ if os.getenv("IB_GUARD", "0") in ("1", "true", "True"):
             traceback.print_stack(limit=30)
         return _orig_connect(self, *a, **k)
     IB.connect = _guarded_connect
-# --- END optional IB GUARD ---
+# --- End Optional IB Guard ---
 
-# --- FAULTHANDLER (ensure 'signal' is imported) ---
+# --- Faulthandler (ensure 'signal' is imported) ---
 import faulthandler
 faulthandler.register(signal.SIGUSR1, all_threads=True, chain=True)
-# --- END FAULTHANDLER ---
+# --- End Faulthandler ---
 
+# =============================================================================
 # Single Socket Integration
+# =============================================================================
 import atexit
 from ib_single_socket import (
     init_ib, get_ib, disconnect,
@@ -102,7 +111,9 @@ signal.signal(signal.SIGINT, _clean_shutdown)
 signal.signal(signal.SIGTERM, _clean_shutdown)
 atexit.register(lambda: disconnect())
 
-# Core Security and Configuration
+# =============================================================================
+# Core Security, Configuration, Monitoring
+# =============================================================================
 from config.master_config import get_config
 from config.secrets_manager import get_secrets_manager
 from monitoring.client.ingest_hooks import log_ingest
@@ -1609,10 +1620,9 @@ class RLTradingPipeline:
 
 
                 # === DRIFT DETECTION BLOCK ===
-                # AI_ASSISTANT_TODO: CRITICAL REMINDER!
-                # If you are enabling live IBKR data, you MUST set 'disable_drift_detection' to False in the config below.
-                # This is a production safeguard. If you are an AI assistant or developer, PROMPT THE USER to re-enable drift detection
-                # before allowing any live trading or IBKR integration. This is essential for risk management and compliance.
+                # NOTE: Production safeguard — when enabling live IBKR data,
+                # re-enable drift detection in the config before allowing any
+                # live trading. This is essential for risk management and compliance.
                 for ticker, X in features.items():
                     if len(X) > 200:
                         if not self.config.get("disable_drift_detection", False):
