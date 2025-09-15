@@ -386,8 +386,8 @@ def generate_features(df):
     # Drop only rows with NaN in essential features
     df = df.dropna(subset=[col for col in essential_features if col in df.columns])
 
-    # Forward-fill remaining NaNs in non-essential columns
-    df = df.fillna(method='ffill').fillna(0)
+    # Forward-fill remaining NaNs in non-essential columns (modern API)
+    df = df.ffill().fillna(0)
 
     if len(df) < pre_filter_len:
         logger.info(f"[FE] Smart filter: kept {len(df)}/{pre_filter_len} rows")
@@ -397,24 +397,20 @@ def generate_features(df):
     features = df.drop(['label'], axis=1).iloc[:-1]
     labels = df['label'].iloc[:-1]
 
-    # PHASE4A-FIX: Guarantee UTC datetime index and timestamp column
-    # Handle various index types
-    if not isinstance(features.index, pd.DatetimeIndex):
-        features.index = pd.DatetimeIndex(features.index)
-
-    # Convert to UTC safely
-    try:
-        if features.index.tz is None:
-            features.index = features.index.tz_localize("UTC")
-        else:
-            features.index = features.index.tz_convert("UTC")
-    except Exception as e:
-        logger.warning(f"[FE] Timezone conversion issue: {e}, using naive datetime")
-        # If conversion fails, ensure we at least have datetime index
-        features.index = pd.DatetimeIndex(features.index.tz_localize(None) if features.index.tz else features.index)
-
-    # Ensure we expose timestamp as datetime (keep as datetime, not int for proper comparisons)
-    features["timestamp"] = features.index  # Keep as datetime with UTC timezone
+    # PHASE4A-FIX: Guarantee UTC datetime index from the explicit timestamp column
+    # Use the timestamp column (already present) as the authoritative time, in UTC
+    ts = pd.to_datetime(features["timestamp"], utc=True, errors="coerce")
+    # Drop rows where timestamp could not be parsed
+    good = ts.notna()
+    if not good.all():
+        features = features.loc[good]
+        labels = labels.loc[good]
+        ts = ts.loc[good]
+    # Set index to timestamp (UTC)
+    features.index = pd.DatetimeIndex(ts)
+    features.index.name = "timestamp"
+    # Keep a timestamp column that matches the index
+    features["timestamp"] = features.index
 
     # PHASE4A-FIX: Log final output shape
     logger.info(f"[FE] generate_features output: features.shape={features.shape}, labels.shape={labels.shape}")
