@@ -1,0 +1,37 @@
+# Virtual environments
+.venv/
+
+# Python cache and artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Editors and OS
+.DS_Store
+*.swp
+*.swo
+
+# Local config & secrets
+.env
+.env.*
+env.local
+*.enc
+
+# Logs and runtime state
+logs/
+trading_system/logs/
+*.log
+*.jsonl
+*.pid
+
+# Backups / temp
+*.bak
+*~
+
+# Data/model caches (kept outside repo)
+data/
+datasets/
+models/
+.cache/
+

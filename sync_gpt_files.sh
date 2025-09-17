@@ -6,8 +6,8 @@ set -e
 echo "🔄 Syncing trading system files to GPT-files repository..."
 
 # Define source and destination
-SOURCE_DIR="/home/ubuntu"
-DEST_DIR="/home/ubuntu/gpt-files-repo"
+SOURCE_DIR="/home/karson"
+DEST_DIR="/home/karson/gpt-files-repo"
 
 # Core Python files to sync
 CORE_FILES=(

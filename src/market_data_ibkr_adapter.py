@@ -2,6 +2,9 @@ from ib_insync import IB, util, Contract, Future
 import pandas as pd
 from datetime import datetime
 from typing import Optional
+from utils.ibkr_pacing import PaceGate
+
+pace_gate = PaceGate(rate_per_sec=3.0, burst=3, dupe_cooldown_s=15.0)
 
 def get_ibkr_front_month_contract(
     ib: IB,
@@ -85,6 +88,21 @@ class IBKRIngestor:
             raise RuntimeError(f"No contract available for {ticker}.")
         print(f"Requesting contract: {contract}")  # Debug log
         try:
+            # pacing gate
+            try:
+                sym  = getattr(contract, 'localSymbol', None) or getattr(contract, 'symbol', '?')
+                exp  = getattr(contract, 'lastTradeDateOrContractMonth', '') or getattr(getattr(contract, 'comboLegsDescrip', None), '', '')
+                exch = getattr(contract, 'exchange', '')
+                dstr = locals().get('durationStr',  locals().get('duration',  ''))
+                bss  = locals().get('barSizeSetting', locals().get('barSize', ''))
+                edt  = locals().get('endDateTime', '')
+                fp   = f"{sym}-{exp}-{exch}-{whatToShow}-{dstr}-{bss}-{edt}"
+                cid  = getattr(contract, 'conId', None)
+                lane = (cid or (sym, exp, exch), whatToShow)
+                pace_gate.acquire(lane, fp)
+            except Exception:
+                pass
+
             bars = self.ib.reqHistoricalData(
                 contract,
                 endDateTime=endDateTime,
@@ -131,5 +149,3 @@ class IBKRIngestor:
             return get_ibkr_front_month_contract(self.ib, 'GBP', 'CME', 'USD', asof=asof, tradingClass='6B')
         else:
             raise ValueError(f"Unknown ticker: {ticker}.")
-
-

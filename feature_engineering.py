@@ -4,7 +4,7 @@
 
 import os
 import sys
-sys.path.append('/home/ubuntu')
+
 
 import boto3
 import pandas as pd

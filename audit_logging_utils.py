@@ -351,13 +351,32 @@ class ComprehensiveAuditLogger:
     def _collect_system_metrics(self) -> Dict[str, float]:
         """Collect current system metrics for audit context"""
         try:
-            return {
+            metrics = {
                 "cpu_percent": psutil.cpu_percent(interval=0.1),
                 "memory_percent": psutil.virtual_memory().percent,
                 "memory_available_gb": psutil.virtual_memory().available / (1024**3),
                 "disk_usage_percent": psutil.disk_usage('/').percent,
-                "timestamp": time.time()
+                "timestamp": time.time(),
             }
+            try:
+                from utils import gpu_metrics as g
+                gsample = g.collect_gpu_metrics()
+                if gsample.get("available") and gsample.get("aggregate"):
+                    agg = gsample["aggregate"]
+                    metrics.update(
+                        {
+                            "gpu_available": 1.0,
+                            "gpu_count": float(agg.get("count", 0)),
+                            "gpu_max_util_pct": float(agg.get("max_util_pct", 0.0)),
+                            "gpu_max_mem_pct": float(agg.get("max_mem_pct", 0.0)),
+                            "gpu_max_temp_c": float(agg.get("max_temp_c", 0.0)),
+                        }
+                    )
+                else:
+                    metrics.update({"gpu_available": 0.0})
+            except Exception:
+                metrics.update({"gpu_available": 0.0})
+            return metrics
         except Exception:
             return {"collection_error": True, "timestamp": time.time()}
     

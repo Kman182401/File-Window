@@ -6,7 +6,7 @@
 
 ### Current Models
 - **PPO Model**: Trained and operational (2,048 timesteps)
-- **Location**: `/home/ubuntu/models/ppo_trading_model.zip`
+- **Location**: `/home/karson/models/ppo_trading_model.zip`
 - **VecNormalize**: Active and persisted
 - **Learning Rate**: 0.0003
 - **Network Architecture**: [64, 64] MLP with Tanh activation
@@ -79,16 +79,16 @@
 
 ```bash
 # Start ML training
-python3 /home/ubuntu/train_and_trade_pipeline.py
+python3 /home/karson/train_and_trade_pipeline.py
 
 # Run stability test
-python3 /home/ubuntu/test_minimal_pipeline.py
+python3 /home/karson/test_minimal_pipeline.py
 
 # Check model status
-ls -la /home/ubuntu/models/
+ls -la /home/karson/models/
 
 # Monitor training
-tail -f /home/ubuntu/logs/ml_training.log
+tail -f /home/karson/logs/ml_training.log
 
 # Sync to GPT-Files
 ./sync_gpt_files.sh

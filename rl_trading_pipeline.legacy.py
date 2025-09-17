@@ -12,7 +12,7 @@ Operates long‑running using a single IBKR socket.
 # System path setup
 import sys
 
-sys.path.append('/home/ubuntu')
+
 
 import socket, traceback, time, os, pathlib, signal
 # --- Optional Socket Connect Tracer ---
@@ -1413,9 +1413,9 @@ class RLTradingPipeline:
                             print(f"High volatility regime detected for {ticker}, triggering retraining/model switch.")
                             # Trigger retraining/model switch
                             if regime == "high_vol":
-                                model_path = f"/home/ubuntu/models/ppo_model_{ticker}_highvol.zip"
+                                model_path = f"/home/karson/models/ppo_model_{ticker}_highvol.zip"
                             else:
-                                model_path = f"/home/ubuntu/models/ppo_model_{ticker}_normal.zip"
+                                model_path = f"/home/karson/models/ppo_model_{ticker}_normal.zip"
                             self.train_ppo(df, ticker, save_path=model_path)
                     except Exception as regime_error:
                         logging.warning(f"Regime detection failed for {ticker}: {regime_error}")
@@ -1856,7 +1856,7 @@ class RLTradingPipeline:
 
                     # Choose model path by regime on the original close series
                     regime = detect_regime(X['close'])
-                    model_path = f"/home/ubuntu/models/ppo_model_{ticker}_{'highvol' if regime == 'high_vol' else 'normal'}.zip"
+                    model_path = f"/home/karson/models/ppo_model_{ticker}_{'highvol' if regime == 'high_vol' else 'normal'}.zip"
 
                     self.train_ppo(train_data, ticker, save_path=model_path)
                     self.run_ppo(test_data, ticker)
@@ -2707,7 +2707,7 @@ default_config = {
 
 import os
 
-data_dir = os.getenv("DATA_DIR", "/home/ubuntu/data")
+data_dir = os.getenv("DATA_DIR", "/home/karson/data")
 
 if __name__ == "__main__":
     # Create pipeline ONCE with single socket connection

@@ -23,7 +23,7 @@ from pathlib import Path
 
 # Local imports
 import sys
-sys.path.append('/home/ubuntu')
+
 
 from trading_strategies import (
     TradingStrategy, TradeSignal, create_default_strategy, 

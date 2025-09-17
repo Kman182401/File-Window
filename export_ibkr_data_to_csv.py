@@ -9,7 +9,7 @@ from market_data_config import (
     IBKR_HOST, IBKR_PORT, IBKR_CLIENT_ID, IBKR_SYMBOLS
 )
 
-DATA_DIR = "/home/ubuntu/data"
+DATA_DIR = "/home/karson/data"
 CHUNK_DAYS = 30
 SLEEP_SECS = 1.0
 WHAT_TO_SHOW = ['TRADES', 'MIDPOINT']

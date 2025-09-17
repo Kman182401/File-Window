@@ -7,6 +7,7 @@ Real-time alerting, dashboard metrics, and performance optimization recommendati
 """
 
 import time
+import os
 import threading
 import logging
 import json
@@ -22,6 +23,7 @@ import queue
 import statistics
 import asyncio
 from functools import wraps
+from utils import gpu_metrics as gpu
 
 logger = logging.getLogger(__name__)
 
@@ -200,6 +202,40 @@ class MetricsCollector:
                 tags={"component": "system"}
             ))
             
+            # GPU metrics (aggregates + per GPU flat keys)
+            try:
+                gsample = gpu.collect_gpu_metrics()
+                if gsample.get("available"):
+                    agg = gsample.get("aggregate", {})
+                    self.record_metric(PerformanceMetric(
+                        name="gpu.max.util_pct", value=float(agg.get("max_util_pct", 0.0)), unit="%"
+                    ))
+                    self.record_metric(PerformanceMetric(
+                        name="gpu.max.mem_pct", value=float(agg.get("max_mem_pct", 0.0)), unit="%"
+                    ))
+                    self.record_metric(PerformanceMetric(
+                        name="gpu.max.temp_c", value=float(agg.get("max_temp_c", 0.0)), unit="C"
+                    ))
+                    self.record_metric(PerformanceMetric(
+                        name="gpu.count", value=float(agg.get("count", 0)), unit="count"
+                    ))
+                    for g in gsample.get("gpus", [])[:8]:
+                        idx = int(g.get("index", 0))
+                        self.record_metric(PerformanceMetric(
+                            name=f"gpu.{idx}.util_pct", value=float(g.get("util_pct", 0.0)), unit="%"
+                        ))
+                        self.record_metric(PerformanceMetric(
+                            name=f"gpu.{idx}.mem_used_mb", value=float(g.get("mem_used_mb", 0.0)), unit="MB"
+                        ))
+                        self.record_metric(PerformanceMetric(
+                            name=f"gpu.{idx}.mem_pct", value=float(g.get("mem_pct", 0.0)), unit="%"
+                        ))
+                        self.record_metric(PerformanceMetric(
+                            name=f"gpu.{idx}.temp_c", value=float(g.get("temp_c", 0.0)), unit="C"
+                        ))
+            except Exception:
+                pass
+            
         except Exception as e:
             logger.error(f"Failed to collect system metrics: {e}")
             self.collection_stats['collection_errors'] += 1
@@ -302,6 +338,29 @@ class AlertManager:
         
         for threshold in thresholds:
             self.add_threshold(threshold)
+        
+        # GPU aggregate thresholds (env-driven)
+        self.add_threshold(PerformanceThreshold(
+            metric_name="gpu.max.util_pct",
+            warning_threshold=float(os.getenv("GPU_UTIL_WARN", 90)),
+            critical_threshold=float(os.getenv("GPU_UTIL_CRIT", 98)),
+            emergency_threshold=None,
+            direction="above",
+        ))
+        self.add_threshold(PerformanceThreshold(
+            metric_name="gpu.max.mem_pct",
+            warning_threshold=float(os.getenv("GPU_MEM_WARN", 80)),
+            critical_threshold=float(os.getenv("GPU_MEM_CRIT", 92)),
+            emergency_threshold=None,
+            direction="above",
+        ))
+        self.add_threshold(PerformanceThreshold(
+            metric_name="gpu.max.temp_c",
+            warning_threshold=float(os.getenv("GPU_TEMP_WARN", 80)),
+            critical_threshold=float(os.getenv("GPU_TEMP_CRIT", 85)),
+            emergency_threshold=None,
+            direction="above",
+        ))
     
     def add_threshold(self, threshold: PerformanceThreshold):
         """Add a performance threshold"""
@@ -635,7 +694,10 @@ class PerformanceMonitoringSystem:
             'system_metrics': {
                 'memory_usage': self.metrics_collector.get_metric_stats('memory_usage_mb'),
                 'cpu_usage': self.metrics_collector.get_metric_stats('cpu_usage_percent'),
-                'available_memory': self.metrics_collector.get_metric_stats('system_memory_available_mb')
+                'available_memory': self.metrics_collector.get_metric_stats('system_memory_available_mb'),
+                'gpu_max_util': self.metrics_collector.get_metric_stats('gpu.max.util_pct'),
+                'gpu_max_mem': self.metrics_collector.get_metric_stats('gpu.max.mem_pct'),
+                'gpu_max_temp': self.metrics_collector.get_metric_stats('gpu.max.temp_c')
             },
             'pipeline_metrics': {
                 'pipeline_latency': self.metrics_collector.get_metric_stats('pipeline_latency_ms'),

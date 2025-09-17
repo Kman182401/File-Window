@@ -20,7 +20,7 @@ import queue
 
 # Local imports
 import sys
-sys.path.append('/home/ubuntu')
+
 
 from ibkr_paper_broker import IBKRPaperBroker, PaperOrder, OrderStatus
 from trading_decision_engine import TradingDecision

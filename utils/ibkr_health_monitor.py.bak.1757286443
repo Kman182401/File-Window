@@ -342,7 +342,7 @@ class IBKRHealthMonitor:
         
         if not metrics.docker_container_healthy:
             issues.append("Docker container not running")
-            recommendations.append("Run: cd /home/ubuntu/ibkr && docker compose restart")
+            recommendations.append("Run: cd /home/karson/ibkr && docker compose restart")
         
         if not metrics.gateway_process_running:
             issues.append("IB Gateway process not running")

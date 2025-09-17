@@ -22,7 +22,7 @@ import numpy as np
 from datetime import datetime
 
 # Add project root to path
-sys.path.append('/home/ubuntu')
+
 
 # Import enhanced components
 from system_optimization_config import (

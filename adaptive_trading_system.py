@@ -23,7 +23,7 @@ import json
 import argparse
 
 # Local imports
-sys.path.append('/home/ubuntu')
+
 
 from rl_trainer import RLTrainer, create_sample_data
 from trading_decision_engine import TradingDecisionEngine

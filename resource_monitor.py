@@ -20,7 +20,7 @@ class ResourceMonitor:
     def get_metrics(self):
         """Get current system metrics"""
         memory = psutil.virtual_memory()
-        disk = psutil.disk_usage('/home/ubuntu')
+        disk = psutil.disk_usage('/home/karson')
         cpu_percent = psutil.cpu_percent(interval=1)
         
         # Get Python process memory if available

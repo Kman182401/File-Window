@@ -835,9 +835,9 @@ class RLTradingPipeline:
                                 # Trigger retraining/model switch
                                 regime = detect_regime(df['close'])
                                 if regime == "high_vol":
-                                    model_path = f"/home/ubuntu/models/ppo_model_{ticker}_highvol.zip"
+                                    model_path = f"/home/karson/models/ppo_model_{ticker}_highvol.zip"
                                 else:
-                                    model_path = f"/home/ubuntu/models/ppo_model_{ticker}_normal.zip"
+                                    model_path = f"/home/karson/models/ppo_model_{ticker}_normal.zip"
                                 self.train_ppo(df, ticker, save_path=model_path)
                                 last_check_times[ticker] = time.time()
                                 # Optionally, you could load a different model here if you have one for high-vol regimes
@@ -848,9 +848,9 @@ class RLTradingPipeline:
                             print(f"Training PPO for {ticker} (scheduled or new data)...")
                             regime = detect_regime(df['close'])
                             if regime == "high_vol":
-                                model_path = f"/home/ubuntu/models/ppo_model_{ticker}_highvol.zip"
+                                model_path = f"/home/karson/models/ppo_model_{ticker}_highvol.zip"
                             else:
-                                model_path = f"/home/ubuntu/models/ppo_model_{ticker}_normal.zip"
+                                model_path = f"/home/karson/models/ppo_model_{ticker}_normal.zip"
                             self.train_ppo(df, ticker, save_path=model_path)
                             last_check_times[ticker] = current_time
                             last_retrain_time = current_time
@@ -1113,9 +1113,9 @@ class RLTradingPipeline:
                         y_test = y.iloc[split_idx:]
                         regime = detect_regime(train_data['close'])
                         if regime == "high_vol":
-                            model_path = f"/home/ubuntu/models/ppo_model_{ticker}_highvol.zip"
+                            model_path = f"/home/karson/models/ppo_model_{ticker}_highvol.zip"
                         else:
-                            model_path = f"/home/ubuntu/models/ppo_model_{ticker}_normal.zip"
+                            model_path = f"/home/karson/models/ppo_model_{ticker}_normal.zip"
                         self.train_ppo(train_data, ticker, save_path=model_path)
                         self.run_ppo(test_data, ticker)
                         break  # Only run PPO on the first valid ticker for now
@@ -1531,11 +1531,11 @@ class RLTradingPipeline:
         env = TradingEnv(test_data)
         regime = detect_regime(test_data['close'])
         if regime == "high_vol":
-            model_path = f"/home/ubuntu/models/ppo_model_{ticker}_highvol.zip"
+            model_path = f"/home/karson/models/ppo_model_{ticker}_highvol.zip"
         else:
-            model_path = f"/home/ubuntu/models/ppo_model_{ticker}_normal.zip"
+            model_path = f"/home/karson/models/ppo_model_{ticker}_normal.zip"
         if not os.path.exists(model_path):
-            model_path = f"/home/ubuntu/models/ppo_model_{ticker}.zip"
+            model_path = f"/home/karson/models/ppo_model_{ticker}.zip"
         if not os.path.exists(model_path):
             logging.warning(f"No PPO model found for {ticker} at {model_path}; skipping PPO run.")
             return 0.0
@@ -1579,7 +1579,7 @@ class RLTradingPipeline:
 # Example config for testing
 default_config = {
     "tickers": ["ES=F", "NQ=F", "GC=F", "6E=F"],
-    "use_mock_data": false,
+    "use_mock_data": False,
     "feature_params": {"window": 20, "indicators": ["sma", "ema", "rsi"]},
     "log_path": "logs/pipeline.log",
     "s3_bucket": "omega-singularity-ml",

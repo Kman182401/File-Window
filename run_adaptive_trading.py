@@ -17,7 +17,7 @@ from datetime import datetime
 import traceback
 
 # Add project root to path
-sys.path.insert(0, '/home/ubuntu')
+sys.path.insert(0, '/home/karson')
 
 from rl_trading_pipeline import RLTradingPipeline
 from adaptive_pipeline_integration import safely_integrate_adaptive_features
@@ -166,7 +166,7 @@ class ProductionErrorHandler:
 class ProductionLogManager:
     """Advanced logging with rotation, compression, and remote shipping"""
     
-    def __init__(self, log_dir: str = "/home/ubuntu/logs"):
+    def __init__(self, log_dir: str = "/home/karson/logs"):
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(exist_ok=True)
         self.setup_production_logging()

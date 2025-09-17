@@ -55,6 +55,13 @@ class ResourceThresholds:
     # Network/IBKR thresholds
     ibkr_timeout_seconds: int = 30       # IBKR connection timeout
     max_reconnect_attempts: int = 3      # Max IBKR reconnection tries
+    # GPU thresholds
+    gpu_util_warning_pct: float = float(os.getenv("GPU_UTIL_WARN", 90))
+    gpu_util_critical_pct: float = float(os.getenv("GPU_UTIL_CRIT", 98))
+    gpu_mem_warning_pct: float = float(os.getenv("GPU_MEM_WARN", 80))
+    gpu_mem_critical_pct: float = float(os.getenv("GPU_MEM_CRIT", 92))
+    gpu_temp_warning_c: float = float(os.getenv("GPU_TEMP_WARN", 80))
+    gpu_temp_critical_c: float = float(os.getenv("GPU_TEMP_CRIT", 85))
 
 @dataclass
 class ResourceMetrics:
@@ -68,6 +75,12 @@ class ResourceMetrics:
     python_memory_mb: float
     ibkr_connected: bool = False
     active_processes: int = 0
+    # GPU summary
+    gpu_count: int = 0
+    gpu_util_percent: float = 0.0
+    gpu_mem_used_gb: float = 0.0
+    gpu_mem_percent: float = 0.0
+    gpu_temp_c: float = 0.0
     
 class EnhancedResourceMonitor:
     """
@@ -132,7 +145,7 @@ class EnhancedResourceMonitor:
             cpu_percent = psutil.cpu_percent(interval=1)
             
             # Disk information
-            disk = psutil.disk_usage('/home/ubuntu')
+            disk = psutil.disk_usage('/home/karson')
             
             # Python process memory
             try:
@@ -150,6 +163,36 @@ class EnhancedResourceMonitor:
                 
             # Check IBKR connection (basic check)
             ibkr_connected = self._check_ibkr_connection()
+
+            # GPU metrics (aggregate)
+            try:
+                from utils import gpu_metrics as g
+                gsample = g.collect_gpu_metrics()
+                if gsample.get("available") and gsample.get("aggregate"):
+                    agg = gsample["aggregate"]
+                    gpu_count = int(agg.get("count", 0))
+                    gpu_util_percent = float(agg.get("max_util_pct", 0.0))
+                    gpu_mem_percent = float(agg.get("max_mem_pct", 0.0))
+                    gpu_temp_c = float(agg.get("max_temp_c", 0.0))
+                    # Convert mem_used from max percent into GB via first GPU total if possible
+                    gpu_mem_used_gb = 0.0
+                    gpus = gsample.get("gpus", [])
+                    if gpus:
+                        # Use the GPU with max mem pct
+                        top = max(gpus, key=lambda x: x.get("mem_pct", 0.0))
+                        gpu_mem_used_gb = float(top.get("mem_used_mb", 0.0)) / 1024.0
+                else:
+                    gpu_count = 0
+                    gpu_util_percent = 0.0
+                    gpu_mem_percent = 0.0
+                    gpu_temp_c = 0.0
+                    gpu_mem_used_gb = 0.0
+            except Exception:
+                gpu_count = 0
+                gpu_util_percent = 0.0
+                gpu_mem_percent = 0.0
+                gpu_temp_c = 0.0
+                gpu_mem_used_gb = 0.0
             
             return ResourceMetrics(
                 timestamp=datetime.utcnow(),
@@ -160,7 +203,12 @@ class EnhancedResourceMonitor:
                 disk_free_gb=disk.free / 1024**3,
                 python_memory_mb=python_memory_mb,
                 ibkr_connected=ibkr_connected,
-                active_processes=active_processes
+                active_processes=active_processes,
+                gpu_count=gpu_count,
+                gpu_util_percent=gpu_util_percent,
+                gpu_mem_used_gb=gpu_mem_used_gb,
+                gpu_mem_percent=gpu_mem_percent,
+                gpu_temp_c=gpu_temp_c
             )
             
         except Exception as e:
@@ -253,6 +301,23 @@ class EnhancedResourceMonitor:
                 self.alert_states['disk_warning'] = True
                 self.alert_callback('WARNING', 
                     f"DISK WARNING: {metrics.disk_used_percent:.1f}% used")
+
+        # GPU threshold checks (use max aggregates)
+        if metrics.gpu_count > 0:
+            if metrics.gpu_util_percent >= self.thresholds.gpu_util_critical_pct:
+                self.alert_callback('CRITICAL', f"GPU UTIL CRITICAL: {metrics.gpu_util_percent:.1f}%")
+            elif metrics.gpu_util_percent >= self.thresholds.gpu_util_warning_pct:
+                self.alert_callback('WARNING', f"GPU UTIL WARNING: {metrics.gpu_util_percent:.1f}%")
+
+            if metrics.gpu_mem_percent >= self.thresholds.gpu_mem_critical_pct:
+                self.alert_callback('CRITICAL', f"GPU MEM CRITICAL: {metrics.gpu_mem_percent:.1f}%")
+            elif metrics.gpu_mem_percent >= self.thresholds.gpu_mem_warning_pct:
+                self.alert_callback('WARNING', f"GPU MEM WARNING: {metrics.gpu_mem_percent:.1f}%")
+
+            if metrics.gpu_temp_c >= self.thresholds.gpu_temp_critical_c:
+                self.alert_callback('CRITICAL', f"GPU TEMP CRITICAL: {metrics.gpu_temp_c:.1f}°C")
+            elif metrics.gpu_temp_c >= self.thresholds.gpu_temp_warning_c:
+                self.alert_callback('WARNING', f"GPU TEMP WARNING: {metrics.gpu_temp_c:.1f}°C")
                     
     def _warning_memory_cleanup(self):
         """Gentle memory cleanup for warning threshold"""
@@ -379,7 +444,12 @@ class EnhancedResourceMonitor:
                 'disk_used_percent': latest.disk_used_percent,
                 'disk_free_gb': latest.disk_free_gb,
                 'python_memory_mb': latest.python_memory_mb,
-                'ibkr_connected': latest.ibkr_connected
+                'ibkr_connected': latest.ibkr_connected,
+                'gpu_count': latest.gpu_count,
+                'gpu_util_percent': latest.gpu_util_percent,
+                'gpu_mem_used_gb': latest.gpu_mem_used_gb,
+                'gpu_mem_percent': latest.gpu_mem_percent,
+                'gpu_temp_c': latest.gpu_temp_c
             },
             'averages': {
                 'memory_gb_10min': avg_memory,

@@ -26,6 +26,7 @@ from typing import Dict, List, Any, Optional
 from collections import deque
 import json
 import traceback
+import os
 
 # Import system components
 from algorithm_selector import AlgorithmSelector, AlgorithmType
@@ -34,6 +35,7 @@ from online_learning_system import OnlineLearningSystem
 from meta_learning_selector import MetaLearningSelector
 from lightgbm_signal_validator import LightGBMSignalValidator
 from advanced_risk_management import AdvancedRiskManager
+from utils import gpu_metrics as gpu
 
 logger = logging.getLogger(__name__)
 
@@ -155,9 +157,10 @@ class ComprehensiveSystemMonitor:
         # System resource checks
         memory_status = self._check_memory_usage()
         cpu_status = self._check_cpu_usage()
+        gpu_status = self._check_gpu_usage()
         
         # Component health checks
-        component_statuses = {}
+        component_statuses = {"gpu": gpu_status}
         
         if self.algorithm_selector:
             component_statuses['algorithm_selector'] = self._check_algorithm_selector()
@@ -230,6 +233,58 @@ class ComprehensiveSystemMonitor:
             status['issue'] = f"High CPU usage: {cpu_percent:.1f}%"
         
         return status
+
+    def _check_gpu_usage(self) -> Dict[str, Any]:
+        """Check GPU usage via NVML/SMI utility."""
+        try:
+            sample = gpu.collect_gpu_metrics()
+            if not sample.get("available"):
+                return {"status": "NOT_AVAILABLE", "reason": sample.get("reason")}
+
+            agg = sample.get("aggregate", {})
+            util = float(agg.get("max_util_pct", 0.0))
+            mem_pct = float(agg.get("max_mem_pct", 0.0))
+            temp_c = float(agg.get("max_temp_c", 0.0))
+
+            # Thresholds (env-driven with sensible defaults)
+            util_warn = float(os.getenv("GPU_UTIL_WARN", 90))
+            util_crit = float(os.getenv("GPU_UTIL_CRIT", 98))
+            mem_warn = float(os.getenv("GPU_MEM_WARN", 80))
+            mem_crit = float(os.getenv("GPU_MEM_CRIT", 92))
+            t_warn = float(os.getenv("GPU_TEMP_WARN", 80))
+            t_crit = float(os.getenv("GPU_TEMP_CRIT", 85))
+
+            status = {
+                "count": int(agg.get("count", 0)),
+                "max_util_pct": util,
+                "max_mem_pct": mem_pct,
+                "max_temp_c": temp_c,
+                "status": "HEALTHY",
+            }
+
+            issues = []
+            if util >= util_crit or mem_pct >= mem_crit or temp_c >= t_crit:
+                status["status"] = "CRITICAL"
+                if util >= util_crit:
+                    issues.append(f"GPU util {util:.1f}% >= {util_crit}%")
+                if mem_pct >= mem_crit:
+                    issues.append(f"GPU mem {mem_pct:.1f}% >= {mem_crit}%")
+                if temp_c >= t_crit:
+                    issues.append(f"GPU temp {temp_c:.1f}C >= {t_crit}C")
+            elif util >= util_warn or mem_pct >= mem_warn or temp_c >= t_warn:
+                status["status"] = "WARNING"
+                if util >= util_warn:
+                    issues.append(f"GPU util {util:.1f}% >= {util_warn}%")
+                if mem_pct >= mem_warn:
+                    issues.append(f"GPU mem {mem_pct:.1f}% >= {mem_warn}%")
+                if temp_c >= t_warn:
+                    issues.append(f"GPU temp {temp_c:.1f}C >= {t_warn}C")
+
+            if issues:
+                status["issue"] = "; ".join(issues)
+            return status
+        except Exception as e:
+            return {"status": "ERROR", "issue": f"GPU check failed: {e}"}
     
     def _check_algorithm_selector(self) -> Dict[str, Any]:
         """Check algorithm selector health."""
@@ -520,6 +575,13 @@ class ComprehensiveSystemMonitor:
         logger.info(f"Auto Recoveries: {self.auto_recoveries}")
         logger.info(f"Avg Memory: {avg_memory:.0f}MB")
         logger.info(f"Avg CPU: {avg_cpu:.1f}%")
+        if "gpu" in self.health_status.component_health:
+            g = self.health_status.component_health["gpu"]
+            if g.get("status") not in ("NOT_AVAILABLE", "ERROR"):
+                logger.info(
+                    f"GPU: util_max={g.get('max_util_pct', 0):.1f}% "
+                    f"mem_max={g.get('max_mem_pct', 0):.1f}% temp_max={g.get('max_temp_c', 0):.1f}C"
+                )
         
         # Component status
         for component, status in self.health_status.component_health.items():

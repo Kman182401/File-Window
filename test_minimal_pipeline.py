@@ -25,7 +25,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s | %(levelname)-8s | %(message)s',
     handlers=[
-        logging.FileHandler('/home/ubuntu/logs/minimal_pipeline.log'),
+        logging.FileHandler('/home/karson/logs/minimal_pipeline.log'),
         logging.StreamHandler()
     ]
 )

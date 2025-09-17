@@ -31,7 +31,7 @@ from datetime import datetime
 from typing import Dict, Any, Optional
 
 # Add project root to path
-sys.path.insert(0, '/home/ubuntu')
+sys.path.insert(0, '/home/karson')
 
 # Import Phase 2 components
 from algorithm_selector import AlgorithmSelector, AlgorithmType, PerformanceProfile
@@ -53,7 +53,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('/home/ubuntu/logs/phase3_system.log'),
+        logging.FileHandler('/home/karson/logs/phase3_system.log'),
         logging.StreamHandler()
     ]
 )
@@ -456,7 +456,7 @@ def main():
     # Run production readiness test
     import subprocess
     result = subprocess.run([
-        'python3', '/home/ubuntu/test_production_readiness.py'
+        'python3', '/home/karson/test_production_readiness.py'
     ], capture_output=True, text=True, timeout=60)
     
     if result.returncode != 0:

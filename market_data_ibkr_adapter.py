@@ -13,10 +13,11 @@ import asyncio
 import os
 from dataclasses import dataclass
 from enum import Enum
+from utils.ibkr_pacing import PaceGate
 
 # Import enhanced modules
 import sys
-sys.path.append('/home/ubuntu')
+
 from utils.exception_handler import retry_on_exception, circuit_breaker, IBKRConnectionError, DataFetchError
 from utils.ibkr_health_monitor import IBKRHealthMonitor
 from monitoring.performance_tracker import get_performance_tracker
@@ -27,6 +28,7 @@ from config.master_config import config_get
 logger = logging.getLogger(__name__)
 performance_tracker = get_performance_tracker()
 health_monitor = None  # Will be initialized per connection
+pace_gate = PaceGate(rate_per_sec=3.0, burst=3, dupe_cooldown_s=15.0)
 
 
 def get_ibkr_front_month_contract(
@@ -316,6 +318,22 @@ class IBKRIngestor:
         print(f"Requesting contract: {contract}")  # debug log
 
         try:
+            # Pacing gate (per contract, ticktype) with dupe suppression
+            try:
+                # Robust fingerprint across naming variants and unqualified contracts
+                sym  = getattr(contract, 'localSymbol', None) or getattr(contract, 'symbol', '?')
+                exp  = getattr(contract, 'lastTradeDateOrContractMonth', '') or getattr(getattr(contract, 'comboLegsDescrip', None), '', '')
+                exch = getattr(contract, 'exchange', '')
+                dstr = locals().get('durationStr',  locals().get('duration',  ''))
+                bss  = locals().get('barSizeSetting', locals().get('barSize', ''))
+                edt  = locals().get('endDateTime', '')
+                fp   = f"{sym}-{exp}-{exch}-{whatToShow}-{dstr}-{bss}-{edt}"
+                cid  = getattr(contract, 'conId', None)
+                lane = (cid or (sym, exp, exch), whatToShow)
+                pace_gate.acquire(lane, fp)
+            except Exception:
+                pass  # never block if pacing helper fails
+
             bars = self.ib.reqHistoricalData(
                 contract,
                 endDateTime=endDateTime,

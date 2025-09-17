@@ -24,7 +24,7 @@ from stable_baselines3.common.callbacks import BaseCallback, EvalCallback
 from ib_insync import IB, Future, util
 
 # Setup paths
-MODEL_DIR = Path("/home/ubuntu/models")
+MODEL_DIR = Path("/home/karson/models")
 MODEL_DIR.mkdir(exist_ok=True)
 
 # Logging
@@ -32,7 +32,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s | %(levelname)-8s | %(message)s',
     handlers=[
-        logging.FileHandler('/home/ubuntu/logs/ml_training.log'),
+        logging.FileHandler('/home/karson/logs/ml_training.log'),
         logging.StreamHandler()
     ]
 )

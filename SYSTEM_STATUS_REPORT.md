@@ -18,7 +18,7 @@ Your trading system is now operational with machine learning capabilities active
 ### 2. Machine Learning Implementation
 - **COMPLETED**: PPO model training pipeline
 - **COMPLETED**: VecNormalize for stable training
-- **COMPLETED**: Model persistence (saved to /home/ubuntu/models/)
+- **COMPLETED**: Model persistence (saved to /home/karson/models/)
 - **COMPLETED**: 2,048 timesteps of market learning
 - **COMPLETED**: Continuous learning framework
 
@@ -34,8 +34,8 @@ Your trading system is now operational with machine learning capabilities active
 ## 🧠 MACHINE LEARNING STATUS
 
 ### Trained Models
-- **PPO Trading Model**: `/home/ubuntu/models/ppo_trading_model.zip`
-- **VecNormalize Stats**: `/home/ubuntu/models/vec_normalize.pkl`
+- **PPO Trading Model**: `/home/karson/models/ppo_trading_model.zip`
+- **VecNormalize Stats**: `/home/karson/models/vec_normalize.pkl`
 - **Total Training**: 2,048 timesteps
 - **Learning Rate**: 0.0003
 
@@ -122,22 +122,22 @@ STABLE_CONFIG = {
 
 ### Start ML Training
 ```bash
-python3 /home/ubuntu/train_and_trade_pipeline.py
+python3 /home/karson/train_and_trade_pipeline.py
 ```
 
 ### Run Stability Test
 ```bash
-python3 /home/ubuntu/test_minimal_pipeline.py
+python3 /home/karson/test_minimal_pipeline.py
 ```
 
 ### Check Model Status
 ```bash
-ls -la /home/ubuntu/models/
+ls -la /home/karson/models/
 ```
 
 ### Monitor System
 ```bash
-tail -f /home/ubuntu/logs/ml_training.log
+tail -f /home/karson/logs/ml_training.log
 ```
 
 ## ✅ CONCLUSION

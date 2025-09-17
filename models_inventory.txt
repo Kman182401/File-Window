@@ -9,5 +9,5 @@ drwxr-xr-x 76 ubuntu ubuntu  77824 Sep 13 04:03 ..
 
 # Model Details
 
-PPO Model: 144K	/home/ubuntu/models/ppo_trading_model.zip
-VecNorm: 4.0K	/home/ubuntu/models/vec_normalize.pkl
+PPO Model: 144K	/home/karson/models/ppo_trading_model.zip
+VecNorm: 4.0K	/home/karson/models/vec_normalize.pkl

@@ -21,7 +21,7 @@ from ib_insync import Trade, Position, PortfolioItem
 
 # Local imports
 import sys
-sys.path.append('/home/ubuntu')
+
 
 from market_data_ibkr_adapter import IBKRIngestor
 from monitoring.alerting_system import get_alerting_system, AlertSeverity, AlertType

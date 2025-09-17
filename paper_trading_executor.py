@@ -23,7 +23,7 @@ from pathlib import Path
 
 # Local imports
 import sys
-sys.path.append('/home/ubuntu')
+
 
 from trading_decision_engine import TradingDecisionEngine, TradingDecision, PortfolioState
 from market_data_ibkr_adapter import IBKRIngestor

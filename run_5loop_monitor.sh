@@ -21,6 +21,6 @@ echo "PER_LOOP_TIMEOUT: $PER_LOOP_TIMEOUT seconds"
 echo "OVERALL_TIMEOUT: $OVERALL_TIMEOUT seconds"
 
 # Run the monitor with timeout and logging
-timeout $OVERALL_TIMEOUT /home/ubuntu/ml_env/bin/python -u tools/pipeline_monitor_5loops.py 2>&1 | tee "$LOG_FILE"
+timeout $OVERALL_TIMEOUT /home/karson/ml_env/bin/python -u tools/pipeline_monitor_5loops.py 2>&1 | tee "$LOG_FILE"
 
 echo "Monitor completed at $(date)"

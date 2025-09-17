@@ -98,7 +98,7 @@ class ConfigManager:
         self.config_history: List[Dict[str, Any]] = []
         
         # File paths
-        self.config_dir = Path("/home/ubuntu/config")
+        self.config_dir = Path("/home/karson/config")
         self.config_dir.mkdir(parents=True, exist_ok=True)
         
         # Configuration files (in priority order)

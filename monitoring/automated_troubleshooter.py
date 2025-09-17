@@ -334,13 +334,13 @@ class AutomatedTroubleshooter:
                 "remediation_actions": [
                     {
                         "type": "optimization",
-                        "command": "python3 /home/ubuntu/immediate_optimizations.py",
+                        "command": "python3 /home/karson/immediate_optimizations.py",
                         "description": "Run immediate performance optimizations",
                         "risk_level": TroubleshootingLevel.CONSERVATIVE
                     },
                     {
                         "type": "memory_cleanup", 
-                        "command": "python3 /home/ubuntu/memory_management_system.py --cleanup",
+                        "command": "python3 /home/karson/memory_management_system.py --cleanup",
                         "description": "Clean up memory usage",
                         "risk_level": TroubleshootingLevel.CONSERVATIVE
                     },
@@ -371,7 +371,7 @@ class AutomatedTroubleshooter:
                 "remediation_actions": [
                     {
                         "type": "memory_cleanup",
-                        "command": "python3 /home/ubuntu/memory_management_system.py --emergency-cleanup",
+                        "command": "python3 /home/karson/memory_management_system.py --emergency-cleanup",
                         "description": "Emergency memory cleanup",
                         "risk_level": TroubleshootingLevel.CONSERVATIVE
                     },
@@ -405,18 +405,18 @@ class AutomatedTroubleshooter:
                     "docker logs ibkr-ibkr-gateway-1 --tail 20",
                     "netstat -tuln | grep ':4002'",
                     "ping -c 3 127.0.0.1",
-                    "python3 /home/ubuntu/test_ib_connection.py"
+                    "python3 /home/karson/test_ib_connection.py"
                 ],
                 "remediation_actions": [
                     {
                         "type": "container_restart",
-                        "command": "docker compose -f /home/ubuntu/ibkr/compose.yml restart",
+                        "command": "docker compose -f /home/karson/ibkr/compose.yml restart",
                         "description": "Restart IBKR Gateway container",
                         "risk_level": TroubleshootingLevel.CONSERVATIVE
                     },
                     {
                         "type": "connection_test",
-                        "command": "python3 /home/ubuntu/test_ib_connection.py",
+                        "command": "python3 /home/karson/test_ib_connection.py",
                         "description": "Test IBKR connection",
                         "risk_level": TroubleshootingLevel.MONITORING
                     },
@@ -440,7 +440,7 @@ class AutomatedTroubleshooter:
                     "Corrupted cache files"
                 ],
                 "diagnostic_commands": [
-                    "python3 /home/ubuntu/test_data_fetch.py",
+                    "python3 /home/karson/test_data_fetch.py",
                     "aws s3 ls s3://omega-singularity-ml/",
                     "python3 -c \"from feature_engineering import validate_data_quality; validate_data_quality()\"",
                     "ls -la /tmp/market_data_*"
@@ -448,7 +448,7 @@ class AutomatedTroubleshooter:
                 "remediation_actions": [
                     {
                         "type": "data_validation",
-                        "command": "python3 /home/ubuntu/test_data_fetch.py",
+                        "command": "python3 /home/karson/test_data_fetch.py",
                         "description": "Validate data sources",
                         "risk_level": TroubleshootingLevel.MONITORING
                     },
@@ -478,27 +478,27 @@ class AutomatedTroubleshooter:
                     "Training data corruption"
                 ],
                 "diagnostic_commands": [
-                    "python3 /home/ubuntu/verify_trading_intelligence.py",
+                    "python3 /home/karson/verify_trading_intelligence.py",
                     "python3 -c \"from model_manager import check_model_health; check_model_health()\"",
-                    "ls -la /home/ubuntu/models/",
-                    "python3 /home/ubuntu/test_production_readiness.py"
+                    "ls -la /home/karson/models/",
+                    "python3 /home/karson/test_production_readiness.py"
                 ],
                 "remediation_actions": [
                     {
                         "type": "model_validation",
-                        "command": "python3 /home/ubuntu/verify_trading_intelligence.py",
+                        "command": "python3 /home/karson/verify_trading_intelligence.py",
                         "description": "Validate model performance",
                         "risk_level": TroubleshootingLevel.MONITORING
                     },
                     {
                         "type": "feature_refresh",
-                        "command": "python3 /home/ubuntu/feature_engineering.py --refresh",
+                        "command": "python3 /home/karson/feature_engineering.py --refresh",
                         "description": "Refresh feature engineering",
                         "risk_level": TroubleshootingLevel.CONSERVATIVE
                     },
                     {
                         "type": "model_retrain",
-                        "command": "python3 /home/ubuntu/rl_trainer.py --quick-retrain",
+                        "command": "python3 /home/karson/rl_trainer.py --quick-retrain",
                         "description": "Quick model retraining",
                         "risk_level": TroubleshootingLevel.AGGRESSIVE
                     }
@@ -1109,7 +1109,7 @@ class AutomatedTroubleshooter:
         try:
             # Try to run connection test
             result = subprocess.run(
-                "python3 /home/ubuntu/test_ib_connection.py",
+                "python3 /home/karson/test_ib_connection.py",
                 shell=True,
                 capture_output=True,
                 text=True,
@@ -1129,7 +1129,7 @@ class AutomatedTroubleshooter:
         try:
             # Check if trading intelligence is working
             result = subprocess.run(
-                "timeout 30 python3 /home/ubuntu/verify_trading_intelligence.py",
+                "timeout 30 python3 /home/karson/verify_trading_intelligence.py",
                 shell=True,
                 capture_output=True,
                 text=True
