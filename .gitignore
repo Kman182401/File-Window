@@ -27,6 +27,7 @@ trading_system/logs/
 
 # Backups / temp
 *.bak
+*.bak.*
 *~
 
 # Data/model caches (kept outside repo)
@@ -34,4 +35,3 @@ data/
 datasets/
 models/
 .cache/
-
