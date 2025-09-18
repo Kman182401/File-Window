@@ -19,8 +19,9 @@ feature_store = RealTimeFeatureStore()
 from market_data_config import MAX_POSITION_EXPOSURE
 import datetime
 from market_data_config import MAX_DAILY_LOSS_PCT, MAX_TRADES_PER_DAY
-from ib_insync import MarketOrder
+from ib_insync import MarketOrder, util
 from market_data_ibkr_adapter import IBKRIngestor
+from utils.persist_market_data import persist_bars
 from market_data_config import IBKR_SYMBOLS
 TICKERS = IBKR_SYMBOLS
 import psutil
@@ -625,6 +626,82 @@ class RLTradingPipeline:
             # Do not let optional hooks break initialization
             pass
 
+        # Micropoll configuration (permission-agnostic live flow)
+        self.micropoll_enable = str(os.getenv('MICROPOLL_ENABLE', '0')).lower() in ('1', 'true', 'yes')
+        self.micropoll_every_s = int(os.getenv('MICROPOLL_EVERY_S', '10'))
+        self.micropoll_window = os.getenv('MICROPOLL_WINDOW', '90 S')
+        self.micropoll_bar_size = os.getenv('MICROPOLL_BAR_SIZE', '5 secs')
+        self.micropoll_what = os.getenv('MICROPOLL_WHAT', 'MIDPOINT')
+        self._last_poll_ts: Dict[str, Any] = {}
+
+    def _micro_poll_symbol(self, ticker: str) -> int:
+        """Poll a tiny historical window and append only new rows.
+
+        - Uses adapter connection + contract resolution
+        - Fetches small window (e.g., 90 S, 5 secs, MIDPOINT)
+        - Resamples to 1‑minute OHLCV and persists to Parquet
+        Returns number of 1‑minute rows appended.
+        """
+        if not self.micropoll_enable:
+            return 0
+        try:
+            # Ensure connection
+            if not self.market_data_adapter.ensure_connected():
+                return 0
+            # Resolve contract via adapter (handles canonicalization)
+            canonical = self.market_data_adapter._canonical_symbol(ticker)
+            contract = self.market_data_adapter._get_contract(canonical)
+            ib = self.market_data_adapter.ib
+
+            bars = ib.reqHistoricalData(
+                contract,
+                endDateTime='',
+                durationStr=self.micropoll_window,
+                barSizeSetting=self.micropoll_bar_size,
+                whatToShow=self.micropoll_what,
+                useRTH=False,
+                formatDate=1,
+            )
+            df = util.df(bars)
+            if df is None or df.empty:
+                return 0
+            # Filter new rows beyond last seen timestamp
+            last_ts = self._last_poll_ts.get(ticker)
+            if last_ts is not None:
+                df = df[df['date'] > last_ts]
+            if df.empty:
+                return 0
+            self._last_poll_ts[ticker] = df['date'].max()
+
+            # Normalize columns and resample 5‑sec bars to 1‑min
+            df = df.rename(columns={'date': 'timestamp'})
+            df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True, errors='coerce')
+            cols = [c for c in ['timestamp','open','high','low','close','volume'] if c in df.columns]
+            df = df[cols]
+            g = df.set_index('timestamp').sort_index()
+            o = g['open'].resample('1min').first() if 'open' in g.columns else None
+            h = g['high'].resample('1min').max()   if 'high' in g.columns else None
+            l = g['low'].resample('1min').min()    if 'low' in g.columns else None
+            c = g['close'].resample('1min').last() if 'close' in g.columns else None
+            v = g['volume'].resample('1min').sum() if 'volume' in g.columns else None
+            parts = []
+            if o is not None: parts.append(o.rename('open'))
+            if h is not None: parts.append(h.rename('high'))
+            if l is not None: parts.append(l.rename('low'))
+            if c is not None: parts.append(c.rename('close'))
+            if v is not None: parts.append(v.rename('volume'))
+            if not parts:
+                return 0
+            df1 = pd.concat(parts, axis=1).dropna(how='all').reset_index()
+            if df1.empty:
+                return 0
+            persist_bars(ticker, df1)
+            logging.info(f"[micropoll] {ticker}: appended {len(df1)} rows (window={self.micropoll_window}, bar={self.micropoll_bar_size}, what={self.micropoll_what})")
+            return len(df1)
+        except Exception as e:
+            logging.warning(f"[micropoll] {ticker}: error: {e}")
+            return 0
+
     def run(self):
         self.status = "running"
         log_trade_results(f"pipeline_start: run_id={self.run_id}")
@@ -702,6 +779,13 @@ class RLTradingPipeline:
                             last_retrain_time = current_time
                             # (rest of your retraining logic)
                         else:
+                            # Option B: Micro-poll historicals (permission-agnostic) to keep features fresh
+                            try:
+                                appended = self._micro_poll_symbol(ticker)
+                                if appended:
+                                    last_check_times[ticker] = time.time()
+                            except Exception as _mp_e:
+                                logging.warning(f"Micropoll error for {ticker}: {_mp_e}")
                             print(f"No new data or scheduled retrain for {ticker}, skipping retraining.")
 
                         # Log resource usage after PPO training
