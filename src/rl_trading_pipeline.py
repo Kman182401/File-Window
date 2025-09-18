@@ -40,6 +40,7 @@ from market_data_config import MAX_POSITION_EXPOSURE
 import datetime
 from market_data_config import MAX_DAILY_LOSS_PCT, MAX_TRADES_PER_DAY
 from ib_insync import MarketOrder, util
+from account_summary_lookahead import AccountSummaryLookahead
 from market_data_ibkr_adapter import IBKRIngestor
 from utils.persist_market_data import persist_bars
 from market_data_config import IBKR_SYMBOLS
@@ -594,6 +595,13 @@ class RLTradingPipeline:
     def __init__(self, config: Dict[str, Any]):
         self.config = config
         self.market_data_adapter = IBKRIngestor()
+        # Attach passive Account Summary lookahead cache to the live IB session
+        try:
+            ib_ref = getattr(self.market_data_adapter, 'ib', None)
+            if ib_ref is not None:
+                self.acct_la = AccountSummaryLookahead(ib_ref)
+        except Exception as _e:
+            logging.info(f"[acct_la] init skipped: {_e}")
         self.max_retries = config.get('max_retries', 3)
         self.retry_delay = config.get('retry_delay', 10)
         self.max_drawdown_limit = config.get('max_drawdown_limit', 0.2)  # 20% default
