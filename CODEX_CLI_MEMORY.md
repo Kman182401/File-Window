@@ -119,3 +119,40 @@ Acceptance Criteria (for Codex self-check)
 
 This section tells Codex what the new tools are, how and when to use them, and the safety policy it must follow.
 
+## Hardware Stress Test Log — i7-6700K Desktop (Sept 2025)
+
+### Baseline (at rest)
+- **CPU (Package id 0):** ~57–62 °C across 4 cores (8 threads) under light load.
+- **Board/ACPI zones:** ~28–30 °C.
+- **PCH (chipset):** ~38 °C.
+- **GPU (GTX 1060 3 GB):** ~43 °C, ~20% utilization at idle.
+- **Memory:** ~6.5 GiB in use, ~0.77 GiB swap touched.
+- **Disk:** 1 TB HDD, ~80 GiB used, low IO activity.
+
+### Stress Test Configuration
+- Tool: `stress-ng --cpu 8 --cpu-method matrixprod --metrics-brief`
+- Duration: 3 minutes (manually stopped at ~2:46).
+- Governor: `powersave` (stress-ng warning observed).
+- Watchdog: Python script polling `sensors`, **THRESHOLD_C = 95 °C** (kills only if ≥95 °C, anchored on `Package id 0`).
+
+### Results (Observed)
+- **Thermal behavior:**  
+  - Load temps stabilized in **high 80s to low 90s**, peaking ~92 °C.  
+  - Watchdog did not trigger since threshold is 95 °C.  
+  - System sustained full load below the cutoff, no critical events.
+- **Performance metrics (stress-ng):**  
+  - Bogo ops: 828,057 total.  
+  - Bogo ops/s (wall): ~4,993.  
+  - User+sys CPU time: ~1,138 s.  
+  - Wall time: 165.84 s.  
+  - Effective utilization ≈ **85.8%** of ideal 8-thread envelope (1,138 / 1,326.72).  
+  - Indicates clocks held below max, consistent with governor + thermal regulation.
+- **Platform stability:**  
+  - No stressor failures, no kernel faults, no watchdog kill.  
+  - Non-CPU domains (chipset, GPU, board ambient) stayed nominal.
+
+### Characterization
+- The CPU can sustain full 8-thread AVX/FPU load **just under the 95 °C threshold**, plateauing ~90–92 °C.  
+- Performance under this load is steady but capped at ~86% of theoretical due to **powersave governor and thermal regulation**.  
+- Rest of the platform (GPU, chipset, memory, disks) shows no stress or abnormal temps.  
+- System profile in this configuration: **“thermally constrained but stable.”**
