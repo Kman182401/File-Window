@@ -1,4 +1,4 @@
-# ai-trading-system (GPT-Files mirror)
+# M5-Trader System Files
 
 ## Sponsor: AI Workstation Upgrade
 
