@@ -209,11 +209,23 @@ def detect_regime(price_series, window=100):
         return "normal"
 
 def new_data_available(data_dir, ticker, last_check_time):
-    filename = f"{ticker}_TRADES.csv"
-    path = os.path.join(data_dir, filename)
-    if not os.path.exists(path):
+    """Return True if a newer Parquet shard exists for this ticker.
+
+    Parquet layout (env-first):
+      $DATA_DIR/symbol=<ticker>/date=YYYY-MM-DD/bars.parquet
+    """
+    from pathlib import Path
+    base = Path(data_dir) / f"symbol={ticker}"
+    if not base.exists():
         return False
-    mtime = os.path.getmtime(path)
+    parts = sorted(base.rglob("bars.parquet"))
+    if not parts:
+        return False
+    latest = parts[-1]
+    try:
+        mtime = os.path.getmtime(latest)
+    except Exception:
+        return False
     return mtime > last_check_time
 
 def execute_trade(ib, contract, action, quantity):
