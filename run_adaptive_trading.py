@@ -19,7 +19,11 @@ import traceback
 # Add project root to path
 sys.path.insert(0, '/home/karson')
 
-from rl_trading_pipeline import RLTradingPipeline
+# Prefer canonical module under src/, fallback to legacy import for compatibility
+try:  # src-first
+    from src.rl_trading_pipeline import RLTradingPipeline
+except Exception:  # fallback if src/ not importable
+    from rl_trading_pipeline import RLTradingPipeline
 from adaptive_pipeline_integration import safely_integrate_adaptive_features
 import warnings
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed

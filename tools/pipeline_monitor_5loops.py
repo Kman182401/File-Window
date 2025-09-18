@@ -35,8 +35,11 @@ OVERALL_TIMEOUT = int(os.getenv("OVERALL_TIMEOUT", "1800"))  # Default 30 minute
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, project_root)
 
-# Import project modules
-from rl_trading_pipeline import RLTradingPipeline, default_config
+# Import project modules: prefer src/ package, fallback to legacy import path
+try:
+    from src.rl_trading_pipeline import RLTradingPipeline, default_config
+except Exception:
+    from rl_trading_pipeline import RLTradingPipeline, default_config
 from tools.super_model import SuperModel, simulate_paper_trade
 
 # Configure logging

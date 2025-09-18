@@ -72,8 +72,19 @@ logger = logging.getLogger(__name__)
 
 LAST_TRAINED_FILE = "last_trained_time.txt"
 
-from news_ingestion_marketaux import fetch_marketaux_news, normalize_marketaux_news
-from news_data_utils import engineer_news_features
+try:
+    from news_ingestion_marketaux import fetch_marketaux_news, normalize_marketaux_news
+except Exception:
+    def fetch_marketaux_news(*a, **k):
+        import pandas as pd
+        return pd.DataFrame(columns=['published_at','title','description','tickers','provider','source'])
+    def normalize_marketaux_news(df):
+        return df
+try:
+    from news_data_utils import engineer_news_features
+except Exception:
+    def engineer_news_features(df):
+        return df
 
 from market_data_config import (
     IBKR_HOST, IBKR_PORT, IBKR_CLIENT_ID, IBKR_SYMBOLS, IBKR_LOG_LEVEL,
@@ -236,6 +247,10 @@ IBKR_CONFIG = {
 
 bucket = "omega-singularity-ml"
 
+# Default data dir for new_data_available checks (env-first)
+from pathlib import Path
+data_dir = os.getenv("DATA_DIR", str(Path.home() / ".local/share/m5_trader/data"))
+
 # === Combined News Ingestion (MarketAux + IBKR) ===
 entity_types = "indices,commodities,currencies,futures"
 countries = "US,GB,EU,AU"
@@ -269,268 +284,19 @@ except Exception as e:
 
 # 3) Union + de-dupe
 import pandas as pd
-news_df = pd.concat([ma_df, ibkr_df], ignore_index=True)
-# drop obvious dupes by (timestamp rounded to minute + title)
-if not news_df.empty:
-    news_df['published_min'] = news_df['published_at'].dt.floor('min')
-    news_df = news_df.drop_duplicates(subset=['published_min','title']).drop(columns=['published_min'])
-
-print(f"News rows — MarketAux: {len(ma_df)}, IBKR: {len(ibkr_df)}, Combined: {len(news_df)}")
-if news_df.empty:
-    logging.warning("No news from either source; continuing run without news features.")
-
-from feature_engineering import map_macro_news_to_tickers
-
-# Add a column for mapped macro tickers
-# Use 'description' if available, otherwise 'title'
-if 'description' in news_df.columns:
-    news_df['macro_mapped_tickers'] = news_df['description'].apply(map_macro_news_to_tickers)
-elif 'title' in news_df.columns:
-    news_df['macro_mapped_tickers'] = news_df['title'].apply(map_macro_news_to_tickers)
+if os.getenv("ENABLE_NEWS_ANALYSIS", "0") in ("1", "true", "True"):
+    try:
+        news_df = pd.concat([ma_df, ibkr_df], ignore_index=True)
+        if not news_df.empty:
+            news_df['published_min'] = news_df['published_at'].dt.floor('min')
+            news_df = news_df.drop_duplicates(subset=['published_min','title']).drop(columns=['published_min'])
+        print(f"News rows — MarketAux: {len(ma_df)}, IBKR: {len(ibkr_df)}, Combined: {len(news_df)}")
+    except Exception as e:
+        logging.warning(f"News analysis disabled due to error: {e}")
+        news_df = pd.DataFrame()
 else:
-    print("No suitable text column found for macro mapping.")
-    news_df['macro_mapped_tickers'] = [[] for _ in range(len(news_df))]
-
-# Optionally, merge with direct tickers/entities if present
-def merge_ticker_lists(row):
-    direct = set(row.get('tickers', []))
-    macro = set(row.get('macro_mapped_tickers', []))
-    return list(direct.union(macro))
-
-news_df['all_relevant_tickers'] = news_df.apply(merge_ticker_lists, axis=1)
-
-from news_data_utils import compute_news_embeddings, find_similar_news
-
-# Step 1: Compute embeddings for all news articles
-embeddings = compute_news_embeddings(news_df)
-
-# Step 2: For now, use news_df as a placeholder for historical impactful news
-# (Replace with your actual impactful news DataFrame when available)
-historical_impactful_news_df = news_df
-historical_embeddings = compute_news_embeddings(historical_impactful_news_df)
-
-from news_data_utils import compute_news_embeddings
-from sklearn.metrics.pairwise import cosine_similarity
-
-# Compute embeddings for new and historical news
-new_embeddings = compute_news_embeddings(news_df, text_col='description')
-historical_embeddings = compute_news_embeddings(historical_impactful_news_df, text_col='description')
-
-# Compute similarity matrix
-similarity_matrix = cosine_similarity(new_embeddings, historical_embeddings)
-
-top_k = 1
-top_indices = similarity_matrix.argsort(axis=1)[:, -top_k:][:, ::-1]
-
-news_df['most_similar_impactful_news'] = [
-    [historical_impactful_news_df.iloc[idx]['description'] for idx in indices]
-    for indices in top_indices
-]
-news_df['similarity_score'] = [
-    [similarity_matrix[i, idx] for idx in indices]
-    for i, indices in enumerate(top_indices)
-]
-
-# Now safe to proceed
-embeddings = compute_news_embeddings(news_df)
-
-es1_price_df = df_trades.merge(df_midpoint, on="timestamp", suffixes=('_trades', '_midpoint'))
-print("="*40)
-print("Price Impact Analysis for ES1! (Significance Detection):")
-if news_df.empty or es1_price_df.empty:
-    print("  No news or price data available for ES1!")
-else:
-    for idx, news_row in news_df.iterrows():
-        event_time = pd.to_datetime(news_row['published_at'])
-        # Ensure es1_price_df index is timezone-aware (UTC)
-    if es1_price_df.index.tz is None:
-        es1_price_df.index = es1_price_df.index.tz_localize('UTC')
-    # Ensure event_time is timezone-aware (UTC)
-    if getattr(event_time, 'tzinfo', None) is None or event_time.tzinfo is None:
-        event_time = event_time.tz_localize('UTC')
-    else:
-        event_time = event_time.tz_convert('UTC')
-    if event_time not in es1_price_df.index:
-        # Find the nearest index using get_indexer
-        nearest_idx = es1_price_df.index.get_indexer([event_time], method='nearest')[0]
-        event_time = es1_price_df.index[nearest_idx]
-        result = is_price_move_significant(
-            price_series=es1_price_df['close'],
-            event_time=event_time,
-            lookback=60,
-            post_event=5,
-            z_thresh=2.0
-        )
-        if result['is_significant']:
-            print(f"  Significant move after news at {event_time}: z={result['z_score']:.2f}, move={result['price_move']:.2%}, summary: {news_row['summary']}")
-        else:
-            print(f"  No significant move after news at {event_time}.")
-print("="*40)
-
-nq1_price_df = df_trades.merge(df_midpoint, on="timestamp", suffixes=('_trades', '_midpoint'))
-print("="*40)
-print("Price Impact Analysis for NQ1! (Significance Detection):")
-if news_df.empty or nq1_price_df.empty:
-    print("  No news or price data available for NQ1!")
-else:
-    for idx, news_row in news_df.iterrows():
-        event_time = pd.to_datetime(news_row['published_at'])
-    # Ensure nq1_price_df index is timezone-aware (UTC)
-    if nq1_price_df.index.tz is None:
-        nq1_price_df.index = nq1_price_df.index.tz_localize('UTC')
-    # Ensure event_time is timezone-aware (UTC)
-    if getattr(event_time, 'tzinfo', None) is None or event_time.tzinfo is None:
-        event_time = event_time.tz_localize('UTC')
-    else:
-        event_time = event_time.tz_convert('UTC')
-    if event_time not in nq1_price_df.index:
-        # Find the nearest index using get_indexer
-        nearest_idx = nq1_price_df.index.get_indexer([event_time], method='nearest')[0]
-        event_time = nq1_price_df.index[nearest_idx]
-        result = is_price_move_significant(
-            price_series=nq1_price_df['close'],
-            event_time=event_time,
-            lookback=60,
-            post_event=5,
-            z_thresh=2.0
-        )
-        if result['is_significant']:
-            print(f"  Significant move after news at {event_time}: z={result['z_score']:.2f}, move={result['price_move']:.2%}, summary: {news_row['summary']}")
-        else:
-            print(f"  No significant move after news at {event_time}.")
-print("="*40)
-
-gbpusd_price_df = df_trades.merge(df_midpoint, on="timestamp", suffixes=('_trades', '_midpoint'))
-print("="*40)
-print("Price Impact Analysis for GBPUSD (Significance Detection):")
-if news_df.empty or gbpusd_price_df.empty:
-    print("  No news or price data available for GBPUSD")
-else:
-    for idx, news_row in news_df.iterrows():
-        event_time = pd.to_datetime(news_row['published_at'])
-    # Ensure gbpusd_price_df index is timezone-aware (UTC)
-    if gbpusd_price_df.index.tz is None:
-        gbpusd_price_df.index = gbpusd_price_df.index.tz_localize('UTC')
-    # Ensure event_time is timezone-aware (UTC)
-    if getattr(event_time, 'tzinfo', None) is None or event_time.tzinfo is None:
-        event_time = event_time.tz_localize('UTC')
-    else:
-        event_time = event_time.tz_convert('UTC')
-    if event_time not in gbpusd_price_df.index:
-        # Find the nearest index using get_indexer
-        nearest_idx = gbpusd_price_df.index.get_indexer([event_time], method='nearest')[0]
-        event_time = gbpusd_price_df.index[nearest_idx]
-        result = is_price_move_significant(
-            price_series=gbpusd_price_df['close'],
-            event_time=event_time,
-            lookback=60,
-            post_event=5,
-            z_thresh=2.0
-        )
-        if result['is_significant']:
-            print(f"  Significant move after news at {event_time}: z={result['z_score']:.2f}, move={result['price_move']:.2%}, summary: {news_row['summary']}")
-        else:
-            print(f"  No significant move after news at {event_time}.")
-print("="*40)
-
-eurusd_price_df = df_trades.merge(df_midpoint, on="timestamp", suffixes=('_trades', '_midpoint'))
-print("="*40)
-print("Price Impact Analysis for EURUSD (Significance Detection):")
-if news_df.empty or eurusd_price_df.empty:
-    print("  No news or price data available for EURUSD")
-else:
-    for idx, news_row in news_df.iterrows():
-        event_time = pd.to_datetime(news_row['published_at'])
-    # Ensure eurusd_price_df index is timezone-aware (UTC)
-    if eurusd_price_df.index.tz is None:
-        eurusd_price_df.index = eurusd_price_df.index.tz_localize('UTC')
-    # Ensure event_time is timezone-aware (UTC)
-    if getattr(event_time, 'tzinfo', None) is None or event_time.tzinfo is None:
-        event_time = event_time.tz_localize('UTC')
-    else:
-        event_time = event_time.tz_convert('UTC')
-    if event_time not in eurusd_price_df.index:
-        # Find the nearest index using get_indexer
-        nearest_idx = eurusd_price_df.index.get_indexer([event_time], method='nearest')[0]
-        event_time = eurusd_price_df.index[nearest_idx]
-        result = is_price_move_significant(
-            price_series=eurusd_price_df['close'],
-            event_time=event_time,
-            lookback=60,
-            post_event=5,
-            z_thresh=2.0
-        )
-        if result['is_significant']:
-            print(f"  Significant move after news at {event_time}: z={result['z_score']:.2f}, move={result['price_move']:.2%}, summary: {news_row['summary']}")
-        else:
-            print(f"  No significant move after news at {event_time}.")
-print("="*40)
-
-audusd_price_df = df_trades.merge(df_midpoint, on="timestamp", suffixes=('_trades', '_midpoint'))
-print("="*40)
-print("Price Impact Analysis for AUDUSD (Significance Detection):")
-if news_df.empty or audusd_price_df.empty:
-    print("  No news or price data available for AUDUSD")
-else:
-    for idx, news_row in news_df.iterrows():
-        event_time = pd.to_datetime(news_row['published_at'])
-    # Ensure audusd_price_df index is timezone-aware (UTC)
-    if audusd_price_df.index.tz is None:
-        audusd_price_df.index = audusd_price_df.index.tz_localize('UTC')
-    # Ensure event_time is timezone-aware (UTC)
-    if getattr(event_time, 'tzinfo', None) is None or event_time.tzinfo is None:
-        event_time = event_time.tz_localize('UTC')
-    else:
-        event_time = event_time.tz_convert('UTC')
-    if event_time not in audusd_price_df.index:
-        # Find the nearest index using get_indexer
-        nearest_idx = audusd_price_df.index.get_indexer([event_time], method='nearest')[0]
-        event_time = audusd_price_df.index[nearest_idx]
-        result = is_price_move_significant(
-            price_series=audusd_price_df['close'],
-            event_time=event_time,
-            lookback=60,
-            post_event=5,
-            z_thresh=2.0
-        )
-        if result['is_significant']:
-            print(f"  Significant move after news at {event_time}: z={result['z_score']:.2f}, move={result['price_move']:.2%}, summary: {news_row['summary']}")
-        else:
-            print(f"  No significant move after news at {event_time}.")
-print("="*40)
-
-gold_price_df = df_trades.merge(df_midpoint, on="timestamp", suffixes=('_trades', '_midpoint'))
-print("="*40)
-print("Price Impact Analysis for XAUUSD (Significance Detection):")
-if news_df.empty or xauusd_price_df.empty:
-    print("  No news or price data available for XAUUSD")
-else:
-    for idx, news_row in news_df.iterrows():
-        event_time = pd.to_datetime(news_row['published_at'])
-    # Ensure xauusd_price_df index is timezone-aware (UTC)
-    if xauusd_price_df.index.tz is None:
-        xauusd_price_df.index = xauusd_price_df.index.tz_localize('UTC')
-    # Ensure event_time is timezone-aware (UTC)
-    if getattr(event_time, 'tzinfo', None) is None or event_time.tzinfo is None:
-        event_time = event_time.tz_localize('UTC')
-    else:
-        event_time = event_time.tz_convert('UTC')
-    if event_time not in xauusd_price_df.index:
-        # Find the nearest index using get_indexer
-        nearest_idx = xauusd_price_df.index.get_indexer([event_time], method='nearest')[0]
-        event_time = xauusd_price_df.index[nearest_idx]
-        result = is_price_move_significant(
-            price_series=xauusd_price_df['close'],
-            event_time=event_time,
-            lookback=60,
-            post_event=5,
-            z_thresh=2.0
-        )
-        if result['is_significant']:
-            print(f"  Significant move after news at {event_time}: z={result['z_score']:.2f}, move={result['price_move']:.2%}, summary: {news_row['summary']}")
-        else:
-            print(f"  No significant move after news at {event_time}.")
-print("="*40)
+    # Default: skip heavy news analysis at import time
+    news_df = pd.DataFrame()
 
 class PPOTrainingLogger(BaseCallback):
     def __init__(self, verbose=0):
@@ -786,6 +552,49 @@ class RLTradingPipeline:
         self.last_error = None
         self.notification_hook = None  # Extensibility: notification system
 
+        # Hook IBKR disconnect event to auto-reconnect with backoff
+        try:
+            ib = getattr(self.market_data_adapter, 'ib', None)
+            host = getattr(self.market_data_adapter, 'host', IBKR_HOST)
+            port = getattr(self.market_data_adapter, 'port', IBKR_PORT)
+            cid  = getattr(self.market_data_adapter, 'clientId', IBKR_CLIENT_ID)
+
+            if ib and hasattr(ib, 'disconnectedEvent'):
+                import time as _time
+                import logging as _logging
+
+                def _reconnect():
+                    for delay in (5, 10, 20, 30, 60, 120):
+                        try:
+                            # Delegate to adapter's connect logic if available
+                            if hasattr(self.market_data_adapter, '_connect'):
+                                ok = self.market_data_adapter._connect()
+                                if ok:
+                                    _logging.warning("Reconnected to IBGW on clientId=%s", cid)
+                                    return True
+                            else:
+                                ib.connect(host, port, clientId=cid, timeout=10)
+                                if ib.isConnected():
+                                    _logging.warning("Reconnected to IBGW on clientId=%s", cid)
+                                    return True
+                        except Exception as e:
+                            _logging.warning("Reconnect failed (%ss): %s", delay, e)
+                        _time.sleep(delay)
+                    return False
+
+                def _on_disconnected():
+                    _logging.warning("IB disconnected; attempting auto-reconnect")
+                    _reconnect()
+
+                # Register only once
+                try:
+                    ib.disconnectedEvent += _on_disconnected
+                except Exception:
+                    pass
+        except Exception:
+            # Do not let optional hooks break initialization
+            pass
+
     def run(self):
         self.status = "running"
         log_trade_results(f"pipeline_start: run_id={self.run_id}")
@@ -802,15 +611,26 @@ class RLTradingPipeline:
             raise
 
     def _main_loop(self):
+        global last_retrain_time
         retries = 0
+        last_hb = 0.0
         while retries < self.max_retries:
             try:
                 logging.info("Fetching market data...")
-                # List of tickers you want to fetch (using your mapping for yfinance)
-                tickers = ["ES1!", "NQ1!", "GA", "GB", "GE", "GC"]
+                # Canonical adapter-supported tickers
+                tickers = ["ES1!", "NQ1!", "XAUUSD", "EURUSD", "GBPUSD", "AUDUSD"]
                 last_check_times = {ticker: 0 for ticker in tickers}
                 raw_data = {}
                 for idx, ticker in enumerate(tickers):
+                    # Lightweight heartbeat every 30s to keep socket sticky
+                    now_mono = time.monotonic()
+                    if now_mono - last_hb > 30:
+                        try:
+                            if getattr(self.market_data_adapter, 'ib', None):
+                                self.market_data_adapter.ib.reqCurrentTime()
+                        except Exception as _hb_e:
+                            logging.warning(f"Heartbeat error: {_hb_e}")
+                        last_hb = now_mono
                     start_time = time.time()
                     try:
                         if self.config.get("use_mock_data", True):
@@ -1592,11 +1412,15 @@ default_config = {
 
 import time
 
-if __name__ == "__main__":
+
+def main():
+    """Run the trading pipeline loop."""
     while True:
         pipeline = RLTradingPipeline(default_config)
         pipeline.run()
         # Sleep for 2 minutes (adjust as needed)
         time.sleep(120)
 
-market_data_adapter.disconnect()
+
+if __name__ == "__main__":
+    main()

@@ -1,19 +1,22 @@
 from pathlib import Path
-import sys
-import runpy
+import sys, importlib
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
 
-def _run_module_main():
-    """Execute the canonical pipeline module's __main__ block."""
+def _resolve_main():
+    """
+    Import-time should be side-effect free.
+    Resolve and return a callable main() without executing heavy module code.
+    """
     try:
-        runpy.run_module("src.rl_trading_pipeline", run_name="__main__")
+        mod = importlib.import_module("src.rl_trading_pipeline")
+        return getattr(mod, "main")
     except Exception:
-        # Fallback to legacy root pipeline
-        runpy.run_module("rl_trading_pipeline", run_name="__main__")
+        mod = importlib.import_module("rl_trading_pipeline")
+        return getattr(mod, "main")
 
 
 if __name__ == "__main__":
-    _run_module_main()
+    _resolve_main()()
