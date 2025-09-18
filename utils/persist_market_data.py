@@ -88,8 +88,25 @@ def persist_bars(symbol: str, df: pd.DataFrame) -> str:
         df.reset_index().to_csv(csvp, index=False, compression="gzip")
         return csvp
 
-    # Default: Parquet via pyarrow
-    write_parquet_any(df.reset_index(), out_path)
+    # Default: Parquet via pyarrow with on-write de-duplication by timestamp
+    try:
+        from pathlib import Path
+        df_new = df.reset_index()
+        p = Path(out_path)
+        if p.exists():
+            try:
+                df_old = pd.read_parquet(p)
+                combined = pd.concat([df_old, df_new], ignore_index=True)
+                combined = combined.drop_duplicates(subset=["timestamp"]).sort_values("timestamp")
+                combined.to_parquet(p, index=False)
+            except Exception:
+                # Fallback to simple write
+                write_parquet_any(df_new, out_path)
+        else:
+            write_parquet_any(df_new, out_path)
+    except Exception:
+        # Last-resort fallback: simple write
+        write_parquet_any(df.reset_index(), out_path)
 
     # Optional S3 upload (disabled by default)
     if S3_ENABLE and boto3 is not None:

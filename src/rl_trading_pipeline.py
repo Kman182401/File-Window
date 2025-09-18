@@ -636,7 +636,7 @@ class RLTradingPipeline:
         # Seed last_ts from existing Parquet so first micro-poll doesn't re-append the last minute
         try:
             from pathlib import Path
-            import pandas as pd, os
+            import pandas as pd
             base = Path(os.getenv("DATA_DIR", str(Path.home()/".local/share/m5_trader/data")))
             for t in ["ES1!", "NQ1!", "XAUUSD", "EURUSD", "GBPUSD", "AUDUSD"]:
                 parts = sorted((base / f"symbol={t}").rglob("bars.parquet"))
