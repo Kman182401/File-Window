@@ -71,3 +71,45 @@ System Effects
 
         S3 will scale with dataset size; lifecycle rules should be applied (e.g., move old bars → Glacier/IA to minimize costs).
 
+
+Local‑First Change Management — Required Workflow
+
+This repository is the source of truth on this PC. When editing, creating, or deleting any files related to the AI day‑trading system, follow this exact order of operations. Do NOT deviate (e.g., by editing a different clone first).
+
+1) Make and validate changes locally
+- Location: `~/M5-Trader`
+- Edit files directly on this PC. Do not modify remote copies first.
+- If applicable, run quick local checks (unit/integration scripts present in repo). Do not add unrelated fixes.
+
+2) Stage and commit locally
+- Stage only intended changes: `git add <paths>`
+- Commit with a concise, conventional message: `git commit -m "type(scope): short description"`
+
+3) Sync with remote (origin/main)
+- Ensure remote is current:
+  - `git fetch --all --prune --tags`
+  - If remote has new commits, rebase: `git pull --rebase origin main`
+- Push local main: `git push origin HEAD:main`
+
+4) Verify
+- Confirm remote updated: `git log -n 1 --oneline origin/main`
+- Confirm working tree is clean: `git status`
+
+Operational Rules
+- Always operate “local‑first then push”. The local repo on this PC is the authoritative working copy; GitHub mirrors it.
+- Never push generated or ephemeral artifacts (logs, large data files) unless the repo explicitly tracks them.
+- When adding new scripts/modules, prefer placing them inside this repo and importing from here (not from external paths).
+- If a change requires secrets or machine‑specific paths, gate via environment variables and document in README or comments.
+
+Example session
+
+```
+cd ~/M5-Trader
+# edit files locally
+git add path/to/changed_file.py
+git commit -m "feat(ib): add AccountSummaryLookahead helper"
+git fetch --all --prune --tags
+git pull --rebase origin main   # only if needed
+git push origin HEAD:main
+git status
+```
