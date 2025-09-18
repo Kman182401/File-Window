@@ -633,6 +633,19 @@ class RLTradingPipeline:
         self.micropoll_bar_size = os.getenv('MICROPOLL_BAR_SIZE', '5 secs')
         self.micropoll_what = os.getenv('MICROPOLL_WHAT', 'MIDPOINT')
         self._last_poll_ts: Dict[str, Any] = {}
+        # Seed last_ts from existing Parquet so first micro-poll doesn't re-append the last minute
+        try:
+            from pathlib import Path
+            import pandas as pd, os
+            base = Path(os.getenv("DATA_DIR", str(Path.home()/".local/share/m5_trader/data")))
+            for t in ["ES1!", "NQ1!", "XAUUSD", "EURUSD", "GBPUSD", "AUDUSD"]:
+                parts = sorted((base / f"symbol={t}").rglob("bars.parquet"))
+                if parts:
+                    latest = pd.read_parquet(parts[-1])
+                    if not latest.empty and "timestamp" in latest.columns:
+                        self._last_poll_ts[t] = pd.to_datetime(latest["timestamp"]).max()
+        except Exception as _seed_e:
+            logging.info(f"[micropoll] seed last_ts skipped: {_seed_e}")
 
     def _micro_poll_symbol(self, ticker: str) -> int:
         """Poll a tiny historical window and append only new rows.
@@ -653,16 +666,22 @@ class RLTradingPipeline:
             contract = self.market_data_adapter._get_contract(canonical)
             ib = self.market_data_adapter.ib
 
-            bars = ib.reqHistoricalData(
-                contract,
-                endDateTime='',
-                durationStr=self.micropoll_window,
-                barSizeSetting=self.micropoll_bar_size,
-                whatToShow=self.micropoll_what,
-                useRTH=False,
-                formatDate=1,
-            )
-            df = util.df(bars)
+            def _pull(what):
+                bars = ib.reqHistoricalData(
+                    contract,
+                    endDateTime='',
+                    durationStr=self.micropoll_window,
+                    barSizeSetting=self.micropoll_bar_size,
+                    whatToShow=what,
+                    useRTH=False,
+                    formatDate=1,
+                )
+                return util.df(bars)
+
+            df = _pull(self.micropoll_what)
+            # Optional fallback: if requesting TRADES during off-hours yields empty, fall back to MIDPOINT
+            if (df is None or df.empty) and self.micropoll_what.upper() == 'TRADES':
+                df = _pull('MIDPOINT')
             if df is None or df.empty:
                 return 0
             # Filter new rows beyond last seen timestamp
@@ -781,6 +800,11 @@ class RLTradingPipeline:
                         else:
                             # Option B: Micro-poll historicals (permission-agnostic) to keep features fresh
                             try:
+                                # Optional per-symbol offset to stagger pacing
+                                off_env = f"MICROPOLL_OFFSET_{ticker.replace('!','')}"
+                                off = int(os.getenv(off_env, "0"))
+                                if off:
+                                    time.sleep(off)
                                 appended = self._micro_poll_symbol(ticker)
                                 if appended:
                                     last_check_times[ticker] = time.time()
