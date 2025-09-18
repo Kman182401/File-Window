@@ -177,6 +177,13 @@ class IBKRIngestor:
             details={"client_id": self.clientId}
         )
         
+        # Attach event hooks if using an external IB instance
+        if self.external_ib:
+            try:
+                self._attach_event_handlers()
+            except Exception:
+                pass
+
         # Initial connection with enhanced error handling (skip if using external IB)
         if not self.external_ib:
             self._connect()
@@ -188,6 +195,30 @@ class IBKRIngestor:
         else:
             print("[IBKRIngestor] Connection monitor thread disabled")
         
+    def _attach_event_handlers(self):
+        """Attach IB error/disconnect event hooks once per IB instance."""
+        if getattr(self, "_events_hooked", False):
+            return
+        try:
+            def _on_error(reqId, code, msg, _):
+                if code == 1100:
+                    logging.warning("[IB] 1100 LOST: %s", msg)
+                elif code in (1101, 1102):
+                    logging.warning("[IB] %s RECONNECTED: %s", code, msg)
+                    # small settle before issuing large requests again
+                    time.sleep(1.5)
+            self.ib.errorEvent += _on_error
+
+            def _on_disconnected():
+                logging.warning("[IB] disconnectedEvent → scheduling reconnect")
+                # monitor thread handles reconnect; this gives immediate visibility
+            self.ib.disconnectedEvent += _on_disconnected
+
+            self._events_hooked = True
+        except Exception:
+            # Do not let event hook failure break the adapter
+            pass
+
     def _connect(self):
         """Internal connection method with retry logic."""
         # If using external IB connection, don't try to reconnect
@@ -217,6 +248,12 @@ class IBKRIngestor:
                     # Now use standard sync connect (which works properly with startLoop)
                     self.ib.connect(self.host, self.port, clientId=self.clientId, timeout=12)
                     print(f"[IBKRIngestor] Connected successfully using util.startLoop + sync connect")
+                    # Attach event hooks and allow brief post-login settle
+                    try:
+                        self._attach_event_handlers()
+                    except Exception:
+                        pass
+                    time.sleep(1.5)
                     
                 except Exception as connect_error:
                     print(f"[IBKRIngestor] Connection failed: {connect_error}")
