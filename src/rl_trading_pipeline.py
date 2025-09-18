@@ -828,14 +828,20 @@ class RLTradingPipeline:
                         else:
                             # Option B: Micro-poll historicals (permission-agnostic) to keep features fresh
                             try:
-                                # Optional per-symbol offset to stagger pacing
-                                off_env = f"MICROPOLL_OFFSET_{ticker.replace('!','')}"
-                                off = int(os_mod.getenv(off_env, "0"))
-                                if off:
-                                    time.sleep(off)
-                                appended = self._micro_poll_symbol(ticker)
-                                if appended:
-                                    last_check_times[ticker] = time.time()
+                                now_m = time.monotonic()
+                                cadence_key = f"{ticker}_cadence"
+                                last_cadence = self._last_poll_ts.get(cadence_key)
+                                if (last_cadence is None) or (now_m - last_cadence >= self.micropoll_every_s):
+                                    # Optional per-symbol offset to stagger pacing
+                                    off_env = f"MICROPOLL_OFFSET_{ticker.replace('!','')}"
+                                    off = int(os_mod.getenv(off_env, "0"))
+                                    if off:
+                                        time.sleep(off)
+                                    appended = self._micro_poll_symbol(ticker)
+                                    # mark cadence regardless of appended count
+                                    self._last_poll_ts[cadence_key] = time.monotonic()
+                                    if appended:
+                                        last_check_times[ticker] = time.time()
                             except Exception as _mp_e:
                                 logging.warning(f"Micropoll error for {ticker}: {_mp_e}")
                             print(f"No new data or scheduled retrain for {ticker}, skipping retraining.")
