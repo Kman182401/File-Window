@@ -1,3 +1,23 @@
+import logging
+
+from datetime import datetime, timezone
+import pandas as pd
+def _coerce_epoch(ts):
+    try:
+        return int(ts)
+    except Exception:
+        try:
+            t = pd.to_datetime(ts, utc=True, errors='coerce')
+            return int(t.timestamp()) if pd.notna(t) else 0
+        except Exception:
+            return 0
+
+try:
+    from utils.alerts import send_sms_alert
+except Exception:
+    def send_sms_alert(msg: str):
+        logging.info(f"[ALERT] {msg}")
+
 try:
     from market_data_utils import RealTimeFeatureStore
 except Exception:
@@ -28,7 +48,7 @@ import psutil
 from feature_engineering import classify_news_type
 from sklearn.linear_model import LogisticRegression
 import joblib
-import os
+import os as os_mod
 import numpy as np
 import random
 import math
@@ -224,7 +244,7 @@ def new_data_available(data_dir, ticker, last_check_time):
         return False
     latest = parts[-1]
     try:
-        mtime = os.path.getmtime(latest)
+        mtime = os_mod.path.getmtime(latest)
     except Exception:
         return False
     return mtime > last_check_time
@@ -262,7 +282,7 @@ bucket = "omega-singularity-ml"
 
 # Default data dir for new_data_available checks (env-first)
 from pathlib import Path
-data_dir = os.getenv("DATA_DIR", str(Path.home() / ".local/share/m5_trader/data"))
+data_dir = os_mod.getenv("DATA_DIR", str(Path.home() / ".local/share/m5_trader/data"))
 
 # === Combined News Ingestion (MarketAux + IBKR) ===
 entity_types = "indices,commodities,currencies,futures"
@@ -297,7 +317,7 @@ except Exception as e:
 
 # 3) Union + de-dupe
 import pandas as pd
-if os.getenv("ENABLE_NEWS_ANALYSIS", "0") in ("1", "true", "True"):
+if os_mod.getenv("ENABLE_NEWS_ANALYSIS", "0") in ("1", "true", "True"):
     try:
         news_df = pd.concat([ma_df, ibkr_df], ignore_index=True)
         if not news_df.empty:
@@ -384,7 +404,7 @@ def to_scalar(x):
 
 def _s3_enabled() -> bool:
     try:
-        return str(os.getenv("S3_ENABLE", "0")).lower() in ("1", "true", "yes")
+        return str(os_mod.getenv("S3_ENABLE", "0")).lower() in ("1", "true", "yes")
     except Exception:
         return False
 
@@ -393,22 +413,22 @@ def save_model_to_s3(model, bucket, key):
     if not _s3_enabled():
         logging.info("S3 disabled (S3_ENABLE=0); skipping save to %s/%s", bucket, key)
         return
-    local_path = f"/tmp/{os.path.basename(key)}"
+    local_path = f"/tmp/{os_mod.path.basename(key)}"
     joblib.dump(model, local_path)
     s3 = boto3.client("s3")
     s3.upload_file(local_path, bucket, key)
-    os.remove(local_path)
+    os_mod.remove(local_path)
 
 def load_model_from_s3(bucket, key):
     """Load a model from S3 using joblib. Returns None when S3 is disabled."""
     if not _s3_enabled():
         logging.info("S3 disabled (S3_ENABLE=0); skipping load of %s/%s", bucket, key)
         return None
-    local_path = f"/tmp/{os.path.basename(key)}"
+    local_path = f"/tmp/{os_mod.path.basename(key)}"
     s3 = boto3.client("s3")
     s3.download_file(bucket, key, local_path)
     model = joblib.load(local_path)
-    os.remove(local_path)
+    os_mod.remove(local_path)
     return model
 
 def get_latest_model_key(bucket, prefix, exclude_run_id=None):
@@ -527,7 +547,7 @@ class TradingEnv(gym.Env):
 import re
 import joblib
 import boto3
-import os
+import os as os_mod
 from stable_baselines3 import PPO
 
 def load_all_models(bucket, run_id):
@@ -545,7 +565,7 @@ def load_all_models(bucket, run_id):
     models = {}
     for obj in response.get('Contents', []):
         key = obj['Key']
-        filename = os.path.basename(key)
+        filename = os_mod.path.basename(key)
         # ML models: {ticker}_{modelname}.joblib
         m = re.match(r"(.+?)_(RandomForest|XGBoost|LightGBM)\.joblib$", filename)
         if m:
@@ -553,7 +573,7 @@ def load_all_models(bucket, run_id):
             local_path = f"/tmp/{filename}"
             s3.download_file(bucket, key, local_path)
             model = joblib.load(local_path)
-            os.remove(local_path)
+            os_mod.remove(local_path)
             if ticker not in models:
                 models[ticker] = {}
             models[ticker][model_name] = model
@@ -564,7 +584,7 @@ def load_all_models(bucket, run_id):
             local_path = f"/tmp/{filename}"
             s3.download_file(bucket, key, local_path)
             model = PPO.load(local_path)
-            os.remove(local_path)
+            os_mod.remove(local_path)
             if ticker not in models:
                 models[ticker] = {}
             models[ticker]["PPO"] = model
@@ -627,17 +647,17 @@ class RLTradingPipeline:
             pass
 
         # Micropoll configuration (permission-agnostic live flow)
-        self.micropoll_enable = str(os.getenv('MICROPOLL_ENABLE', '0')).lower() in ('1', 'true', 'yes')
-        self.micropoll_every_s = int(os.getenv('MICROPOLL_EVERY_S', '10'))
-        self.micropoll_window = os.getenv('MICROPOLL_WINDOW', '90 S')
-        self.micropoll_bar_size = os.getenv('MICROPOLL_BAR_SIZE', '5 secs')
-        self.micropoll_what = os.getenv('MICROPOLL_WHAT', 'MIDPOINT')
+        self.micropoll_enable = str(os_mod.getenv('MICROPOLL_ENABLE', '0')).lower() in ('1', 'true', 'yes')
+        self.micropoll_every_s = int(os_mod.getenv('MICROPOLL_EVERY_S', '10'))
+        self.micropoll_window = os_mod.getenv('MICROPOLL_WINDOW', '90 S')
+        self.micropoll_bar_size = os_mod.getenv('MICROPOLL_BAR_SIZE', '5 secs')
+        self.micropoll_what = os_mod.getenv('MICROPOLL_WHAT', 'MIDPOINT')
         self._last_poll_ts: Dict[str, Any] = {}
         # Seed last_ts from existing Parquet so first micro-poll doesn't re-append the last minute
         try:
             from pathlib import Path
             import pandas as pd
-            base = Path(os.getenv("DATA_DIR", str(Path.home()/".local/share/m5_trader/data")))
+            base = Path(os_mod.getenv("DATA_DIR", str(Path.home()/".local/share/m5_trader/data")))
             for t in ["ES1!", "NQ1!", "XAUUSD", "EURUSD", "GBPUSD", "AUDUSD"]:
                 parts = sorted((base / f"symbol={t}").rglob("bars.parquet"))
                 if parts:
@@ -788,7 +808,7 @@ class RLTradingPipeline:
                         if (current_time - last_retrain_time) > RETRAIN_INTERVAL or new_data_available(data_dir, ticker, last_check_times[ticker]):
                             print(f"Training PPO for {ticker} (scheduled or new data)...")
                             regime = detect_regime(df['close'])
-                            models_dir = Path(os.getenv("MODELS_DIR", str(Path.home()/"models")))
+                            models_dir = Path(os_mod.getenv("MODELS_DIR", str(Path.home()/"models")))
                             if regime == "high_vol":
                                 model_path = str(models_dir / f"ppo_model_{ticker}_highvol.zip")
                             else:
@@ -802,7 +822,7 @@ class RLTradingPipeline:
                             try:
                                 # Optional per-symbol offset to stagger pacing
                                 off_env = f"MICROPOLL_OFFSET_{ticker.replace('!','')}"
-                                off = int(os.getenv(off_env, "0"))
+                                off = int(os_mod.getenv(off_env, "0"))
                                 if off:
                                     time.sleep(off)
                                 appended = self._micro_poll_symbol(ticker)
@@ -851,7 +871,7 @@ class RLTradingPipeline:
                         last_trained_time = f.read().strip()
                         if last_trained_time:
                             # Convert to int (or pd.to_datetime if using datetime)
-                            last_trained_time = int(last_trained_time)
+                            last_trained_time = _coerce_epoch(last_trained_time)
                 except FileNotFoundError:
                     last_trained_time = None
 
@@ -864,7 +884,7 @@ class RLTradingPipeline:
                         if np.issubdtype(X["timestamp"].dtype, np.datetime64):
                             last_trained_time = pd.to_datetime(last_trained_time)
                         else:
-                            last_trained_time = int(last_trained_time)
+                            last_trained_time = _coerce_epoch(last_trained_time)
                         X = X[X["timestamp"] > last_trained_time]
                         y = y.loc[X.index]
                     logging.info(f"{ticker} features shape: {X.shape}, labels shape: {y.shape}")
@@ -1400,7 +1420,7 @@ class RLTradingPipeline:
                     else:
                         logging.info("S3 disabled; skipping upload of %s to s3://%s/%s", local_csv_path, self.config['s3_bucket'], s3_key)
                     # Optional: remove local file after upload to save space
-                    os.remove(local_csv_path)
+                    os_mod.remove(local_csv_path)
                 logging.info("Features engineered successfully.")
 
                 # RL model inference and trading logic
@@ -1425,12 +1445,12 @@ class RLTradingPipeline:
                     # RL model rollback
                     if prev_key.endswith("_ppo.zip"):
                         from stable_baselines3 import PPO
-                        local_ppo_path = "/tmp/" + os.path.basename(prev_key)
+                        local_ppo_path = "/tmp/" + os_mod.path.basename(prev_key)
                         s3 = boto3.client("s3")
                         s3.download_file(self.config['s3_bucket'], prev_key, local_ppo_path)
                         self.ppo_model = PPO.load(local_ppo_path)
                         logging.info("self.ppo_model has been set to the rolled-back PPO model.")
-                        os.remove(local_ppo_path)
+                        os_mod.remove(local_ppo_path)
                     # ML model rollback
                     elif prev_key.endswith(".joblib"):
                         import re
@@ -1476,7 +1496,7 @@ class RLTradingPipeline:
             model = PPO.load(local_ppo_path)
             model = PPO("MlpPolicy", env, verbose=0)
             model.learn(total_timesteps=10000, callback=ppo_logger)
-            os.remove(local_ppo_path)
+            os_mod.remove(local_ppo_path)
         else:
             model = PPO("MlpPolicy", env, verbose=0)
             model.learn(total_timesteps=10000, callback=ppo_logger)
@@ -1491,7 +1511,7 @@ class RLTradingPipeline:
             s3.upload_file("/tmp/ppo_model.zip", self.config['s3_bucket'], ppo_key)
         else:
             logging.info("S3 disabled; skipping upload of PPO model to s3://%s/%s", self.config['s3_bucket'], ppo_key)
-        os.remove("/tmp/ppo_model.zip")
+        os_mod.remove("/tmp/ppo_model.zip")
         logging.info(f"Retraining event: PPO model for {ticker} retrained and saved as {ppo_key}")
         print("PPO training complete.")
 
@@ -1499,14 +1519,14 @@ class RLTradingPipeline:
         from stable_baselines3 import PPO
         env = TradingEnv(test_data)
         regime = detect_regime(test_data['close'])
-        models_dir = Path(os.getenv("MODELS_DIR", str(Path.home()/"models")))
+        models_dir = Path(os_mod.getenv("MODELS_DIR", str(Path.home()/"models")))
         if regime == "high_vol":
             model_path = str(models_dir / f"ppo_model_{ticker}_highvol.zip")
         else:
             model_path = str(models_dir / f"ppo_model_{ticker}_normal.zip")
-        if not os.path.exists(model_path):
+        if not os_mod.path.exists(model_path):
             model_path = str(models_dir / f"ppo_model_{ticker}.zip")
-        if not os.path.exists(model_path):
+        if not os_mod.path.exists(model_path):
             logging.warning(f"No PPO model found for {ticker} at {model_path}; skipping PPO run.")
             return 0.0
         self.ppo_model = PPO.load(model_path)
