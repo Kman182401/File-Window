@@ -381,8 +381,17 @@ def to_scalar(x):
         logger.error(f"Non-scalar value encountered: {x} (type: {type(x)}, shape: {arr.shape})")
         raise ValueError(f"Non-scalar value encountered: {x} (type: {type(x)}, shape: {arr.shape})")
 
+def _s3_enabled() -> bool:
+    try:
+        return str(os.getenv("S3_ENABLE", "0")).lower() in ("1", "true", "yes")
+    except Exception:
+        return False
+
 def save_model_to_s3(model, bucket, key):
-    """Save a model to S3 using joblib."""
+    """Save a model to S3 using joblib. No-op when S3_ENABLE=0."""
+    if not _s3_enabled():
+        logging.info("S3 disabled (S3_ENABLE=0); skipping save to %s/%s", bucket, key)
+        return
     local_path = f"/tmp/{os.path.basename(key)}"
     joblib.dump(model, local_path)
     s3 = boto3.client("s3")
@@ -390,7 +399,10 @@ def save_model_to_s3(model, bucket, key):
     os.remove(local_path)
 
 def load_model_from_s3(bucket, key):
-    """Load a model from S3 using joblib."""
+    """Load a model from S3 using joblib. Returns None when S3 is disabled."""
+    if not _s3_enabled():
+        logging.info("S3 disabled (S3_ENABLE=0); skipping load of %s/%s", bucket, key)
+        return None
     local_path = f"/tmp/{os.path.basename(key)}"
     s3 = boto3.client("s3")
     s3.download_file(bucket, key, local_path)
@@ -399,7 +411,9 @@ def load_model_from_s3(bucket, key):
     return model
 
 def get_latest_model_key(bucket, prefix, exclude_run_id=None):
-    """Get the latest model key from S3, optionally excluding the current run_id."""
+    """Get the latest model key from S3; returns None when S3 is disabled."""
+    if not _s3_enabled():
+        return None
     s3 = boto3.client("s3")
     response = s3.list_objects_v2(Bucket=bucket, Prefix=prefix)
     keys = [obj['Key'] for obj in response.get('Contents', [])]
@@ -519,7 +533,11 @@ def load_all_models(bucket, run_id):
     """
     Loads all models (ML and PPO) for a given run_id from S3.
     Returns a nested dict: {ticker: {model_name: model_object}}
+    If S3 is disabled, returns an empty dict.
     """
+    if not _s3_enabled():
+        logging.info("S3 disabled (S3_ENABLE=0); load_all_models -> {}")
+        return {}
     s3 = boto3.client("s3")
     prefix = f"models/{run_id}/"
     response = s3.list_objects_v2(Bucket=bucket, Prefix=prefix)
@@ -666,12 +684,7 @@ class RLTradingPipeline:
                                 print(f"High volatility regime detected for {ticker}, triggering retraining/model switch.")
                                 # Trigger retraining/model switch
                                 regime = detect_regime(df['close'])
-                                if regime == "high_vol":
-                                    model_path = f"/home/karson/models/ppo_model_{ticker}_highvol.zip"
-                                else:
-                                    model_path = f"/home/karson/models/ppo_model_{ticker}_normal.zip"
-                                self.train_ppo(df, ticker, save_path=model_path)
-                                last_check_times[ticker] = time.time()
+                    # (model selection / training handled in scheduled block below)
                                 # Optionally, you could load a different model here if you have one for high-vol regimes
 
                         # --- PPO Training for Each Ticker Sequentially ---
@@ -679,10 +692,11 @@ class RLTradingPipeline:
                         if (current_time - last_retrain_time) > RETRAIN_INTERVAL or new_data_available(data_dir, ticker, last_check_times[ticker]):
                             print(f"Training PPO for {ticker} (scheduled or new data)...")
                             regime = detect_regime(df['close'])
+                            models_dir = Path(os.getenv("MODELS_DIR", str(Path.home()/"models")))
                             if regime == "high_vol":
-                                model_path = f"/home/karson/models/ppo_model_{ticker}_highvol.zip"
+                                model_path = str(models_dir / f"ppo_model_{ticker}_highvol.zip")
                             else:
-                                model_path = f"/home/karson/models/ppo_model_{ticker}_normal.zip"
+                                model_path = str(models_dir / f"ppo_model_{ticker}_normal.zip")
                             self.train_ppo(df, ticker, save_path=model_path)
                             last_check_times[ticker] = current_time
                             last_retrain_time = current_time
@@ -795,6 +809,12 @@ class RLTradingPipeline:
 
                 # Metrics storage
                 results = {}
+                # Ensure X_train symbol exists for later timestamp save guard
+                try:
+                    import pandas as pd  # ensure pd alias
+                except Exception:
+                    pass
+                X_train = 'X_train_unset'
 
                 for ticker in features:
                     X = feature_store.get(ticker)
@@ -921,7 +941,7 @@ class RLTradingPipeline:
                 print(summary_df.to_string(index=False))
 
                 # Save the last trained timestamp/index
-                if not X_train.empty and "timestamp" in X_train.columns:
+                if 'X_train' in locals() and hasattr(X_train, 'empty') and (not X_train.empty) and ("timestamp" in X_train.columns):
                     last_trained_time = X_train["timestamp"].max()
                     with open(LAST_TRAINED_FILE, "w") as f:
                         f.write(str(last_trained_time))
@@ -1267,7 +1287,10 @@ class RLTradingPipeline:
                     df.to_csv(local_csv_path, index=False)
                     # S3 key: organize by run and ticker for auditability
                     s3_key = f"features/{self.run_id}/{ticker}_features.csv"
-                    upload_file_to_s3(local_csv_path, self.config['s3_bucket'], s3_key)
+                    if _s3_enabled():
+                        upload_file_to_s3(local_csv_path, self.config['s3_bucket'], s3_key)
+                    else:
+                        logging.info("S3 disabled; skipping upload of %s to s3://%s/%s", local_csv_path, self.config['s3_bucket'], s3_key)
                     # Optional: remove local file after upload to save space
                     os.remove(local_csv_path)
                 logging.info("Features engineered successfully.")
@@ -1337,8 +1360,11 @@ class RLTradingPipeline:
         local_ppo_path = "/tmp/ppo_model.zip"
         if ppo_key:
             # Download the PPO model from S3 to local path
-            s3 = boto3.client("s3")
-            s3.download_file(self.config['s3_bucket'], ppo_key, local_ppo_path)
+            if _s3_enabled():
+                s3 = boto3.client("s3")
+                s3.download_file(self.config['s3_bucket'], ppo_key, local_ppo_path)
+            else:
+                logging.info("S3 disabled; skipping download of existing PPO model %s", ppo_key)
             model = PPO.load(local_ppo_path)
             model = PPO("MlpPolicy", env, verbose=0)
             model.learn(total_timesteps=10000, callback=ppo_logger)
@@ -1352,8 +1378,11 @@ class RLTradingPipeline:
         if save_path is None:
             save_path = "/tmp/ppo_model.zip"
         model.save(save_path)
-        s3 = boto3.client("s3")
-        s3.upload_file("/tmp/ppo_model.zip", self.config['s3_bucket'], ppo_key)
+        if _s3_enabled():
+            s3 = boto3.client("s3")
+            s3.upload_file("/tmp/ppo_model.zip", self.config['s3_bucket'], ppo_key)
+        else:
+            logging.info("S3 disabled; skipping upload of PPO model to s3://%s/%s", self.config['s3_bucket'], ppo_key)
         os.remove("/tmp/ppo_model.zip")
         logging.info(f"Retraining event: PPO model for {ticker} retrained and saved as {ppo_key}")
         print("PPO training complete.")
@@ -1362,12 +1391,13 @@ class RLTradingPipeline:
         from stable_baselines3 import PPO
         env = TradingEnv(test_data)
         regime = detect_regime(test_data['close'])
+        models_dir = Path(os.getenv("MODELS_DIR", str(Path.home()/"models")))
         if regime == "high_vol":
-            model_path = f"/home/karson/models/ppo_model_{ticker}_highvol.zip"
+            model_path = str(models_dir / f"ppo_model_{ticker}_highvol.zip")
         else:
-            model_path = f"/home/karson/models/ppo_model_{ticker}_normal.zip"
+            model_path = str(models_dir / f"ppo_model_{ticker}_normal.zip")
         if not os.path.exists(model_path):
-            model_path = f"/home/karson/models/ppo_model_{ticker}.zip"
+            model_path = str(models_dir / f"ppo_model_{ticker}.zip")
         if not os.path.exists(model_path):
             logging.warning(f"No PPO model found for {ticker} at {model_path}; skipping PPO run.")
             return 0.0
