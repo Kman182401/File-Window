@@ -13,7 +13,7 @@
 
 </div>
 
-Help move this system off an EC2 m5.large and onto a dedicated AI workstation for faster model training, lower latency, and better reliability.
+Help me retire the 2016 high school budget PC and move this system onto a real AI workstation for faster training, lower latency, and above all, greater profits.
 
 - Primary: Cash App tag: `$YaBoiBroke7567` → https://cash.app/$YaBoiBroke7567
 - Prefer email for larger contributions or hardware offers: komanderkody18@gmail.com
