@@ -35,3 +35,10 @@ data/
 datasets/
 models/
 .cache/
+
+# keep IBG runtime out of git
+ibg_logs/
+ibg_logs
+*.ibgzenc
+*.ibglog
+launcher.log

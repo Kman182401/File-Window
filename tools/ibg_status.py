@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 import os, json, sys
-from datetime import datetime
+from datetime import datetime, UTC
 
 try:
     from ib_insync import IB
@@ -20,7 +20,7 @@ client_id = int(os.getenv('IBKR_CLIENT_ID', '9001'))
 timeout = float(os.getenv('IBKR_TIMEOUT', '5'))
 
 ib = IB()
-info = {"host": host, "port": port, "clientId": client_id, "ts": datetime.utcnow().isoformat()}
+info = {"host": host, "port": port, "clientId": client_id, "ts": datetime.now(UTC).isoformat()}
 
 try:
     ib.connect(host, port, clientId=client_id, timeout=timeout, readonly=True)
