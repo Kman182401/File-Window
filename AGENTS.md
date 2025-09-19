@@ -91,12 +91,19 @@ This repository is the source of truth on this PC. When editing, creating, or de
   - If remote has new commits, rebase: `git pull --rebase origin main`
 - Push local main: `git push origin HEAD:main`
 
+  Local‑first policy (Codex outputs)
+  - After Codex completes a change, confirm the files were applied to this PC under `~/M5-Trader` before pushing.
+  - Do not treat GitHub as the source of truth. Do not copy files down from GitHub to replace local work, and do not edit in the GitHub UI first.
+  - Direction is one‑way for your work: local edits → commit → push to `origin/main`. Only use `git pull --rebase` to integrate upstream commits from others, not to overwrite local changes.
+  - Quick sanity checks before pushing: `git rev-parse --show-toplevel` should print `~/M5-Trader`; `git remote -v` should point to the GitHub M5‑Trader repo; `git status` should show only the intended changes.
+
 4) Verify
 - Confirm remote updated: `git log -n 1 --oneline origin/main`
 - Confirm working tree is clean: `git status`
 
 Operational Rules
 - Always operate “local‑first then push”. The local repo on this PC is the authoritative working copy; GitHub mirrors it.
+- Never start by editing the GitHub repo or a different clone and then syncing back here. Avoid reverse workflows (remote → local overwrite).
 - Never push generated or ephemeral artifacts (logs, large data files) unless the repo explicitly tracks them.
 - When adding new scripts/modules, prefer placing them inside this repo and importing from here (not from external paths).
 - If a change requires secrets or machine‑specific paths, gate via environment variables and document in README or comments.
