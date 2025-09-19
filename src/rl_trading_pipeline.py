@@ -3,6 +3,8 @@ import os
 
 from datetime import datetime, timezone
 import pandas as pd
+from pandas.api.types import is_datetime64_any_dtype
+
 def _coerce_epoch(ts):
     try:
         return int(ts)
@@ -29,7 +31,10 @@ except Exception:
             import pandas as pd
             # Store as a growing DataFrame; coerce to numeric where possible
             df = self._store.get(key)
-            row = pd.DataFrame([features_dict])
+            if isinstance(features_dict, pd.DataFrame):
+                row = features_dict.reset_index(drop=True)
+            else:
+                row = pd.DataFrame([features_dict])
             self._store[key] = row if df is None else pd.concat([df, row], ignore_index=True).infer_objects(copy=False)
         def get(self, key):
             return self._store.get(key)
@@ -943,6 +948,10 @@ class RLTradingPipeline:
                         continue
                     features[ticker] = X
                     labels[ticker] = y
+                    try:
+                        feature_store.update(ticker, X)
+                    except Exception as exc:
+                        logging.warning(f"Failed to cache real-time features for {ticker}: {exc}")
                 logging.info("Features engineered successfully.")
 
                 # === DRIFT DETECTION BLOCK ===
@@ -1015,7 +1024,8 @@ class RLTradingPipeline:
                     # Drop any datetime or identifier columns from features
                     cols_to_drop = []
                     for col in X_train.columns:
-                        if np.issubdtype(X_train[col].dtype, np.datetime64) or col in ["datetime", "timestamp"]:
+                        if (is_datetime64_any_dtype(X_train[col])
+                                or col in ["datetime", "timestamp"]):
                             cols_to_drop.append(col)
                     if cols_to_drop:
                         X_train = X_train.drop(columns=cols_to_drop)
@@ -1537,16 +1547,20 @@ class RLTradingPipeline:
         ppo_key = get_latest_model_key(self.config['s3_bucket'], f"models/{self.run_id}/{ticker}_ppo.zip")
         local_ppo_path = "/tmp/ppo_model.zip"
         if ppo_key:
-            # Download the PPO model from S3 to local path
+            model = None
             if _s3_enabled():
                 s3 = boto3.client("s3")
                 s3.download_file(self.config['s3_bucket'], ppo_key, local_ppo_path)
-            else:
-                logging.info("S3 disabled; skipping download of existing PPO model %s", ppo_key)
-            model = PPO.load(local_ppo_path)
-            model = PPO("MlpPolicy", env, verbose=0)
+                try:
+                    model = PPO.load(local_ppo_path)
+                except FileNotFoundError:
+                    logging.warning("Expected PPO checkpoint %s missing after download", local_ppo_path)
+            if model is None:
+                logging.info("Initializing fresh PPO model (no reusable checkpoint available).")
+                model = PPO("MlpPolicy", env, verbose=0)
             model.learn(total_timesteps=10000, callback=ppo_logger)
-            os_mod.remove(local_ppo_path)
+            if os_mod.path.exists(local_ppo_path):
+                os_mod.remove(local_ppo_path)
         else:
             model = PPO("MlpPolicy", env, verbose=0)
             model.learn(total_timesteps=10000, callback=ppo_logger)
@@ -1558,10 +1572,11 @@ class RLTradingPipeline:
         model.save(save_path)
         if _s3_enabled():
             s3 = boto3.client("s3")
-            s3.upload_file("/tmp/ppo_model.zip", self.config['s3_bucket'], ppo_key)
+            s3.upload_file(save_path, self.config['s3_bucket'], ppo_key)
         else:
             logging.info("S3 disabled; skipping upload of PPO model to s3://%s/%s", self.config['s3_bucket'], ppo_key)
-        os_mod.remove("/tmp/ppo_model.zip")
+        if save_path == "/tmp/ppo_model.zip" and os_mod.path.exists(save_path):
+            os_mod.remove(save_path)
         logging.info(f"Retraining event: PPO model for {ticker} retrained and saved as {ppo_key}")
         print("PPO training complete.")
 

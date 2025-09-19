@@ -14,7 +14,7 @@ Install (user mode)
    - cp -a ops/systemd/user/*.service ops/systemd/user/*.timer ~/.config/systemd/user/
    - systemctl --user daemon-reload
    - systemctl --user enable --now m5trader-scan.timer m5trader-nightly.timer m5-ibg-logs-link.timer logrotate-m5-trader.timer
-   - Optional (GUI vs headless): enable one of ibgateway.service or ibgateway-headless.service
+   - Optional (GUI vs headless): enable one of ibgateway.service (GUI on :0), ibgateway-desktop.service (GUI on :1), or ibgateway-headless.service (Xvfb)
 
 2) logrotate
    - mkdir -p ~/.config/logrotate.d ~/.cache/m5_trader

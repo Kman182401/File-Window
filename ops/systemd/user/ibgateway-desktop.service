@@ -1,0 +1,18 @@
+[Unit]
+Description=IB Gateway (Paper) via IBC on desktop
+After=graphical-session.target
+Wants=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+Environment=DISPLAY=:1
+Environment=XAUTHORITY=/run/user/1000/gdm/Xauthority
+ExecStart=/opt/ibc/scripts/ibcstart.sh 1040 --gateway --mode=paper
+ExecStartPost=/bin/bash -lc '~/.local/bin/ibg_wait_probe.sh'
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=graphical-session.target
+
