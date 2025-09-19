@@ -1,0 +1,14 @@
+[Unit]
+Description=M5-Trader autosync watcher
+After=default.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/M5-Trader
+ExecStart=%h/M5-Trader/bin/m5-watch.sh
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target
+

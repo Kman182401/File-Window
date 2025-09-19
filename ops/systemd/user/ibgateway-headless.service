@@ -1,0 +1,15 @@
+[Unit]
+Description=IB Gateway via IBC (paper, headless Xvfb)
+After=network-online.target
+
+[Service]
+Type=simple
+Environment=IBC_INI=%h/ibc/config.ini
+# Run IBC under a virtual X display; no window manager needed for Gateway
+ExecStart=/usr/bin/xvfb-run -n 99 -s "-screen 0 1024x768x24" /opt/ibc/scripts/ibcstart.sh 1040 --gateway --mode=paper
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+
