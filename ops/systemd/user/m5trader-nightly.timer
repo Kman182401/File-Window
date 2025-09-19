@@ -1,0 +1,11 @@
+[Unit]
+Description=M5-Trader nightly validation timer
+
+[Timer]
+OnCalendar=02:30
+Persistent=true
+Unit=m5trader-nightly.service
+
+[Install]
+WantedBy=timers.target
+

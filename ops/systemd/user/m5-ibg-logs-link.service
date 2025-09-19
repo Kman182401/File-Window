@@ -1,0 +1,9 @@
+[Unit]
+Description=Update M5-Trader ibg_logs symlink to latest IBG logs
+
+[Service]
+Type=oneshot
+ExecStart=%h/M5-Trader/tools/update_ibg_log_symlink.sh
+# Treat exit code 1 (no logs yet) as success to avoid spam
+SuccessExitStatus=1
+

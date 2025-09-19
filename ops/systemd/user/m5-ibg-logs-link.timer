@@ -1,0 +1,11 @@
+[Unit]
+Description=Periodic refresh of IBG logs symlink
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=5min
+Unit=m5-ibg-logs-link.service
+
+[Install]
+WantedBy=default.target
+
