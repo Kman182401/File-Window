@@ -1,0 +1,7 @@
+[Unit]
+Description=Logrotate for m5_trader logs
+
+[Service]
+Type=oneshot
+ExecStart=%h/bin/logrotate_m5_trader.sh
+

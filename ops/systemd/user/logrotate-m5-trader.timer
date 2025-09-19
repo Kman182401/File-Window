@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily logrotate for m5_trader
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+Unit=logrotate-m5-trader.service
+
+[Install]
+WantedBy=timers.target
+
