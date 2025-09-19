@@ -77,7 +77,7 @@ Local‑First Change Management — Required Workflow
 This repository is the source of truth on this PC. When editing, creating, or deleting any files related to the AI day‑trading system, follow this exact order of operations. Do NOT deviate (e.g., by editing a different clone first).
 
 1) Make and validate changes locally
-- Location: `~/M5-Trader`
+- Location: `~/File-Window`
 - Edit files directly on this PC. Do not modify remote copies first.
 - If applicable, run quick local checks (unit/integration scripts present in repo). Do not add unrelated fixes.
 
@@ -92,10 +92,10 @@ This repository is the source of truth on this PC. When editing, creating, or de
 - Push local main: `git push origin HEAD:main`
 
   Local‑first policy (Codex outputs)
-  - After Codex completes a change, confirm the files were applied to this PC under `~/M5-Trader` before pushing.
+  - After Codex completes a change, confirm the files were applied to this PC under `~/File-Window` before pushing.
   - Do not treat GitHub as the source of truth. Do not copy files down from GitHub to replace local work, and do not edit in the GitHub UI first.
   - Direction is one‑way for your work: local edits → commit → push to `origin/main`. Only use `git pull --rebase` to integrate upstream commits from others, not to overwrite local changes.
-  - Quick sanity checks before pushing: `git rev-parse --show-toplevel` should print `~/M5-Trader`; `git remote -v` should point to the GitHub M5‑Trader repo; `git status` should show only the intended changes.
+  - Quick sanity checks before pushing: `git rev-parse --show-toplevel` should print `~/File-Window`; `git remote -v` should point to the GitHub File‑Window repo; `git status` should show only the intended changes.
 
 4) Verify
 - Confirm remote updated: `git log -n 1 --oneline origin/main`
@@ -111,7 +111,7 @@ Operational Rules
 Example session
 
 ```
-cd ~/M5-Trader
+cd ~/File-Window
 # edit files locally
 git add path/to/changed_file.py
 git commit -m "feat(ib): add AccountSummaryLookahead helper"

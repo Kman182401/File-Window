@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-TARGET="$HOME/M5-Trader/ibg_logs"
+TARGET="$HOME/File-Window/ibg_logs"
 CANDIDATE=""
 if [ -d "$HOME/Jts" ]; then
   C=$(ls -1dt "$HOME"/Jts/ibgateway/*/logs 2>/dev/null | head -n 1 || true)
@@ -16,4 +16,3 @@ if [ -z "${CANDIDATE:-}" ]; then
 fi
 ln -sfn "$CANDIDATE" "$TARGET"
 echo "Linked $TARGET -> $CANDIDATE"
-

@@ -11,7 +11,7 @@ echo
 echo "=== Established connections on port $PORT ==="
 ss -tanp | grep -E ":${PORT}\b" || true
 echo
-LOGDIR="$HOME/M5-Trader/ibg_logs"
+LOGDIR="$HOME/File-Window/ibg_logs"
 if [ -d "$LOGDIR" ]; then
   LATEST=$(ls -1t "$LOGDIR"/*.log 2>/dev/null | head -n 1 || true)
   if [ -n "${LATEST:-}" ]; then
@@ -23,4 +23,3 @@ if [ -d "$LOGDIR" ]; then
 else
   echo "Log directory $LOGDIR not found; run tools/update_ibg_log_symlink.sh"
 fi
-

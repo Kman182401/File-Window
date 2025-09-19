@@ -14,7 +14,7 @@ PC Specs Summary (from `~/PC_Specs` and live checks)
 - OS: Ubuntu 24.04.3 LTS, kernel 6.14.0‑29‑generic
 
 Repo State and Inventory
-- Repo path: `M5-Trader` (371 files, ~159 MB). Git remote: `origin https://github.com/Kman182401/M5-Trader.git`.
+- Repo path: `File-Window` (renamed from M5-Trader). Git remote: `origin https://github.com/Kman182401/File-Window.git`.
 - Local is behind origin; latest remote objects have been fetched, but working tree not updated to preserve local changes.
 - Local changes detected (kept intact): `AGENTS.md`, `audit_logging_utils.py`, `comprehensive_system_monitor.py`, `enhanced_resource_monitor.py`, `performance_monitoring_system.py`, `requirements.txt`, `utils/gpu_metrics.py`.
 - No submodules; no Git LFS patterns in `.gitattributes`.
@@ -138,4 +138,3 @@ Deferred Enhancements (optional but high impact)
 Notes
 - Paper‑trading, env guardrails (`DRY_RUN`, `ALLOW_ORDERS`) remain defaults until we re‑baseline locally.
 - All path changes use env‑first with sensible defaults under the user home directory for portability.
-

@@ -24,7 +24,7 @@ _ib: Optional[IB] = None
 _last_api_call = 0
 PID_FILE = Path.home() / "trading_system.pid"
 
-def init_ib(host="127.0.0.1", port=4002, client_id=9002, timeout=20) -> IB:
+def init_ib(host="127.0.0.1", port=4002, client_id=9002, timeout=None) -> IB:
     """Initialize the single shared IB connection"""
     global _ib
 
@@ -38,6 +38,9 @@ def init_ib(host="127.0.0.1", port=4002, client_id=9002, timeout=20) -> IB:
     logger.info(f"PID {pid} written to {PID_FILE}")
 
     # Connect with retries
+    timeout = int(os.getenv('IBKR_CONNECT_TIMEOUT', timeout or 45))
+    util.startLoop()
+
     for attempt in range(3):
         try:
             logger.info(f"Connecting to {host}:{port} (attempt {attempt+1}/3)...")

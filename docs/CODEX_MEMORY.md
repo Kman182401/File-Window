@@ -1,4 +1,4 @@
-M5-Trader Ops — IBG Client IDs, Ingest/Parquet, and Repo Autosync
+File-Window Ops — IBG Client IDs, Ingest/Parquet, and Repo Autosync
 
 Scope: This project now standardizes IB Gateway client IDs, stabilizes ingest (historical bars → Parquet), fixes the training gate to detect Parquet (not CSV), and enables automatic Git pushes on file change with systemd + inotify.
 Stable IBG Client IDs & Heartbeat
@@ -23,7 +23,7 @@ ss -ltnp | grep 4002 || echo "No 4002 listener"
 
 ps -ef | awk '/run_pipeline\.py|src\/rl_trading_pipeline\.py/{print $2}' | xargs -r kill
 
-cd ~/M5-Trader
+cd ~/File-Window
 
 . .venv/bin/activate
 
@@ -51,7 +51,7 @@ Codex actions (when to use):
 
 Commands (copy/paste):
 
-cd ~/M5-Trader
+cd ~/File-Window
 
 . .venv/bin/activate
 
@@ -90,7 +90,7 @@ Run Pipeline Foreground (observe live requests)
 
 Commands (copy/paste):
 
-cd ~/M5-Trader
+cd ~/File-Window
 
 . .venv/bin/activate
 

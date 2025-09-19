@@ -142,7 +142,7 @@ class IBKRIngestor:
         # Check if we should skip monitor (single-socket mode or external IB provided)
         disable_monitor = os.getenv("DISABLE_HEALTH_MONITOR", "0") in ("1", "true", "True", "YES", "yes")
 
-        if not disable_monitor and ib is None:
+        if not disable_monitor and not getattr(self, 'external_ib', False):
             # Only spawn monitor if NOT in single-socket mode AND not using external IB
             global health_monitor
             self.health_monitor = IBKRHealthMonitor(self.host, self.port, self.clientId)
@@ -159,9 +159,17 @@ class IBKRIngestor:
             self.external_ib = True
             print(f"[IBKRIngestor] Using external IB connection (connected={self.connected})")
         else:
-            self.ib = IB()
-            self.connected = False
-            self.external_ib = False
+            try:
+                from ib_single_socket import init_ib
+                shared_ib = init_ib(host=self.host, port=self.port, client_id=self.clientId)
+                self.ib = shared_ib
+                self.connected = shared_ib.isConnected()
+                self.external_ib = True
+                print(f"[IBKRIngestor] Reusing shared IB connection (clientId={self.ib.client.clientId})")
+            except Exception:
+                self.ib = IB()
+                self.connected = False
+                self.external_ib = False
         self.auto_reconnect = True
         self.reconnect_attempts = 0
         self.max_reconnect_attempts = config_get("ibkr.retry_attempts", 10)

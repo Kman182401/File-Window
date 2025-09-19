@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -u
-REPO="$HOME/M5-Trader"
+REPO="$HOME/File-Window"
 cd "$REPO" || exit 1
 LOG_DIR="$HOME/logs/m5_autosync"
 mkdir -p "$LOG_DIR"
@@ -45,4 +45,3 @@ if ! git push origin "$BRANCH" >/dev/null 2>&1; then
 fi
 echo "$NOW synced $BRANCH" >> "$LOG_DIR/events.log"
 exit 0
-

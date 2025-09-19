@@ -1,8 +1,7 @@
 [Unit]
-Description=M5-Trader periodic autosync
+Description=File-Window periodic autosync
 
 [Service]
 Type=oneshot
-WorkingDirectory=%h/M5-Trader
-ExecStart=%h/M5-Trader/bin/m5-sync.sh --if-needed
-
+WorkingDirectory=%h/File-Window
+ExecStart=%h/File-Window/bin/m5-sync.sh --if-needed

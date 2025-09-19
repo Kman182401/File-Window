@@ -1,5 +1,5 @@
 [Unit]
-Description=M5-Trader nightly validation timer
+Description=File-Window nightly validation timer
 
 [Timer]
 OnCalendar=02:30
@@ -8,4 +8,3 @@ Unit=m5trader-nightly.service
 
 [Install]
 WantedBy=timers.target
-

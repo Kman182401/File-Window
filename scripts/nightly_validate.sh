@@ -1,6 +1,6 @@
 set -euo pipefail
 . "$HOME/.profile" 2>/dev/null || true
-. "$HOME/M5-Trader/.venv/bin/activate"
+. "$HOME/File-Window/.venv/bin/activate"
 
 # Skip if pipeline is running to avoid clientId collision
 if pgrep -f 'run_pipeline.py' >/dev/null; then

@@ -1,7 +1,6 @@
 [Unit]
-Description=M5-Trader nightly validation
+Description=File-Window nightly validation
 
 [Service]
 Type=oneshot
-ExecStart=%h/M5-Trader/scripts/nightly_validate.sh
-
+ExecStart=%h/File-Window/scripts/nightly_validate.sh

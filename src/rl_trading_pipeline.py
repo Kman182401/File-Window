@@ -1,4 +1,5 @@
 import logging
+import os
 
 from datetime import datetime, timezone
 import pandas as pd
@@ -37,6 +38,7 @@ except Exception:
 feature_store = RealTimeFeatureStore()
 
 from market_data_config import MAX_POSITION_EXPOSURE
+from ib_single_socket import init_ib
 import datetime
 from market_data_config import MAX_DAILY_LOSS_PCT, MAX_TRADES_PER_DAY
 from ib_insync import MarketOrder, util
@@ -108,12 +110,26 @@ except Exception:
     def engineer_news_features(df):
         return df
 
+# Ensure the health monitor stays passive in single-socket mode; any
+# additional socket probes can cause the gateway to reset the API port.
+os.environ.setdefault("DISABLE_HEALTH_MONITOR", "1")
+
 from market_data_config import (
     IBKR_HOST, IBKR_PORT, IBKR_CLIENT_ID, IBKR_SYMBOLS, IBKR_LOG_LEVEL,
     IBKR_RETRY_INTERVAL, IBKR_TIMEOUT, IBKR_MARKET_DATA_TYPE,
     IBKR_LOGGING_ENABLED, IBKR_LOG_FILE, IBKR_DYNAMIC_SUBSCRIPTION,
     IBKR_RESOURCE_MONITORING, IBKR_POLL_INTERVAL
 )
+
+# Allocate dedicated client IDs for auxiliary sessions so that we never
+# collide with the primary market-data channel (IBKR_CLIENT_ID). IBKR closes
+# duplicate client IDs immediately ("Connection reset"), which is exactly what
+# we observed when the news fetch and the main ingestor both used the same ID.
+# Offsetting keeps the original ID for the trading/market-data session while
+# giving deterministic IDs to short-lived helpers.
+IBKR_NEWS_CLIENT_ID = IBKR_CLIENT_ID + 100
+IBKR_AUX_CLIENT_ID = IBKR_CLIENT_ID + 101
+IBKR_CONNECT_TIMEOUT = int(os.getenv('IBKR_CONNECT_TIMEOUT', '30'))
 
 # ---- IBKR news helpers (historical news + article text) ----
 def fetch_ibkr_news_for_tickers(tickers, lookback_hours=24, max_results=200):
@@ -134,7 +150,7 @@ def fetch_ibkr_news_for_tickers(tickers, lookback_hours=24, max_results=200):
     # Connect (separate lightweight session for news)
     ib = IB()
     try:
-        ib.connect(IBKR_HOST, IBKR_PORT, clientId=IBKR_CLIENT_ID, timeout=10)
+        ib.connect(IBKR_HOST, IBKR_PORT, clientId=IBKR_NEWS_CLIENT_ID, timeout=IBKR_CONNECT_TIMEOUT)
     except Exception:
         # If IB Gateway isn’t ready, return empty DF; pipeline will continue with MarketAux
         return pd.DataFrame(columns=['published_at','title','description','tickers','provider','source'])
@@ -150,7 +166,16 @@ def fetch_ibkr_news_for_tickers(tickers, lookback_hours=24, max_results=200):
         return pd.DataFrame(columns=['published_at','title','description','tickers','provider','source'])
 
     # Use your existing adapter to resolve exact (qualified) contracts quickly
-    ingestor = IBKRIngestor(host=IBKR_HOST, port=IBKR_PORT, clientId=IBKR_CLIENT_ID)
+    # Reuse the lightweight IB connection for contract discovery to avoid
+    # spinning up another persistent socket. We still assign a dedicated client
+    # ID so that, if the adapter ever needs to originate API requests, it does
+    # not collide with the primary trading session.
+    ingestor = IBKRIngestor(
+        host=IBKR_HOST,
+        port=IBKR_PORT,
+        clientId=IBKR_AUX_CLIENT_ID,
+        ib=ib
+    )
 
     end_dt = datetime.utcnow()
     start_dt = end_dt - timedelta(hours=lookback_hours)
@@ -471,7 +496,12 @@ class TradingEnv(gym.Env):
         self.risk_penalty_coeff = 0.1  # adjust for risk aversion
         self.action_space = gym.spaces.Discrete(3)  # [0: hold, 1: buy, 2: sell]
         # Drop datetime columns from data for observation space
-        self.numeric_columns = [col for col in self.data.columns if not np.issubdtype(self.data[col].dtype, np.datetime64)]
+        from pandas.api.types import is_datetime64_any_dtype
+
+        self.numeric_columns = [
+            col for col in self.data.columns
+            if not is_datetime64_any_dtype(self.data[col])
+        ]
         self.observation_space = gym.spaces.Box(
             low=-np.inf, high=np.inf, shape=(len(self.numeric_columns),), dtype=np.float32
         )
@@ -594,7 +624,13 @@ def load_all_models(bucket, run_id):
 class RLTradingPipeline:
     def __init__(self, config: Dict[str, Any]):
         self.config = config
-        self.market_data_adapter = IBKRIngestor()
+        shared_ib = init_ib(host=IBKR_HOST, port=IBKR_PORT, client_id=IBKR_CLIENT_ID)
+        self.market_data_adapter = IBKRIngestor(
+            host=IBKR_HOST,
+            port=IBKR_PORT,
+            clientId=shared_ib.client.clientId,
+            ib=shared_ib
+        )
         # Attach passive Account Summary lookahead cache to the live IB session
         try:
             ib_ref = getattr(self.market_data_adapter, 'ib', None)
@@ -632,7 +668,7 @@ class RLTradingPipeline:
                                     _logging.warning("Reconnected to IBGW on clientId=%s", cid)
                                     return True
                             else:
-                                ib.connect(host, port, clientId=cid, timeout=10)
+                                ib.connect(host, port, clientId=cid, timeout=IBKR_CONNECT_TIMEOUT)
                                 if ib.isConnected():
                                     _logging.warning("Reconnected to IBGW on clientId=%s", cid)
                                     return True

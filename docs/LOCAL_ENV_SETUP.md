@@ -26,4 +26,3 @@ Steps
 Notes
 - Do not commit `~/.config/m5_trader/env.local` or any secrets.
 - Logs/data are stored outside the repo (see env vars).
-
