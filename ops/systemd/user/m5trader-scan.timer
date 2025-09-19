@@ -1,0 +1,11 @@
+[Unit]
+Description=Periodic autosync timer
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=2min
+Unit=m5trader-scan.service
+
+[Install]
+WantedBy=default.target
+
