@@ -1,0 +1,16 @@
+IbLoginId=<YOUR_IBKR_USERNAME>
+IbPassword=<YOUR_IBKR_PASSWORD>
+TradingMode=paper
+IbDir=~/Jts
+OverrideTwsApiPort=4002
+AutoRestartTime=06:00
+ReadOnlyLogin=no
+ReadOnlyApi=no
+ExistingSessionDetectedAction=primary
+AcceptIncomingConnectionAction=accept
+LoginDialogDisplayTimeout=60
+ReloginAfterSecondFactorAuthenticationTimeout=yes
+SecondFactorAuthenticationTimeout=180
+SaveTwsSettingsAt=exit
+MinimizeMainWindow=no
+
