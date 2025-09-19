@@ -42,3 +42,6 @@ ibg_logs
 *.ibgzenc
 *.ibglog
 launcher.log
+ 
+# Local ops configs (never commit real secrets)
+ops/ibc/config.ini
