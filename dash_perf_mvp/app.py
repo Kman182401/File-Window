@@ -1,8 +1,11 @@
 """Dash application for trading performance analytics."""
 from __future__ import annotations
 
+import os
+
 import pandas as pd
 import plotly.graph_objects as go
+import plotly.io as pio
 from plotly.subplots import make_subplots
 from dash import Dash, dcc, html
 
@@ -24,6 +27,27 @@ app = Dash(__name__)
 app.title = "Performance & Risk (MVP)"
 
 DEFAULT_HEIGHT = 440
+USE_IFRAME = os.getenv("DASH_USE_IFRAME", "0") == "1"
+
+
+def as_component(fig: go.Figure):
+    """Return a rendered component for the figure honoring fallback settings."""
+    if not USE_IFRAME:
+        return dcc.Graph(
+            figure=fig,
+            style={"height": f"{DEFAULT_HEIGHT}px"},
+            config={"displaylogo": False, "responsive": True, "scrollZoom": True},
+        )
+
+    html_str = pio.to_html(fig, include_plotlyjs="cdn", full_html=False)
+    return html.Iframe(
+        srcDoc=html_str,
+        style={
+            "width": "100%",
+            "height": f"{DEFAULT_HEIGHT + 80}px",
+            "border": "0",
+        },
+    )
 
 
 def fig_equity_and_drawdown(eq: pd.DataFrame) -> go.Figure:
@@ -162,36 +186,12 @@ def layout_page(trades: pd.DataFrame) -> html.Div:
         [
             html.H2("Trading Performance & Risk — MVP"),
             html.Div(tiles, className="kpi-row"),
-            dcc.Graph(
-                figure=fig_equity_and_drawdown(equity),
-                style={"height": f"{DEFAULT_HEIGHT}px"},
-                config={"displaylogo": False, "responsive": True, "scrollZoom": True},
-            ),
-            dcc.Graph(
-                figure=fig_rolling_ratios(daily),
-                style={"height": f"{DEFAULT_HEIGHT}px"},
-                config={"displaylogo": False, "responsive": True, "scrollZoom": True},
-            ),
-            dcc.Graph(
-                figure=fig_daily_distribution(daily),
-                style={"height": f"{DEFAULT_HEIGHT}px"},
-                config={"displaylogo": False, "responsive": True, "scrollZoom": True},
-            ),
-            dcc.Graph(
-                figure=fig_heatmap_hour_weekday(heatmap_hw),
-                style={"height": f"{DEFAULT_HEIGHT}px"},
-                config={"displaylogo": False, "responsive": True, "scrollZoom": True},
-            ),
-            dcc.Graph(
-                figure=fig_symbol_contrib(symbol_contrib_df),
-                style={"height": f"{DEFAULT_HEIGHT}px"},
-                config={"displaylogo": False, "responsive": True, "scrollZoom": True},
-            ),
-            dcc.Graph(
-                figure=fig_symbol_month_heatmap(symbol_month),
-                style={"height": f"{DEFAULT_HEIGHT}px"},
-                config={"displaylogo": False, "responsive": True, "scrollZoom": True},
-            ),
+            as_component(fig_equity_and_drawdown(equity)),
+            as_component(fig_rolling_ratios(daily)),
+            as_component(fig_daily_distribution(daily)),
+            as_component(fig_heatmap_hour_weekday(heatmap_hw)),
+            as_component(fig_symbol_contrib(symbol_contrib_df)),
+            as_component(fig_symbol_month_heatmap(symbol_month)),
         ],
         className="container",
     )
