@@ -201,4 +201,9 @@ app.layout = lambda: layout_page(load_trades())
 
 
 if __name__ == "__main__":  # pragma: no cover
-    app.run_server(debug=True, host="127.0.0.1", port=8050)
+    app.run_server(
+        debug=True,
+        dev_tools_hot_reload=False,
+        host="127.0.0.1",
+        port=8050,
+    )
