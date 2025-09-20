@@ -1609,81 +1609,82 @@ class RLTradingPipeline:
                                 },
                             )
 
-                            if self.seq_training_enabled:
-                                df_seq = X_all.reset_index(drop=True).copy()
-                                if "close" not in df_seq.columns:
+    
+                        if self.seq_training_enabled:
+                            df_seq = X_all.reset_index(drop=True).copy()
+                            if "close" not in df_seq.columns:
+                                logging.warning(
+                                    "Sequence forecaster skipped for %s: missing 'close' column in features.",
+                                    ticker,
+                                )
+                            else:
+                                seq_feature_cols = [
+                                    col
+                                    for col in df_seq.columns
+                                    if col != "close"
+                                    and not is_datetime64_any_dtype(df_seq[col])
+                                    and not is_datetime64tz_dtype(df_seq[col])
+                                    and np.issubdtype(df_seq[col].dtype, np.number)
+                                ]
+                                if not seq_feature_cols:
                                     logging.warning(
-                                        "Sequence forecaster skipped for %s: missing 'close' column in features.",
+                                        "Sequence forecaster skipped for %s: no numeric feature columns after filtering.",
                                         ticker,
                                     )
                                 else:
-                                    seq_feature_cols = [
-                                        col
-                                        for col in feature_columns
-                                        if col in df_seq.columns
-                                        and not is_datetime64_any_dtype(df_seq[col])
-                                        and not is_datetime64tz_dtype(df_seq[col])
-                                    ]
-                                    if not seq_feature_cols:
-                                        logging.warning(
-                                            "Sequence forecaster skipped for %s: no numeric feature columns after filtering.",
-                                            ticker,
+                                    try:
+                                        seq_metrics = self._fit_seq_forecaster(
+                                            df_seq,
+                                            seq_feature_cols,
+                                            symbol=ticker,
+                                            horizons=self.seq_horizons,
+                                            n_steps=self.seq_n_steps,
+                                            step=self.seq_step,
+                                            out_dir=str(self.seq_model_dir),
+                                            train_split=self.seq_train_split,
+                                            val_split=self.seq_val_split,
+                                            hidden_size=self.seq_hidden_size,
+                                            num_layers=self.seq_num_layers,
+                                            dropout=self.seq_dropout,
+                                            epochs=self.seq_epochs,
+                                            batch_size=self.seq_batch_size,
+                                            lr=self.seq_lr,
+                                            weight_decay=self.seq_weight_decay,
+                                            patience=self.seq_patience,
+                                            device=self.seq_device,
+                                            seed=self.seq_seed,
                                         )
-                                    else:
-                                        try:
-                                            seq_metrics = self._fit_seq_forecaster(
-                                                df_seq,
-                                                seq_feature_cols,
-                                                symbol=ticker,
-                                                horizons=self.seq_horizons,
-                                                n_steps=self.seq_n_steps,
-                                                step=self.seq_step,
-                                                out_dir=str(self.seq_model_dir),
-                                                train_split=self.seq_train_split,
-                                                val_split=self.seq_val_split,
-                                                hidden_size=self.seq_hidden_size,
-                                                num_layers=self.seq_num_layers,
-                                                dropout=self.seq_dropout,
-                                                epochs=self.seq_epochs,
-                                                batch_size=self.seq_batch_size,
-                                                lr=self.seq_lr,
-                                                weight_decay=self.seq_weight_decay,
-                                                patience=self.seq_patience,
-                                                device=self.seq_device,
-                                                seed=self.seq_seed,
-                                            )
-                                            self.seq_models.pop(ticker, None)
-                                            artifact = self._get_seq_artifact(ticker)
-                                            self._emit_event(
-                                                component="sequence_forecaster",
-                                                category="ml",
-                                                event="train_complete",
-                                                symbol=ticker,
-                                                corr_id=self._corr(ticker),
-                                                data=seq_metrics,
-                                            )
-                                            if artifact is not None:
-                                                logging.info(
-                                                    "Sequence forecaster trained for %s (horizons=%s)",
-                                                    ticker,
-                                                    artifact.horizons,
-                                                )
-                                        except Exception as exc:
-                                            logging.warning(
-                                                "Sequence forecaster training failed for %s: %s",
+                                        self.seq_models.pop(ticker, None)
+                                        artifact = self._get_seq_artifact(ticker)
+                                        self._emit_event(
+                                            component="sequence_forecaster",
+                                            category="ml",
+                                            event="train_complete",
+                                            symbol=ticker,
+                                            corr_id=self._corr(ticker),
+                                            data=seq_metrics,
+                                        )
+                                        if artifact is not None:
+                                            logging.info(
+                                                "Sequence forecaster trained for %s (horizons=%s)",
                                                 ticker,
-                                                exc,
+                                                artifact.horizons,
                                             )
-                                            self._emit_event(
-                                                component="sequence_forecaster",
-                                                category="ml",
-                                                event="train_error",
-                                                symbol=ticker,
-                                                corr_id=self._corr(ticker),
-                                                state="ERROR",
-                                                message=str(exc),
-                                            )
-
+                                    except Exception as exc:
+                                        logging.warning(
+                                            "Sequence forecaster training failed for %s: %s",
+                                            ticker,
+                                            exc,
+                                        )
+                                        self._emit_event(
+                                            component="sequence_forecaster",
+                                            category="ml",
+                                            event="train_error",
+                                            symbol=ticker,
+                                            corr_id=self._corr(ticker),
+                                            state="ERROR",
+                                            message=str(exc),
+                                        )
                         self.ml_last_incremental_rows[ticker] = total_rows
                         self.ml_last_incremental_time[ticker] = now_utc
                         self.ml_last_full_retrain_time = now_utc
