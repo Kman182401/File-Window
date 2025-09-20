@@ -15,6 +15,7 @@ import logging
 
 # Import enhanced modules
 from monitoring.performance_tracker import get_performance_tracker, MetricType
+from monitoring.omni_monitor import emit_event
 from utils.memory_manager import memory_efficient, get_memory_manager
 from utils.exception_handler import retry_on_exception, DataFetchError
 from utils.audit_logger import audit_log, AuditEventType, AuditSeverity
@@ -442,6 +443,18 @@ def generate_features(df):
         )
     except Exception as exc:
         logger.debug(f"[FE] Unable to record feature row metric: {exc}")
+
+    emit_event(
+        component="features",
+        category="ml",
+        event="generate_features",
+        data={
+            "input_rows": int(initial_len),
+            "post_filter_rows": int(pre_filter_len),
+            "output_rows": int(len(features)),
+            "labels_rows": int(len(labels)),
+        },
+    )
 
     return features, labels
 

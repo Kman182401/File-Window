@@ -71,6 +71,7 @@ Trade Logs ← Order Execution ← Risk Management ← Trading Decision
 - **Deep Learning**: PyTorch for neural networks
 - **Optimization**: JAX for high-performance computing
 - **Feature Engineering**: Pandas, NumPy, TA-Lib
+- **Sequence Forecasting**: `ml/sequence_dataset.py` + `ml/train_sequence_forecaster.py` build sliding-window PyTorch regressors whose outputs feed the stacking/meta layer.
 
 ### Infrastructure
 - **Cloud**: AWS EC2 (m5.large instance)
@@ -103,6 +104,7 @@ export IBKR_CLIENT_ID="9002"      # Unique client ID
 export ENABLE_ORDER_EXEC="1"      # Enable order execution
 export DRY_RUN="0"                # 0 for real orders, 1 for simulation
 export ALLOW_ORDERS="1"           # Master switch for orders
+export SEQ_FORECASTER_DIR="$HOME/models/seq_forecaster"  # Location of PyTorch sequence models
 ```
 
 ## Phase 3 Enhancements

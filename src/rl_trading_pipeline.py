@@ -1,19 +1,27 @@
 import logging
 import os
+import uuid
+from pathlib import Path
 
 from datetime import datetime, timezone
 import pandas as pd
 from pandas.api.types import is_datetime64_any_dtype, is_datetime64tz_dtype
 
-def _coerce_epoch(ts):
-    try:
-        return int(ts)
-    except Exception:
-        try:
-            t = pd.to_datetime(ts, utc=True, errors='coerce')
-            return int(t.timestamp()) if pd.notna(t) else 0
-        except Exception:
-            return 0
+from monitoring.omni_monitor import emit_event
+
+try:
+    import torch  # type: ignore
+    from ml.sequence_forecaster import (
+        SequenceForecasterArtifact,
+        load_artifact as load_sequence_artifact,
+    )
+    from ml.trainers.fit_sequence_forecaster import fit_seq_forecaster_for_symbol
+except Exception as _seq_import_exc:  # pragma: no cover - optional dependency
+    torch = None  # type: ignore
+    load_sequence_artifact = None  # type: ignore
+    SequenceForecasterArtifact = None  # type: ignore
+    fit_seq_forecaster_for_symbol = None  # type: ignore
+    logging.getLogger(__name__).info("Sequence forecaster unavailable: %s", _seq_import_exc)
 
 try:
     from utils.alerts import send_sms_alert
@@ -90,8 +98,6 @@ from audit_logging_utils import log_trade_results
 from stable_baselines3 import PPO
 from stable_baselines3.common.env_checker import check_env
 import gymnasium as gym
-import pandas as pd  # <-- Ensure pandas is imported for mock data
-import logging
 from colorlog import ColoredFormatter
 
 import warnings
@@ -267,7 +273,6 @@ def new_data_available(data_dir, ticker, last_check_time):
     Parquet layout (env-first):
       $DATA_DIR/symbol=<ticker>/date=YYYY-MM-DD/bars.parquet
     """
-    from pathlib import Path
     base = Path(data_dir) / f"symbol={ticker}"
     if not base.exists():
         return False
@@ -294,76 +299,63 @@ def execute_trade(ib, contract, action, quantity):
     print(f"Order submitted: {action} {quantity} {contract.localSymbol}")
     return trade
 
-IBKR_CONFIG = {
-    'host': IBKR_HOST,
-    'port': IBKR_PORT,
-    'client_id': IBKR_CLIENT_ID,
-    'symbols': IBKR_SYMBOLS,
-    'log_level': IBKR_LOG_LEVEL,
-    'retry_interval': IBKR_RETRY_INTERVAL,
-    'timeout': IBKR_TIMEOUT,
-    'market_data_type': IBKR_MARKET_DATA_TYPE,
-    'logging_enabled': IBKR_LOGGING_ENABLED,
-    'log_file': IBKR_LOG_FILE,
-    'dynamic_subscription': IBKR_DYNAMIC_SUBSCRIPTION,
-    'resource_monitoring': IBKR_RESOURCE_MONITORING,
-    'poll_interval': IBKR_POLL_INTERVAL
-}
-
-bucket = "omega-singularity-ml"
-
 # Default data dir for new_data_available checks (env-first)
-from pathlib import Path
 data_dir = os_mod.getenv("DATA_DIR", str(Path.home() / ".local/share/m5_trader/data"))
 
 # === Combined News Ingestion (MarketAux + IBKR) ===
 _news_env_flag = os_mod.getenv("ENABLE_IBKR_NEWS", os_mod.getenv("ENABLE_NEWS_ANALYSIS", "0"))
 _news_enabled = _news_env_flag.lower() in ("1", "true", "yes")
 
-if _news_enabled:
+
+def fetch_union_news(
+    symbols: Optional[List[str]] = None,
+    *,
+    lookback_hours: int = 24,
+    max_results: int = 200,
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    symbols = symbols or IBKR_SYMBOLS
     entity_types = "indices,commodities,currencies,futures"
 
-    # 1) MarketAux (free tier) first
     try:
         ma_list = fetch_marketaux_news(
-            symbols=IBKR_SYMBOLS,          # use your canonical symbols list
-            limit=20,                      # tune to free-tier limits
+            symbols=symbols,
+            limit=20,
             entity_types=entity_types,
             countries="us",
             language="en",
             filter_entities="false",
             must_have_entities="false",
-            min_match_score=0.05
+            min_match_score=0.05,
         )
         ma_raw = normalize_marketaux_news(ma_list)
-    except Exception as e:
-        logging.warning(f"MarketAux fetch failed: {e}")
+    except Exception as exc:
+        logging.warning(f"MarketAux fetch failed: {exc}")
         ma_raw = None
 
     ma_df = normalize_marketaux_for_union(ma_raw)
 
-    # 2) IBKR Historical News (best-effort; requires whatever news entitlements you have)
     try:
-        ibkr_df = fetch_ibkr_news_for_tickers(IBKR_SYMBOLS, lookback_hours=24, max_results=200)
-    except Exception as e:
-        logging.warning(f"IBKR news fetch failed: {e}")
+        ibkr_df = fetch_ibkr_news_for_tickers(symbols, lookback_hours=lookback_hours, max_results=max_results)
+    except Exception as exc:
+        logging.warning(f"IBKR news fetch failed: {exc}")
         ibkr_df = pd.DataFrame(columns=['published_at','title','description','tickers','provider','source'])
 
-    # 3) Union + de-dupe
     try:
         news_df = pd.concat([ma_df, ibkr_df], ignore_index=True)
         if not news_df.empty:
             news_df['published_min'] = news_df['published_at'].dt.floor('min')
-            news_df = news_df.drop_duplicates(subset=['published_min','title']).drop(columns=['published_min'])
-        print(f"News rows — MarketAux: {len(ma_df)}, IBKR: {len(ibkr_df)}, Combined: {len(news_df)}")
-    except Exception as e:
-        logging.warning(f"News analysis disabled due to error: {e}")
+            news_df = news_df.drop_duplicates(subset=['published_min', 'title']).drop(columns=['published_min'])
+    except Exception as exc:
+        logging.warning(f"News analysis disabled due to error: {exc}")
         news_df = pd.DataFrame()
-else:
-    # News ingestion disabled by environment; initialise empties to avoid downstream checks
-    ma_df = pd.DataFrame(columns=['published_at','title','description','tickers','provider','source'])
-    ibkr_df = pd.DataFrame(columns=['published_at','title','description','tickers','provider','source'])
-    news_df = pd.DataFrame()
+
+    return ma_df, ibkr_df, news_df
+
+
+# News placeholders (updated inside the main loop when enabled)
+ma_df = pd.DataFrame(columns=['published_at','title','description','tickers','provider','source'])
+ibkr_df = pd.DataFrame(columns=['published_at','title','description','tickers','provider','source'])
+news_df = pd.DataFrame()
 
 class PPOTrainingLogger(BaseCallback):
     def __init__(self, verbose=0):
@@ -422,19 +414,6 @@ root_logger = logging.getLogger()
 root_logger.handlers = []  # Remove any existing handlers
 root_logger.addHandler(handler)
 root_logger.setLevel(LOG_LEVEL)
-# Only show warnings/errors by default
-logging.getLogger().setLevel(logging.WARNING)
-
-def to_scalar(x):
-    """Convert any array-like or scalar to a Python int."""
-    arr = np.asarray(x)
-    if arr.shape == ():  # scalar
-        return int(arr.item())
-    elif arr.shape == (1,):  # 1-element array
-        return int(arr[0])
-    else:
-        logger.error(f"Non-scalar value encountered: {x} (type: {type(x)}, shape: {arr.shape})")
-        raise ValueError(f"Non-scalar value encountered: {x} (type: {type(x)}, shape: {arr.shape})")
 
 def _s3_enabled() -> bool:
     try:
@@ -603,6 +582,31 @@ def get_latest_model_key(bucket, prefix, exclude_run_id=None):
     if not keys:
         return None
     return sorted(keys)[-1]  # Latest by name (run_id)
+
+
+def get_latest_model_key_global(bucket, filename_suffix, exclude_run_id=None):
+    """Locate the most recent S3 model key across all runs matching the filename suffix."""
+    if not _s3_enabled():
+        return None
+
+    s3 = boto3.client("s3")
+    paginator = s3.get_paginator('list_objects_v2')
+    latest_key = None
+    latest_time = None
+
+    for page in paginator.paginate(Bucket=bucket, Prefix="models/"):
+        for obj in page.get('Contents', []):
+            key = obj['Key']
+            if exclude_run_id and f"/{exclude_run_id}/" in key:
+                continue
+            if not key.endswith(filename_suffix):
+                continue
+            lm = obj.get('LastModified')
+            if latest_time is None or (lm and lm > latest_time):
+                latest_time = lm
+                latest_key = key
+
+    return latest_key
 
 # === Add this drift detection function here ===
 def detect_feature_drift(reference_data, new_data, threshold=3.0):
@@ -798,6 +802,7 @@ class RLTradingPipeline:
             str(config.get('ml_retrain_every_min', 60))
         ))
         self.run_id = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        self.pipeline_corr_id = f"{self.run_id}:{uuid.uuid4().hex}"
         self.local_model_dir = _ensure_dir(LOCAL_STACKING_DIR / self.run_id)
         _ensure_dir(LOCAL_PPO_DIR)
         self.ml_model_store: Dict[str, Dict[str, Any]] = defaultdict(dict)
@@ -806,9 +811,145 @@ class RLTradingPipeline:
         self.ml_last_incremental_time: Dict[str, datetime] = defaultdict(lambda: datetime(1970, 1, 1))
         self.ml_last_full_retrain_time: datetime = datetime.utcnow() - timedelta(minutes=self.ml_retrain_every_min)
         self.ppo_live_positions: Dict[str, int] = defaultdict(int)
+        self.meta_daily_state: Dict[str, Dict[str, Any]] = defaultdict(lambda: {"day": None, "trades": 0})
+        self.micropoll_enable = str(os_mod.getenv('MICROPOLL_ENABLE', '0')).lower() in ('1', 'true', 'yes')
+        self.micropoll_every_s = int(os_mod.getenv('MICROPOLL_EVERY_S', '10'))
+        self.micropoll_window = os_mod.getenv('MICROPOLL_WINDOW', '90 S')
+        self.micropoll_bar_size = os_mod.getenv('MICROPOLL_BAR_SIZE', '5 secs')
+        self.micropoll_what = os_mod.getenv('MICROPOLL_WHAT', 'MIDPOINT')
+        self._last_poll_ts: Dict[str, Any] = {}
+        if self.micropoll_enable:
+            try:
+                import pandas as pd
+                base = Path(os_mod.getenv("DATA_DIR", str(Path.home()/".local/share/m5_trader/data")))
+                for t in ["ES1!", "NQ1!", "XAUUSD", "EURUSD", "GBPUSD", "AUDUSD"]:
+                    parts = sorted((base / f"symbol={t}").rglob("bars.parquet"))
+                    if parts:
+                        latest = pd.read_parquet(parts[-1])
+                        if not latest.empty and "timestamp" in latest.columns:
+                            self._last_poll_ts[t] = pd.to_datetime(latest["timestamp"]).max()
+            except Exception as _seed_e:
+                logging.info(f"[micropoll] seed last_ts skipped: {_seed_e}")
         self.status = "initialized"
         self.last_error = None
         self.notification_hook = None  # Extensibility: notification system
+
+        # Sequence forecaster integration (PyTorch-based supervised models)
+        self.seq_torch = torch
+        self._load_seq_artifact = load_sequence_artifact
+        self._fit_seq_forecaster = fit_seq_forecaster_for_symbol
+        self.seq_enabled = (
+            self.seq_torch is not None
+            and self._load_seq_artifact is not None
+        )
+        self.seq_model_dir = Path(
+            os_mod.getenv("SEQ_FORECASTER_DIR", str(MODELS_ROOT_DIR / "seq_forecaster"))
+        ).expanduser()
+        self.seq_models: Dict[str, Optional[SequenceForecasterArtifact]] = {}
+        self.seq_feature_names: List[str] = []
+        if self.seq_enabled:
+            device_str = os_mod.getenv("SEQ_FORECASTER_DEVICE")
+            try:
+                self.seq_device = self.seq_torch.device(device_str) if device_str else self.seq_torch.device(
+                    "cuda" if self.seq_torch.cuda.is_available() else "cpu"
+                )
+            except Exception as exc:
+                logging.warning("Sequence forecaster device fallback to CPU: %s", exc)
+                self.seq_device = self.seq_torch.device("cpu")
+            logging.info(
+                "Sequence forecaster enabled (dir=%s, device=%s)", self.seq_model_dir, self.seq_device
+            )
+        else:
+            self.seq_device = None
+            logging.info("Sequence forecaster disabled (missing torch or artifact loader).")
+
+        self.seq_training_enabled = (
+            self.seq_enabled
+            and callable(self._fit_seq_forecaster)
+            and str(os_mod.getenv("SEQ_FORECASTER_TRAIN", "1")).lower() in ("1", "true", "yes")
+        )
+
+        def _parse_int_env(name: str, default: int) -> int:
+            value = os_mod.getenv(name)
+            if value is None or value == "":
+                return default
+            try:
+                return int(value)
+            except ValueError:
+                logging.warning("Invalid int for %s=%s; using default %s", name, value, default)
+                return default
+
+        def _parse_float_env(name: str, default: float) -> float:
+            value = os_mod.getenv(name)
+            if value is None or value == "":
+                return default
+            try:
+                return float(value)
+            except ValueError:
+                logging.warning("Invalid float for %s=%s; using default %s", name, value, default)
+                return default
+
+        horizons_env = os_mod.getenv("SEQ_FORECASTER_HORIZONS", "1,5,15")
+        try:
+            parsed = [int(part.strip()) for part in horizons_env.split(",") if part.strip()]
+        except ValueError:
+            logging.warning("Invalid SEQ_FORECASTER_HORIZONS=%s; using defaults.", horizons_env)
+            parsed = [1, 5, 15]
+        self.seq_horizons = tuple(sorted({h for h in parsed if h > 0})) or (1, 5, 15)
+
+        self.seq_n_steps = max(_parse_int_env("SEQ_FORECASTER_N_STEPS", 150), 10)
+        self.seq_step = max(_parse_int_env("SEQ_FORECASTER_STEP", 1), 1)
+        self.seq_train_split = min(max(_parse_float_env("SEQ_FORECASTER_TRAIN_SPLIT", 0.7), 0.1), 0.95)
+        self.seq_val_split = min(max(_parse_float_env("SEQ_FORECASTER_VAL_SPLIT", 0.15), 0.05), 0.8)
+        if self.seq_train_split + self.seq_val_split >= 0.98:
+            self.seq_val_split = max(0.05, 0.98 - self.seq_train_split)
+
+        self.seq_hidden_size = max(_parse_int_env("SEQ_FORECASTER_HIDDEN_SIZE", 128), 16)
+        self.seq_num_layers = max(_parse_int_env("SEQ_FORECASTER_NUM_LAYERS", 2), 1)
+        self.seq_dropout = min(max(_parse_float_env("SEQ_FORECASTER_DROPOUT", 0.2), 0.0), 0.9)
+        self.seq_epochs = max(_parse_int_env("SEQ_FORECASTER_EPOCHS", 40), 1)
+        self.seq_batch_size = max(_parse_int_env("SEQ_FORECASTER_BATCH_SIZE", 256), 32)
+        self.seq_lr = _parse_float_env("SEQ_FORECASTER_LR", 3e-4)
+        self.seq_weight_decay = _parse_float_env("SEQ_FORECASTER_WEIGHT_DECAY", 0.0)
+        self.seq_patience = max(_parse_int_env("SEQ_FORECASTER_PATIENCE", 6), 1)
+
+        seed_env = os_mod.getenv("SEQ_FORECASTER_SEED", "42")
+        try:
+            self.seq_seed: Optional[int] = int(seed_env) if seed_env.strip() else None
+        except ValueError:
+            logging.warning("Invalid SEQ_FORECASTER_SEED=%s; disabling seed.", seed_env)
+            self.seq_seed = None
+
+        self.meta_feature_names: List[str] = []
+
+    def _corr(self, ticker: Optional[str] = None) -> str:
+        return f"{self.pipeline_corr_id}:{ticker}" if ticker else self.pipeline_corr_id
+
+    def _emit_event(
+        self,
+        *,
+        component: str,
+        event: str,
+        category: str = "pipeline",
+        symbol: Optional[str] = None,
+        corr_id: Optional[str] = None,
+        message: Optional[str] = None,
+        state: Optional[str] = None,
+        duration_ms: Optional[float] = None,
+        data: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        emit_event(
+            component=component,
+            event=event,
+            category=category,
+            symbol=symbol,
+            corr_id=corr_id or self._corr(symbol),
+            run_id=self.run_id,
+            message=message,
+            state=state,
+            duration_ms=duration_ms,
+            data=data,
+        )
 
         # Hook IBKR disconnect event to auto-reconnect with backoff
         try:
@@ -853,26 +994,101 @@ class RLTradingPipeline:
             # Do not let optional hooks break initialization
             pass
 
-        # Micropoll configuration (permission-agnostic live flow)
-        self.micropoll_enable = str(os_mod.getenv('MICROPOLL_ENABLE', '0')).lower() in ('1', 'true', 'yes')
-        self.micropoll_every_s = int(os_mod.getenv('MICROPOLL_EVERY_S', '10'))
-        self.micropoll_window = os_mod.getenv('MICROPOLL_WINDOW', '90 S')
-        self.micropoll_bar_size = os_mod.getenv('MICROPOLL_BAR_SIZE', '5 secs')
-        self.micropoll_what = os_mod.getenv('MICROPOLL_WHAT', 'MIDPOINT')
-        self._last_poll_ts: Dict[str, Any] = {}
-        # Seed last_ts from existing Parquet so first micro-poll doesn't re-append the last minute
+    def _register_seq_features(self, artifact: SequenceForecasterArtifact) -> None:
+        if artifact is None:
+            return
+        new_names = {f"seq_r{int(h)}" for h in artifact.horizons}
+        if not new_names:
+            return
+        merged = set(self.seq_feature_names)
+        merged.update(new_names)
         try:
-            from pathlib import Path
-            import pandas as pd
-            base = Path(os_mod.getenv("DATA_DIR", str(Path.home()/".local/share/m5_trader/data")))
-            for t in ["ES1!", "NQ1!", "XAUUSD", "EURUSD", "GBPUSD", "AUDUSD"]:
-                parts = sorted((base / f"symbol={t}").rglob("bars.parquet"))
-                if parts:
-                    latest = pd.read_parquet(parts[-1])
-                    if not latest.empty and "timestamp" in latest.columns:
-                        self._last_poll_ts[t] = pd.to_datetime(latest["timestamp"]).max()
-        except Exception as _seed_e:
-            logging.info(f"[micropoll] seed last_ts skipped: {_seed_e}")
+            self.seq_feature_names = sorted(merged, key=lambda name: int(name.split("h", 1)[1]))
+        except Exception:
+            # Fallback to lexical order if parsing fails
+            self.seq_feature_names = sorted(merged)
+
+    def _get_seq_artifact(self, ticker: str) -> Optional[SequenceForecasterArtifact]:
+        if not self.seq_enabled:
+            return None
+        if ticker in self.seq_models:
+            return self.seq_models[ticker]
+
+        model_path = self.seq_model_dir / ticker / "model.pt"
+        if not model_path.exists():
+            logging.debug("Sequence forecaster artifact missing for %s (%s)", ticker, model_path)
+            self.seq_models[ticker] = None
+            return None
+
+        try:
+            artifact = self._load_seq_artifact(model_path, device=self.seq_device)
+        except Exception as exc:
+            logging.warning("Failed to load sequence forecaster for %s: %s", ticker, exc)
+            self.seq_models[ticker] = None
+            return None
+
+        self._register_seq_features(artifact)
+        self.seq_models[ticker] = artifact
+        logging.info("Loaded sequence forecaster for %s from %s", ticker, model_path)
+        return artifact
+
+    def _compute_sequence_forecasts(
+        self,
+        ticker: str,
+        df: pd.DataFrame,
+    ) -> Optional[pd.DataFrame]:
+        if not self.seq_enabled or self.seq_torch is None:
+            return None
+
+        artifact = self._get_seq_artifact(ticker)
+        if artifact is None:
+            return None
+
+        feature_cols = artifact.feature_cols
+        missing = [col for col in feature_cols if col not in df.columns]
+        if missing:
+            logging.warning(
+                "Sequence forecaster skipped for %s: missing feature columns %s", ticker, missing
+            )
+            return None
+
+        df_feat = (
+            df[feature_cols]
+            .replace([np.inf, -np.inf], np.nan)
+            .dropna(axis=0, how="any")
+        )
+        if df_feat.empty:
+            logging.debug("Sequence forecaster skipped for %s: all feature rows have NaNs", ticker)
+            return None
+
+        if len(df_feat) < artifact.n_steps:
+            logging.debug(
+                "Sequence forecaster skipped for %s: rows=%s < n_steps=%s",
+                ticker,
+                len(df_feat),
+                artifact.n_steps,
+            )
+            return None
+
+        values = df_feat.astype(np.float32).values
+        windows = np.lib.stride_tricks.sliding_window_view(
+            values, (artifact.n_steps, len(feature_cols))
+        )
+        windows = windows.squeeze(1)
+        scaled = artifact.scaler.transform(windows)
+
+        device = self.seq_device or self.seq_torch.device("cpu")
+        tensor = self.seq_torch.from_numpy(scaled).to(device)
+        try:
+            with self.seq_torch.no_grad():
+                preds = artifact.model(tensor).detach().cpu().numpy()
+        except Exception as exc:
+            logging.warning("Sequence forecaster inference failed for %s: %s", ticker, exc)
+            return None
+
+        index = df_feat.index[artifact.n_steps - 1 :]
+        data = {f"seq_r{int(h)}": preds[:, i] for i, h in enumerate(artifact.horizons)}
+        return pd.DataFrame(data, index=index)
 
     def _micro_poll_symbol(self, ticker: str) -> int:
         """Poll a tiny historical window and append only new rows.
@@ -951,16 +1167,27 @@ class RLTradingPipeline:
     def run(self):
         self.status = "running"
         log_trade_results(f"pipeline_start: run_id={self.run_id}")
+        self._emit_event(component="pipeline", category="lifecycle", event="run_start", corr_id=self._corr())
         try:
             self._main_loop()
             self.status = "completed"
             log_trade_results(f"pipeline_complete: run_id={self.run_id}")
+            self._emit_event(component="pipeline", category="lifecycle", event="run_complete", corr_id=self._corr(), state="OK")
         except Exception as e:
             self.status = "failed"
             self.last_error = str(e)
             log_trade_results(f"pipeline_error: run_id={self.run_id}, error={self.last_error}, traceback={traceback.format_exc()}")
             logger.error(f"Pipeline failed: {e}")
             self.notify(f"Pipeline failed: {e}")
+            self._emit_event(
+                component="pipeline",
+                category="lifecycle",
+                event="run_failed",
+                corr_id=self._corr(),
+                state="ERROR",
+                message=str(e),
+                data={"traceback": traceback.format_exc()},
+            )
             raise
 
     def _main_loop(self):
@@ -969,6 +1196,24 @@ class RLTradingPipeline:
         last_hb = time.monotonic()
         while retries < self.max_retries:
             try:
+                if _news_enabled:
+                    news_start = time.time()
+                    ma_local, ibkr_local, news_local = fetch_union_news()
+                    globals()['ma_df'] = ma_local
+                    globals()['ibkr_df'] = ibkr_local
+                    globals()['news_df'] = news_local
+                    self._emit_event(
+                        component="news",
+                        category="data",
+                        event="fetch_complete",
+                        duration_ms=(time.time() - news_start) * 1000,
+                        data={
+                            "marketaux_rows": int(len(ma_local)),
+                            "ibkr_rows": int(len(ibkr_local)),
+                            "combined_rows": int(len(news_local)),
+                        },
+                    )
+
                 logging.info("Fetching market data...")
                 # Canonical adapter-supported tickers
                 tickers = list(TICKERS)
@@ -991,15 +1236,28 @@ class RLTradingPipeline:
                         finally:
                             last_hb = time.monotonic()
                     start_time = time.time()
+                    corr_id = self._corr(ticker)
                     try:
-                        if self.config.get("use_mock_data", True):
-                            df = generate_mock_market_data(length=500, seed=42 + tickers.index(ticker))
-                            logging.info(f"{ticker} mock data shape: {df.shape}")
+                        use_mock = self.config.get("use_mock_data", False)
+                        source = "mock" if use_mock else "ibkr"
+                        if use_mock:
+                            logging.warning("use_mock_data requested for %s but mock generator is unavailable; skipping.", ticker)
+                            continue
                         else:
                             df = self.market_data_adapter.fetch_data(ticker)
                             logging.info(f"{ticker} raw data shape: {df.shape}")
                             if df is None or df.empty:
                                 logging.warning(f"No data for {ticker}, skipping.")
+                                self._emit_event(
+                                    component="ingest",
+                                    category="data",
+                                    event="fetch_empty",
+                                    symbol=ticker,
+                                    corr_id=corr_id,
+                                    state="WARN",
+                                    duration_ms=(time.time() - start_time) * 1000,
+                                    data={"source": source},
+                                )
                                 continue
                             raw_data[ticker] = df
                             logging.info(f"Market data fetched successfully.")
@@ -1015,6 +1273,19 @@ class RLTradingPipeline:
                                 regime = detect_regime(df['close'])
                     # (model selection / training handled in scheduled block below)
                                 # Optionally, you could load a different model here if you have one for high-vol regimes
+
+                        self._emit_event(
+                            component="ingest",
+                            category="data",
+                            event="fetch_complete",
+                            symbol=ticker,
+                            corr_id=corr_id,
+                            duration_ms=(time.time() - start_time) * 1000,
+                            data={
+                                "rows": int(len(df)) if df is not None else 0,
+                                "source": source,
+                            },
+                        )
 
                         # --- PPO Training for Each Ticker Sequentially ---
                         current_time = time.time()
@@ -1065,16 +1336,18 @@ class RLTradingPipeline:
                         print(f"ERROR during PPO training for {ticker}: {e}")
                         traceback.print_exc()
                         print(f"Skipping {ticker} and continuing to next ticker...")
+                        self._emit_event(
+                            component="ingest",
+                            category="data",
+                            event="fetch_error",
+                            symbol=ticker,
+                            corr_id=corr_id,
+                            state="ERROR",
+                            message=str(e),
+                            data={"phase": "ppo_training"},
+                        )
 
                 print("All tickers processed. Check above for any errors or resource warnings.")
-
-                # --- ADD THIS BLOCK IMMEDIATELY AFTER FETCHING DATA, BEFORE FEATURE ENGINEERING ---
-                # (This should NOT be indented; it should be at the same level as the print above)
-                # If you want to generate features for all tickers after the PPO loop, do it here:
-                # Example: for all tickers in raw_data
-                for ticker, df in raw_data.items():
-                    features, labels = generate_features(df)
-                    logger.info(f"Ticker [{ticker}]: features shape = {features.shape}, labels shape = {labels.shape}")
 
                 logging.info("Engineering features...")
 
@@ -1101,8 +1374,23 @@ class RLTradingPipeline:
                     labels[ticker] = y
                     try:
                         feature_store.update(ticker, X)
+                        cache_cap = int(self.config.get("feature_store_max_rows", 5000))
+                        cached_df = feature_store.get(ticker)
+                        if cached_df is not None and len(cached_df) > cache_cap:
+                            feature_store._store[ticker] = cached_df.tail(cache_cap)
                     except Exception as exc:
                         logging.warning(f"Failed to cache real-time features for {ticker}: {exc}")
+                    self._emit_event(
+                        component="features",
+                        category="ml",
+                        event="feature_snapshot",
+                        symbol=ticker,
+                        corr_id=self._corr(ticker),
+                        data={
+                            "features_rows": int(len(X)),
+                            "labels_rows": int(len(y)),
+                        },
+                    )
                 logging.info("Features engineered successfully.")
 
                 # === DRIFT DETECTION BLOCK ===
@@ -1177,6 +1465,20 @@ class RLTradingPipeline:
                     if full_ready:
                         models = {name: factory() for name, factory in base_model_factories.items()}
                         split_idx = max(int(len(X_window) * 0.90), 1)
+                        self._emit_event(
+                            component="ml",
+                            category="training",
+                            event="full_retrain_start",
+                            symbol=ticker,
+                            corr_id=self._corr(ticker),
+                            data={
+                                "total_rows": int(total_rows),
+                                "window_rows": int(len(X_window)),
+                                "new_rows": int(new_rows),
+                                "split_index": int(split_idx),
+                                "min_samples": int(self.min_samples_per_model),
+                            },
+                        )
                         X_train = X_window.iloc[:split_idx].copy()
                         X_test = X_window.iloc[split_idx:].copy()
                         y_train = y_window.iloc[:split_idx].copy()
@@ -1197,12 +1499,40 @@ class RLTradingPipeline:
                                 f"X_train={len(X_train)}, X_test={len(X_test)}, "
                                 f"y_train={len(y_train)}, y_test={len(y_test)}. Skipping."
                             )
+                            self._emit_event(
+                                component="ml",
+                                category="training",
+                                event="retrain_skipped",
+                                symbol=ticker,
+                                corr_id=self._corr(ticker),
+                                state="WARN",
+                                data={
+                                    "reason": "split_insufficient",
+                                    "X_train": int(len(X_train)),
+                                    "X_test": int(len(X_test)),
+                                    "y_train": int(len(y_train)),
+                                    "y_test": int(len(y_test)),
+                                },
+                            )
                             continue
 
                         if len(X_train) < self.min_samples_per_model or len(y_train) < self.min_samples_per_model:
                             logging.warning(
                                 f"Not enough samples for {ticker}: X={len(X_train)}, y={len(y_train)} "
                                 f"(min={self.min_samples_per_model}). Skipping."
+                            )
+                            self._emit_event(
+                                component="ml",
+                                category="training",
+                                event="retrain_skipped",
+                                symbol=ticker,
+                                corr_id=self._corr(ticker),
+                                state="WARN",
+                                data={
+                                    "reason": "min_samples",
+                                    "samples": int(len(X_train)),
+                                    "min_required": int(self.min_samples_per_model),
+                                },
                             )
                             continue
 
@@ -1248,9 +1578,111 @@ class RLTradingPipeline:
                                 f"[{ticker}][{name}] Trades: {total_trades}, Wins: {wins}, Losses: {losses}, "
                                 f"Accuracy: {acc:.2%}, Win Rate: {win_rate:.2%}, PnL: {pnl}"
                             )
+                            self._emit_event(
+                                component="ml",
+                                category="training",
+                                event="model_trained",
+                                symbol=ticker,
+                                corr_id=self._corr(ticker),
+                                data={
+                                    "model": name,
+                                    "accuracy": acc,
+                                    "win_rate": win_rate,
+                                    "trades": total_trades,
+                                    "wins": wins,
+                                    "losses": losses,
+                                },
+                            )
 
                         if ticker_results:
                             results[ticker] = ticker_results
+                            self._emit_event(
+                                component="ml",
+                                category="training",
+                                event="full_retrain_complete",
+                                symbol=ticker,
+                                corr_id=self._corr(ticker),
+                                data={
+                                    "models": list(ticker_results.keys()),
+                                    "window_rows": int(len(X_window)),
+                                    "new_rows": int(new_rows),
+                                },
+                            )
+
+                            if self.seq_training_enabled:
+                                df_seq = X_all.reset_index(drop=True).copy()
+                                if "close" not in df_seq.columns:
+                                    logging.warning(
+                                        "Sequence forecaster skipped for %s: missing 'close' column in features.",
+                                        ticker,
+                                    )
+                                else:
+                                    seq_feature_cols = [
+                                        col
+                                        for col in feature_columns
+                                        if col in df_seq.columns
+                                        and not is_datetime64_any_dtype(df_seq[col])
+                                        and not is_datetime64tz_dtype(df_seq[col])
+                                    ]
+                                    if not seq_feature_cols:
+                                        logging.warning(
+                                            "Sequence forecaster skipped for %s: no numeric feature columns after filtering.",
+                                            ticker,
+                                        )
+                                    else:
+                                        try:
+                                            seq_metrics = self._fit_seq_forecaster(
+                                                df_seq,
+                                                seq_feature_cols,
+                                                symbol=ticker,
+                                                horizons=self.seq_horizons,
+                                                n_steps=self.seq_n_steps,
+                                                step=self.seq_step,
+                                                out_dir=str(self.seq_model_dir),
+                                                train_split=self.seq_train_split,
+                                                val_split=self.seq_val_split,
+                                                hidden_size=self.seq_hidden_size,
+                                                num_layers=self.seq_num_layers,
+                                                dropout=self.seq_dropout,
+                                                epochs=self.seq_epochs,
+                                                batch_size=self.seq_batch_size,
+                                                lr=self.seq_lr,
+                                                weight_decay=self.seq_weight_decay,
+                                                patience=self.seq_patience,
+                                                device=self.seq_device,
+                                                seed=self.seq_seed,
+                                            )
+                                            self.seq_models.pop(ticker, None)
+                                            artifact = self._get_seq_artifact(ticker)
+                                            self._emit_event(
+                                                component="sequence_forecaster",
+                                                category="ml",
+                                                event="train_complete",
+                                                symbol=ticker,
+                                                corr_id=self._corr(ticker),
+                                                data=seq_metrics,
+                                            )
+                                            if artifact is not None:
+                                                logging.info(
+                                                    "Sequence forecaster trained for %s (horizons=%s)",
+                                                    ticker,
+                                                    artifact.horizons,
+                                                )
+                                        except Exception as exc:
+                                            logging.warning(
+                                                "Sequence forecaster training failed for %s: %s",
+                                                ticker,
+                                                exc,
+                                            )
+                                            self._emit_event(
+                                                component="sequence_forecaster",
+                                                category="ml",
+                                                event="train_error",
+                                                symbol=ticker,
+                                                corr_id=self._corr(ticker),
+                                                state="ERROR",
+                                                message=str(exc),
+                                            )
 
                         self.ml_last_incremental_rows[ticker] = total_rows
                         self.ml_last_incremental_time[ticker] = now_utc
@@ -1265,11 +1697,29 @@ class RLTradingPipeline:
                             logging.info(
                                 f"Incremental update for {ticker} skipped: no prior trained models."
                             )
+                            self._emit_event(
+                                component="ml",
+                                category="training",
+                                event="incremental_skipped",
+                                symbol=ticker,
+                                corr_id=self._corr(ticker),
+                                state="INFO",
+                                data={"reason": "no_models", "new_rows": int(new_rows)},
+                            )
                         else:
                             feature_columns = self.ml_feature_columns.get(ticker)
                             if not feature_columns:
                                 logging.info(
                                     f"Incremental update for {ticker} skipped: no feature column metadata."
+                                )
+                                self._emit_event(
+                                    component="ml",
+                                    category="training",
+                                    event="incremental_skipped",
+                                    symbol=ticker,
+                                    corr_id=self._corr(ticker),
+                                    state="INFO",
+                                    data={"reason": "no_feature_columns", "new_rows": int(new_rows)},
                                 )
                             else:
                                 X_inc = X_all.iloc[-new_rows:]
@@ -1278,6 +1728,15 @@ class RLTradingPipeline:
                                 classes = np.unique(y_inc)
                                 if len(classes) == 0:
                                     logging.warning(f"No label variation in incremental window for {ticker}.")
+                                    self._emit_event(
+                                        component="ml",
+                                        category="training",
+                                        event="incremental_skipped",
+                                        symbol=ticker,
+                                        corr_id=self._corr(ticker),
+                                        state="WARN",
+                                        data={"reason": "no_label_variation", "new_rows": int(new_rows)},
+                                    )
                                 else:
                                     for name, model in existing.items():
                                         if hasattr(model, 'partial_fit'):
@@ -1288,14 +1747,49 @@ class RLTradingPipeline:
                                                     model.partial_fit(X_inc, y_inc, classes=classes)
                                             except Exception as exc:
                                                 logging.warning(f"Incremental update failed for {ticker}/{name}: {exc}")
+                                                self._emit_event(
+                                                    component="ml",
+                                                    category="training",
+                                                    event="incremental_error",
+                                                    symbol=ticker,
+                                                    corr_id=self._corr(ticker),
+                                                    state="ERROR",
+                                                    message=str(exc),
+                                                    data={"model": name},
+                                                )
                                     fitted_models[ticker] = existing
                                     self.ml_last_incremental_rows[ticker] = total_rows
                                     self.ml_last_incremental_time[ticker] = now_utc
+                                    self._emit_event(
+                                        component="ml",
+                                        category="training",
+                                        event="incremental_update",
+                                        symbol=ticker,
+                                        corr_id=self._corr(ticker),
+                                        data={
+                                            "models": list(existing.keys()),
+                                            "new_rows": int(new_rows),
+                                        },
+                                    )
                         continue
 
                     fitted_models[ticker] = self.ml_model_store.get(ticker, {})
                     logging.info(
                         f"ML update skipped for {ticker}: new_rows={new_rows}, total={total_rows}, full_ready={full_ready}."
+                    )
+                    self._emit_event(
+                        component="ml",
+                        category="training",
+                        event="ml_update_skipped",
+                        symbol=ticker,
+                        corr_id=self._corr(ticker),
+                        state="INFO",
+                        data={
+                            "new_rows": int(new_rows),
+                            "total_rows": int(total_rows),
+                            "full_ready": bool(full_ready),
+                            "incremental_ready": bool(incremental_ready),
+                        },
                     )
 
                 summary_rows = []
@@ -1316,28 +1810,28 @@ class RLTradingPipeline:
                     summary_df = pd.DataFrame(summary_rows)
                     print("\n=== ML Model Performance Summary ===")
                     print(summary_df.to_string(index=False))
+                    self._emit_event(
+                        component="ml",
+                        category="training",
+                        event="performance_summary",
+                        data={"rows": summary_rows},
+                    )
 
                 if full_retrain_timestamp is not None:
                     with open(LAST_TRAINED_FILE, "w") as f:
                         f.write(str(full_retrain_timestamp))
                 # --- RL PPO Training and Inference Block ---
-                logging.warning("RL SYSTEM: Running PPO RL training and inference.")
-                # Example: Use the first ticker with enough data for PPO
+                logging.warning("RL SYSTEM: Evaluating PPO models.")
                 for ticker in features:
                     X = feature_store.get(ticker)
                     if X is None:
-                        logging.warning(f"No real-time features for {ticker}, skipping.")
+                        logging.warning(f"No real-time features for {ticker}, skipping PPO evaluation.")
                         continue
-                    y = labels[ticker]
-                    if len(X) > 20:  # Ensure enough data
+                    if len(X) > 20:
                         split_idx = int(len(X) * 0.8)
-                        train_data = X.iloc[:split_idx]
                         test_data = X.iloc[split_idx:]
-                        y_train = y.iloc[:split_idx]
-                        y_test = y.iloc[split_idx:]
-                        self.train_ppo(train_data, ticker)
                         self.run_ppo(test_data, ticker)
-                        break  # Only run PPO on the first valid ticker for now
+                        break
                 # --- End RL PPO Block ---
 
                 # === Begin Stacking/Meta-Model Block (Fixed) ===
@@ -1348,6 +1842,17 @@ class RLTradingPipeline:
                 meta_y = []
 
                 meta_signals = None
+
+                seq_preds_by_ticker: Dict[str, pd.DataFrame] = {}
+                if self.seq_enabled:
+                    for ticker in features:
+                        feature_df = feature_store.get(ticker)
+                        if feature_df is None or feature_df.empty:
+                            self._get_seq_artifact(ticker)
+                            continue
+                        seq_df = self._compute_sequence_forecasts(ticker, feature_df)
+                        if seq_df is not None:
+                            seq_preds_by_ticker[ticker] = seq_df
 
                 for ticker in features:
                     X = feature_store.get(ticker)
@@ -1360,117 +1865,197 @@ class RLTradingPipeline:
                         X_test = X.iloc[split_idx:]
                         y_test = y.iloc[split_idx:]
                     # Collect predictions from all base models
-                    preds = []
+                    preds: List[np.ndarray] = []
+                    pred_sources: List[str] = []
                     model_dict = models_from_s3.get(ticker, {})
-                    # Only proceed if all expected models are present
-                    expected_models = ["RandomForest", "PPO"]
-                    if not all(m in model_dict for m in expected_models):
-                        logging.warning(f"Skipping {ticker} in stacking: missing one or more models ({expected_models})")
+                    required_models = ["RandomForest", "PPO"]
+                    missing_models = [m for m in required_models if m not in model_dict]
+                    if missing_models:
+                        logging.warning(
+                            "Skipping %s in stacking: missing models %s", ticker, missing_models
+                        )
+                        self._emit_event(
+                            component="stacking",
+                            category="ml",
+                            event="missing_base_models",
+                            symbol=ticker,
+                            corr_id=self._corr(ticker),
+                            state="WARN",
+                            data={
+                                "expected": required_models,
+                                "present": list(model_dict.keys()),
+                            },
+                        )
                         continue
-                    for model_name in expected_models:
-                        model = model_dict[model_name]
-                        if model_name == "PPO":
-                            rl_preds = []
-                            env = TradingEnv(X_test)
-                            obs, info = env.reset()
-                            done = False
-                            while not done:
-                                action, _ = model.predict(obs, deterministic=True)
-                                obs, reward, terminated, truncated, info = env.step(action)
-                                rl_preds.append(action)
-                                done = terminated or truncated
-                            rl_preds = np.array(rl_preds[:len(X_test)]).flatten()
-                            preds.append(rl_preds)
-                        else:
-                            # Drop any datetime or identifier columns from features before prediction
-                            cols_to_drop = []
-                            for col in X_test.columns:
-                                if (is_datetime64_any_dtype(X_test[col]) or is_datetime64tz_dtype(X_test[col])
-                                        or col in ["datetime", "timestamp"]):
-                                    cols_to_drop.append(col)
-                            if cols_to_drop:
-                                X_test_pred = X_test.drop(columns=cols_to_drop)
-                            else:
-                                X_test_pred = X_test
-                            ml_preds = model.predict(X_test_pred)
-                            ml_preds = np.array(ml_preds).flatten()
-                            preds.append(ml_preds)
 
-                        # Align all predictions to the minimum available length
+                    rf_model = model_dict["RandomForest"]
+                    cols_to_drop = [
+                        col
+                        for col in X_test.columns
+                        if (
+                            is_datetime64_any_dtype(X_test[col])
+                            or is_datetime64tz_dtype(X_test[col])
+                            or col in ("datetime", "timestamp")
+                        )
+                    ]
+                    X_test_pred = X_test.drop(columns=cols_to_drop) if cols_to_drop else X_test
+                    try:
+                        rf_preds = np.asarray(rf_model.predict(X_test_pred), dtype=float).flatten()
+                    except Exception as exc:
+                        logging.warning("RandomForest prediction failed for %s: %s", ticker, exc)
+                        continue
+                    preds.append(rf_preds)
+                    pred_sources.append("RandomForest")
+
+                    ppo_model = model_dict["PPO"]
+                    rl_preds: List[float] = []
+                    env = TradingEnv(X_test)
+                    obs, info = env.reset()
+                    done = False
+                    while not done:
+                        action, _ = ppo_model.predict(obs, deterministic=True)
+                        obs, reward, terminated, truncated, info = env.step(action)
+                        rl_preds.append(float(action))
+                        done = terminated or truncated
+                    preds.append(np.asarray(rl_preds[: len(X_test)], dtype=float).flatten())
+                    pred_sources.append("PPO")
+
+                    if self.seq_enabled and self.seq_feature_names:
+                        seq_df = seq_preds_by_ticker.get(ticker)
+                        seq_arrays: Dict[str, np.ndarray] = {}
+                        if seq_df is not None and not seq_df.empty:
+                            seq_aligned = seq_df.reindex(X_test.index)
+                            seq_aligned = seq_aligned.fillna(method="ffill").fillna(0.0)
+                            for name in self.seq_feature_names:
+                                if name in seq_aligned.columns:
+                                    seq_arrays[name] = seq_aligned[name].to_numpy(dtype=float)
+                        for name in self.seq_feature_names:
+                            arr = seq_arrays.get(name)
+                            if arr is None or len(arr) != len(X_test):
+                                arr = np.zeros(len(X_test), dtype=float)
+                            preds.append(arr)
+                            pred_sources.append(name)
+
+                    if not preds:
+                        logging.warning("Stacking skipped for %s: no predictions available.", ticker)
+                        continue
+
+                    try:
                         min_len = min(len(p) for p in preds)
-                        n_models = len(preds)
-                        for i in range(min_len):
-                            row = []
-                            for p in preds:
-                                val = p[i]
-                                # Flatten any array or list to scalar
-                                if isinstance(val, (np.ndarray, list)):
-                                    val = np.asarray(val).flatten()
-                                    if val.shape == ():  # scalar
-                                        val = val.item()
-                                    elif val.shape == (1,):
-                                        val = val[0]
-                                    else:
-                                        logger.error(f"Non-scalar prediction at index {i}: {val} (shape {val.shape})")
-                                        logger.error(f"Non-scalar prediction at index {i}: {val} (shape {val.shape})")
-                                        raise ValueError(f"Non-scalar prediction at index {i}: {val} (shape {val.shape})")
-                                row.append(int(val))
-                            # Only append rows with the correct number of model predictions and all scalars
-                            if len(row) == n_models and all(isinstance(x, (int, float, np.integer, np.floating)) for x in row):
-                                meta_X.append(row)
-                                meta_y.append(int(y_test.iloc[i]))
-                            else:
-                                logging.warning(f"Skipping row {i} for {ticker} due to length/type mismatch: {row}")
+                    except ValueError:
+                        logging.warning("Stacking skipped for %s: no predictions available.", ticker)
+                        continue
+
+                    if min_len == 0:
+                        logging.debug("Stacking skipped for %s: zero-length predictions.", ticker)
+                        continue
+
+                    if len(y_test) < min_len:
+                        min_len = len(y_test)
+
+                    if min_len == 0:
+                        logging.debug("Stacking skipped for %s: insufficient labels for meta training.", ticker)
+                        continue
+
+                    try:
+                        stack = np.column_stack([p[:min_len] for p in preds])
+                    except Exception as exc:
+                        logging.warning("Stacking failed for %s during column stack: %s", ticker, exc)
+                        continue
+
+                    if not self.meta_feature_names:
+                        self.meta_feature_names = pred_sources.copy()
+                    elif len(self.meta_feature_names) != len(pred_sources):
+                        logging.debug(
+                            "Meta feature count mismatch for %s (expected %d, got %d)",
+                            ticker,
+                            len(self.meta_feature_names),
+                            len(pred_sources),
+                        )
+
+                    meta_X.extend(stack.tolist())
+                    meta_y.extend(y_test.iloc[:min_len].astype(int).tolist())
 
                 # Final check before fitting meta-model
                 if len(meta_X) == 0:
                     logger.error("No valid meta_X rows to fit meta-model. Skipping meta-model training for this run.")
+                    self._emit_event(
+                        component="stacking",
+                        category="ml",
+                        event="meta_training_skipped",
+                        state="ERROR",
+                        data={"reason": "no_meta_rows"},
+                    )
                 else:
                     meta_X_arr = np.array(meta_X)
+                    meta_y_arr = np.asarray(meta_y, dtype=int)
                     logging.info(f"meta_X_arr shape: {meta_X_arr.shape}, dtype: {meta_X_arr.dtype}")
                     logging.info(f"meta_X_arr example row: {meta_X_arr[0]}")
+
+                    if meta_X_arr.shape[0] == 0 or meta_y_arr.size == 0:
+                        logger.error("No data available for meta-model training.")
+                        raise ValueError("No data available for meta-model training.")
+                    if meta_X_arr.shape[0] != meta_y_arr.size:
+                        logger.error(f"Meta-model feature/label row mismatch: {meta_X_arr.shape[0]} vs {meta_y_arr.size}")
+                        raise ValueError(f"Meta-model feature/label row mismatch: {meta_X_arr.shape[0]} vs {meta_y_arr.size}")
+                    if np.any(pd.isnull(meta_X_arr)) or np.any(pd.isnull(meta_y_arr)):
+                        logger.error("NaN values detected in meta-model features or labels.")
+                        raise ValueError("NaN values detected in meta-model features or labels.")
+
+                    unique_meta_classes = np.unique(meta_y_arr)
+                    meta_model = None
+                    prev_meta_model = None
                     meta_model_key = get_latest_model_key(self.config['s3_bucket'], f"models/{self.run_id}/meta_model.joblib")
                     if meta_model_key:
                         prev_meta_model = load_model_from_s3(self.config['s3_bucket'], meta_model_key)
-                        if hasattr(prev_meta_model, "partial_fit"):
-                            if meta_X_arr.shape[0] == 0 or meta_y.shape[0] == 0:
-                                logger.error("No data available for meta-model training.")
-                                raise ValueError("No data available for meta-model training.")
-                            if meta_X_arr.shape[0] != meta_y.shape[0]:
-                                logger.error(f"Meta-model feature/label row mismatch: {meta_X_arr.shape[0]} vs {meta_y.shape[0]}")
-                                raise ValueError(f"Meta-model feature/label row mismatch: {meta_X_arr.shape[0]} vs {meta_y.shape[0]}")
-                            if np.any(pd.isnull(meta_X_arr)) or np.any(pd.isnull(meta_y)):
-                                logger.error("NaN values detected in meta-model features or labels.")
-                                raise ValueError("NaN values detected in meta-model features or labels.")
-                                # Check for at least two unique classes before partial_fit
-                                if len(np.unique(meta_y)) < 2:
-                                    logger.warning("Skipping model update: only one class present in meta_y.")
-                                    continue
-                                prev_meta_model.partial_fit(meta_X_arr, meta_y)
+
+                    if unique_meta_classes.size < 2:
+                        logger.warning("Skipping meta-model update: only one class present in meta_y.")
+                        self._emit_event(
+                            component="stacking",
+                            category="ml",
+                            event="meta_training_skipped",
+                            state="WARN",
+                            data={"reason": "single_class"},
+                        )
+                        meta_model = prev_meta_model
+                    else:
+                        if prev_meta_model is not None and hasattr(prev_meta_model, "partial_fit"):
+                            prev_meta_model.partial_fit(meta_X_arr, meta_y_arr)
                             meta_model = prev_meta_model
+                        elif prev_meta_model is not None and not hasattr(prev_meta_model, "partial_fit"):
+                            meta_model = LogisticRegression()
+                            meta_model.fit(meta_X_arr, meta_y_arr)
                         else:
                             meta_model = LogisticRegression()
-                            # Validate meta-model features and labels before training
-                            if meta_X_arr.shape[0] == 0 or meta_y.shape[0] == 0:
-                                logger.error("No data available for meta-model training.")
-                                raise ValueError("No data available for meta-model training.")
-                            if meta_X_arr.shape[0] != meta_y.shape[0]:
-                                logger.error(f"Meta-model feature/label row mismatch: {meta_X_arr.shape[0]} vs {meta_y.shape[0]}")
-                                raise ValueError(f"Meta-model feature/label row mismatch: {meta_X_arr.shape[0]} vs {meta_y.shape[0]}")
-                            if np.any(pd.isnull(meta_X_arr)) or np.any(pd.isnull(meta_y)):
-                                logger.error("NaN values detected in meta-model features or labels.")
-                                raise ValueError("NaN values detected in meta-model features or labels.")
-                            meta_model.fit(meta_X_arr, meta_y)
-                    else:
-                        meta_model = LogisticRegression()
-                        meta_model.fit(meta_X_arr, meta_y)
-                    # Save the updated meta-model
-                    save_model_to_s3(meta_model, self.config['s3_bucket'], f"models/{self.run_id}/meta_model.joblib")
-                    logging.info("Meta-model (stacking) training complete.")
+                            meta_model.fit(meta_X_arr, meta_y_arr)
 
-                    # Use meta-model for final trading signal
-                    meta_signals = meta_model.predict(meta_X_arr)
-                    logging.info(f"Meta-model signals (first 10): {meta_signals[:10]}")
+                    if meta_model is not None:
+                        save_model_to_s3(meta_model, self.config['s3_bucket'], f"models/{self.run_id}/meta_model.joblib")
+                        logging.info("Meta-model (stacking) training complete.")
+                        self._emit_event(
+                            component="stacking",
+                            category="ml",
+                            event="meta_training_complete",
+                            data={
+                                "rows": int(meta_X_arr.shape[0]),
+                                "feature_dim": int(meta_X_arr.shape[1]) if meta_X_arr.ndim == 2 else None,
+                            },
+                        )
+
+                        meta_signals = meta_model.predict(meta_X_arr)
+                        logging.info(f"Meta-model signals (first 10): {meta_signals[:10]}")
+                        self._emit_event(
+                            component="stacking",
+                            category="ml",
+                            event="meta_signals_generated",
+                            data={
+                                "count": int(len(meta_signals)),
+                            },
+                        )
+                    else:
+                        meta_signals = None
+                        logging.info("Meta-model unavailable after training; meta signals not generated.")
                 # === End Stacking/Meta-Model Block (Fixed) ===
 
                 # === Begin Meta-Model Trading Simulation Block ===
@@ -1509,88 +2094,99 @@ class RLTradingPipeline:
                                 continue
 
                             ticker_signals = meta_signals[signal_idx:signal_idx + n]
-                            prices = X_test['close'].values
-                            position = self.ppo_live_positions.get(ticker, 0)
-                            balance = 100000
-                            trade_log = []
+                            prices = X_test['close'].values.astype(float)
+                            timestamps = None
+                            if 'timestamp' in X_test.columns:
+                                timestamps = pd.to_datetime(X_test['timestamp'], utc=True, errors='coerce')
+                            elif isinstance(X_test.index, pd.Index) and pd.api.types.is_datetime64_any_dtype(X_test.index):
+                                timestamps = pd.to_datetime(X_test.index, utc=True, errors='coerce')
+                            if timestamps is None or timestamps.isnull().all():
+                                timestamps = pd.Series(pd.Timestamp.utcnow(), index=X_test.index)
 
-                            # Track daily PnL and starting equity
-                            current_day = datetime.date.today()
-                            starting_equity = balance
-                            daily_pnl = 0.0
-                            trading_halted_for_day = False
-                            trades_today = 0
+                            current_ts = timestamps.iloc[-1] if len(timestamps) else pd.Timestamp.utcnow()
+                            current_day = current_ts.date()
 
-                            for i, signal in enumerate(ticker_signals):
-                                # check if a new day has started
-                                if datetime.date.today() != current_day:
-                                    current_day = datetime.date.today()
-                                    feature_store.clear()  # Clear real-time feature store at the start of each new trading day
-                                    starting_equity = balance
-                                    daily_pnl = 0.0
-                                    trading_halted_for_day = False
-                                    trades_today = 0
+                            state = self.meta_daily_state[ticker]
+                            if state["day"] != current_day:
+                                state["day"] = current_day
+                                state["trades"] = 0
+                                cached_df = feature_store.get(ticker)
+                                if cached_df is not None:
+                                    cache_cap = int(self.config.get("feature_store_max_rows", 5000))
+                                    feature_store._store[ticker] = cached_df.tail(cache_cap)
+                                    logging.debug(
+                                        "[meta] feature_store pruned for %s (current day=%s)",
+                                        ticker,
+                                        current_day,
+                                    )
 
-                                prev_position = position
-                                current_price = float(prices[min(i, len(prices) - 1)])
-                                previous_price = float(prices[i - 1]) if i > 0 else current_price
+                            if state["trades"] >= MAX_TRADES_PER_DAY:
+                                logging.info(
+                                    "Meta-model trade skipped for %s: daily trade limit reached (%s)",
+                                    ticker,
+                                    MAX_TRADES_PER_DAY,
+                                )
+                                signal_idx += n
+                                tickers_with_meta.append(ticker)
+                                continue
 
-                                # Update daily PnL
-                                daily_pnl = balance - starting_equity
+                            prev_position = self.ppo_live_positions.get(ticker, 0)
+                            latest_signal = int(ticker_signals[-1]) if len(ticker_signals) else 0
+                            desired_position = 1 if latest_signal == 1 else 0
+                            desired_position = int(max(-MAX_POSITION_EXPOSURE, min(MAX_POSITION_EXPOSURE, desired_position)))
 
-                                # Enforce max daily loss
-                                if daily_pnl <= -MAX_DAILY_LOSS_PCT * starting_equity:
-                                    if not trading_halted_for_day:
-                                        print(f"Max daily loss reached ({daily_pnl:.2f}). Halting trading for the day.")
-                                        trading_halted_for_day = True
+                            trade_side = None
+                            trade_qty = 0
+                            new_position = prev_position
 
-                                # Enforce max trades per day
-                                if trades_today >= MAX_TRADES_PER_DAY:
-                                    if not trading_halted_for_day:
-                                        print(f"Max trades per day reached ({trades_today}). Halting trading for the day.")
-                                        trading_halted_for_day = True
+                            if desired_position > prev_position:
+                                if prev_position < 0:
+                                    qty = min(abs(prev_position), self.max_position_size)
+                                else:
+                                    qty = min(desired_position - prev_position, self.max_position_size, MAX_POSITION_EXPOSURE - prev_position)
+                                qty = int(max(0, qty))
+                                if qty > 0:
+                                    trade_side = 'BUY'
+                                    trade_qty = qty
+                                    new_position = prev_position + qty
+                            elif desired_position < prev_position:
+                                qty = min(prev_position - desired_position, self.max_position_size)
+                                qty = int(max(0, qty))
+                                if qty > 0:
+                                    trade_side = 'SELL'
+                                    trade_qty = qty
+                                    new_position = prev_position - qty
 
-                                if trading_halted_for_day:
-                                    continue  # Skip trade execution if halted
+                            if trade_side and trade_qty > 0:
+                                execute_trade(ib, contract, trade_side, trade_qty)
+                                reason = "meta_model" if trade_side == 'BUY' else "meta_model_flatten"
+                                self._emit_bridge_decision(ticker, trade_side, trade_qty, confidence=0.6, reason=reason)
+                                self._emit_event(
+                                    component="orders",
+                                    category="execution",
+                                    event="order_submitted",
+                                    symbol=ticker,
+                                    corr_id=self._corr(ticker),
+                                    data={
+                                        "side": trade_side,
+                                        "quantity": int(trade_qty),
+                                        "position_after": int(new_position),
+                                        "reason": reason,
+                                        "signal": int(latest_signal),
+                                        "timestamp": current_ts.isoformat(),
+                                    },
+                                )
+                                state["trades"] += 1
+                                meta_trades_executed = True
+                            else:
+                                logging.debug(
+                                    "Meta-model: no position change for %s (signal=%s, prev=%s)",
+                                    ticker,
+                                    latest_signal,
+                                    prev_position,
+                                )
 
-                                order_size = 1  # Default order size for each trade
-
-                                if signal == 1 and position <= 0:
-                                    if abs(position + order_size) <= MAX_POSITION_EXPOSURE:
-                                        if order_size <= MAX_ORDER_SIZE:
-                                            position += order_size
-                                            execute_trade(ib, contract, 'BUY', order_size)
-                                            self._emit_bridge_decision(ticker, 'BUY', order_size, confidence=0.6, reason="meta_model")
-                                            trades_today += 1
-                                            trade_log.append(("buy", order_size, current_price))
-                                            meta_trades_executed = True
-                                        else:
-                                            print(f"Order size {order_size} exceeds max allowed ({MAX_ORDER_SIZE}). No BUY executed.")
-                                    else:
-                                        print(f"Position exposure limit reached. Cannot BUY. Current position: {position}")
-                                elif signal == -1 and position >= 0:
-                                    if abs(position - order_size) <= MAX_POSITION_EXPOSURE:
-                                        if order_size <= MAX_ORDER_SIZE:
-                                            position -= order_size
-                                            execute_trade(ib, contract, 'SELL', order_size)
-                                            self._emit_bridge_decision(ticker, 'SELL', order_size, confidence=0.6, reason="meta_model")
-                                            trades_today += 1
-                                            trade_log.append(("sell", order_size, current_price))
-                                            meta_trades_executed = True
-                                        else:
-                                            print(f"Order size {order_size} exceeds max allowed ({MAX_ORDER_SIZE}). No SELL executed.")
-                                    else:
-                                        print(f"Position exposure limit reached. Cannot SELL. Current position: {position}")
-                                elif signal == 0:
-                                    position = 0
-                                # No trade for hold
-                            if i > 0:
-                                balance += prev_position * (current_price - previous_price)
-                            print(f"\n=== Meta-Model Trading Results for {ticker} ===")
-                            print(f"Final balance: {balance:.2f}")
-                            print(f"Total trades: {len([t for t in trade_log if t[0] != 'hold'])}")
-                            print(f"Trade log (first 10): {trade_log[:10]}")
-                            self.ppo_live_positions[ticker] = position
+                            self.ppo_live_positions[ticker] = new_position
                             signal_idx += n
                             tickers_with_meta.append(ticker)
                         else:
@@ -1648,17 +2244,34 @@ class RLTradingPipeline:
                             ml_preds[name] = model.predict(X_test_pred)
 
                         # Get RL model predictions (PPO)
+                        rl_model = fitted_models.get(ticker, {}).get("PPO")
+                        if rl_model is None:
+                            rl_model = models_from_s3.get(ticker, {}).get("PPO")
+                        if rl_model is None:
+                            rl_model = load_local_ppo_model(ticker)
+
                         rl_preds = []
-                        env = TradingEnv(X_test)
-                        obs, info = env.reset()
-                        done = False
-                        while not done:
-                            action, _ = self.ppo_model.predict(obs, deterministic=True)
-                            rl_preds.append(action)
-                            obs, reward, terminated, truncated, info = env.step(action)
-                            done = terminated or truncated
-                        rl_preds = np.array(rl_preds[:len(X_test)]).flatten()
-                        preds.append(rl_preds)
+                        if rl_model is not None:
+                            env = TradingEnv(X_test)
+                            if getattr(rl_model, 'observation_space', None) is not None and rl_model.observation_space.shape != env.observation_space.shape:
+                                logging.warning(
+                                    "Skipping PPO predictions for %s in ensemble: obs shape mismatch %s != %s",
+                                    ticker,
+                                    rl_model.observation_space.shape,
+                                    env.observation_space.shape,
+                                )
+                            else:
+                                obs, info = env.reset()
+                                done = False
+                                while not done:
+                                    action, _ = rl_model.predict(obs, deterministic=True)
+                                    rl_preds.append(action)
+                                    obs, reward, terminated, truncated, info = env.step(action)
+                                    done = terminated or truncated
+                                rl_preds = np.array(rl_preds[:len(X_test)]).flatten()
+                        else:
+                            logging.warning("Ensemble skipping PPO vote for %s: no PPO model available", ticker)
+                            rl_preds = np.zeros(len(X_test_pred))
 
                         # Align all predictions to the minimum available length
                         min_len = min(
@@ -1873,41 +2486,71 @@ class RLTradingPipeline:
             self._emit_bridge_decision(ticker, side, quantity, confidence=0.55, reason="ppo_fallback")
             self.ppo_live_positions[ticker] = target_position
             executed = True
+            self._emit_event(
+                component="orders",
+                category="execution",
+                event="order_submitted",
+                symbol=ticker,
+                corr_id=self._corr(ticker),
+                data={
+                    "side": side,
+                    "quantity": int(quantity),
+                    "position_after": int(target_position),
+                    "reason": "ppo_fallback",
+                },
+            )
 
         return executed
 
     def train_ppo(self, train_data, ticker, save_path=None):
+        start = time.time()
+        self._emit_event(
+            component="ppo",
+            category="training",
+            event="train_start",
+            symbol=ticker,
+            corr_id=self._corr(ticker),
+            data={"rows": int(len(train_data))},
+        )
         env = TradingEnv(train_data)
         check_env(env)
         ppo_logger = PPOTrainingLogger()
         feature_signature = compute_feature_signature(env.numeric_columns)
         regime_suffix = "highvol" if detect_regime(train_data['close']) == "high_vol" else "normal"
-        ppo_key = get_latest_model_key(
+        target_filename = ppo_filename(ticker, regime_suffix, feature_signature)
+        warm_key = get_latest_model_key(
             self.config['s3_bucket'],
-            f"models/{self.run_id}/{ticker}_ppo__{feature_signature}.zip"
+            f"models/{self.run_id}/{target_filename}",
         )
+        if warm_key is None:
+            warm_key = get_latest_model_key_global(
+                self.config['s3_bucket'],
+                target_filename,
+                exclude_run_id=self.run_id,
+            )
+
         local_ppo_path = "/tmp/ppo_model.zip"
-        if ppo_key:
-            model = None
-            if _s3_enabled():
-                s3 = boto3.client("s3")
-                s3.download_file(self.config['s3_bucket'], ppo_key, local_ppo_path)
-                try:
-                    model = PPO.load(local_ppo_path)
-                except FileNotFoundError:
-                    logging.warning("Expected PPO checkpoint %s missing after download", local_ppo_path)
-            if model is None:
-                logging.info("Initializing fresh PPO model (no reusable checkpoint available).")
-                model = PPO("MlpPolicy", env, verbose=0)
-            model.learn(total_timesteps=10000, callback=ppo_logger)
-            if os_mod.path.exists(local_ppo_path):
-                os_mod.remove(local_ppo_path)
-        else:
+        model = None
+        if warm_key and _s3_enabled():
+            s3 = boto3.client("s3")
+            try:
+                s3.download_file(self.config['s3_bucket'], warm_key, local_ppo_path)
+                model = PPO.load(local_ppo_path)
+                logging.info("Warm-started PPO from %s", warm_key)
+            except Exception as exc:
+                logging.warning("Failed to load PPO checkpoint %s: %s", warm_key, exc)
+                model = None
+            finally:
+                if os_mod.path.exists(local_ppo_path):
+                    os_mod.remove(local_ppo_path)
+
+        if model is None:
+            logging.info("Initializing fresh PPO model (no reusable checkpoint available).")
             model = PPO("MlpPolicy", env, verbose=0)
-            model.learn(total_timesteps=10000, callback=ppo_logger)
+
+        model.learn(total_timesteps=10000, callback=ppo_logger)
         self.ppo_model = model
         ppo_logger.print_summary()
-        target_filename = ppo_filename(ticker, regime_suffix, feature_signature)
         if save_path is None:
             save_path_path = _ensure_dir(LOCAL_PPO_DIR) / target_filename
         else:
@@ -1936,9 +2579,22 @@ class RLTradingPipeline:
             stack_model_path,
         )
         print("PPO training complete.")
+        self._emit_event(
+            component="ppo",
+            category="training",
+            event="train_complete",
+            symbol=ticker,
+            corr_id=self._corr(ticker),
+            duration_ms=(time.time() - start) * 1000,
+            data={
+                "checkpoint_local": str(save_path_path),
+                "checkpoint_stack": str(stack_model_path),
+            },
+        )
 
     def run_ppo(self, test_data, ticker):
         from stable_baselines3 import PPO
+        start = time.time()
         env = TradingEnv(test_data)
         regime = detect_regime(test_data['close'])
         regime_suffix = "highvol" if regime == "high_vol" else "normal"
@@ -1993,6 +2649,18 @@ class RLTradingPipeline:
             done = terminated or truncated
             total_reward += reward
         print(f"PPO test run total reward: {total_reward}")
+        self._emit_event(
+            component="ppo",
+            category="evaluation",
+            event="run_complete",
+            symbol=ticker,
+            corr_id=self._corr(ticker),
+            duration_ms=(time.time() - start) * 1000,
+            data={
+                "reward": float(total_reward),
+                "rows": int(len(test_data)),
+            },
+        )
         return total_reward
 
     def train_ensemble_ppo(self, train_data, n_models=3):
@@ -2022,7 +2690,7 @@ class RLTradingPipeline:
 
 # Example config for testing
 default_config = {
-    "tickers": ["ES=F", "NQ=F", "GC=F", "6E=F"],
+    "tickers": list(IBKR_SYMBOLS),
     "use_mock_data": False,
     "feature_params": {"window": 20, "indicators": ["sma", "ema", "rsi"]},
     "log_path": "logs/pipeline.log",
