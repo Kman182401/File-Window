@@ -15,6 +15,8 @@ __pycache__/
 # Local config & secrets
 .env
 .env.*
+# Allow dashboard example env file
+!dash_perf_mvp/.env.example
 env.local
 *.enc
 
@@ -35,6 +37,9 @@ data/
 datasets/
 models/
 .cache/
+# Allow dashboard sample data placeholder
+!dash_perf_mvp/data/
+!dash_perf_mvp/data/trades.csv
 
 # keep IBG runtime out of git
 ibg_logs/
