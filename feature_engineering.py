@@ -14,7 +14,7 @@ from io import BytesIO
 import logging
 
 # Import enhanced modules
-from monitoring.performance_tracker import get_performance_tracker
+from monitoring.performance_tracker import get_performance_tracker, MetricType
 from utils.memory_manager import memory_efficient, get_memory_manager
 from utils.exception_handler import retry_on_exception, DataFetchError
 from utils.audit_logger import audit_log, AuditEventType, AuditSeverity
@@ -117,11 +117,18 @@ def add_technical_indicators(df):
     df["macd_signal"] = macd.macd_signal()
     df["macd_diff"] = macd.macd_diff()
 
-    # Bollinger Bands
+    # Simple moving averages used by PPO environment + decision heuristics
+    df["sma_20"] = df["close"].rolling(window=20, min_periods=20).mean()
+    df["sma_50"] = df["close"].rolling(window=50, min_periods=50).mean()
+
+    # Bollinger Bands (retain legacy columns for compatibility)
     bb = ta.volatility.BollingerBands(df["close"])
-    df["bb_high"] = bb.bollinger_hband()
-    df["bb_low"] = bb.bollinger_lband()
+    df["bb_upper"] = bb.bollinger_hband()
+    df["bb_lower"] = bb.bollinger_lband()
+    df["bb_middle"] = bb.bollinger_mavg()
     df["bb_width"] = bb.bollinger_wband()  # Band width (volatility)
+    df["bb_high"] = df["bb_upper"]
+    df["bb_low"] = df["bb_lower"]
 
     # ATR (Average True Range)
     df["atr"] = ta.volatility.AverageTrueRange(
@@ -139,7 +146,7 @@ def add_technical_indicators(df):
     df["vwap"] = (df["volume"] * (df["high"] + df["low"] + df["close"]) / 3).cumsum() / df["volume"].cumsum()
 
     # Volume SMA and spikes
-    df["vol_sma_20"] = df["volume"].rolling(window=20).mean()
+    df["vol_sma_20"] = df["volume"].rolling(window=20, min_periods=20).mean()
     df["vol_spike"] = (df["volume"] > 1.5 * df["vol_sma_20"]).astype(int)
 
     # Time-of-day/session encoding (minute of day, hour, day of week)
@@ -157,6 +164,16 @@ def add_technical_indicators(df):
 
     # Rolling correlation with open (as a proxy for related asset, can be replaced)
     df["roll_corr_open"] = df["close"].rolling(window=20).corr(df["open"])
+
+    # Price z-score relative to 20-period mean (mean-reversion signal)
+    rolling_std_20 = df["close"].rolling(window=20, min_periods=20).std()
+    df["zscore_20"] = (df["close"] - df["sma_20"]) / (rolling_std_20.replace(0, np.nan))
+
+    # Kaufman efficiency ratio captures trend persistence
+    er_window = 20
+    net_change = df["close"].diff(er_window).abs()
+    volatility = df["close"].diff().abs().rolling(window=er_window, min_periods=er_window).sum()
+    df["efficiency_ratio"] = net_change / (volatility.replace(0, np.nan))
 
     # === ADVANCED TECHNICAL INDICATORS ===
     
@@ -414,6 +431,17 @@ def generate_features(df):
 
     # PHASE4A-FIX: Log final output shape
     logger.info(f"[FE] generate_features output: features.shape={features.shape}, labels.shape={labels.shape}")
+
+    try:
+        performance_tracker.record_metric(
+            "generate_features.rows",
+            float(len(features)),
+            MetricType.CUSTOM,
+            "rows",
+            tags={'operation': 'generate_features'}
+        )
+    except Exception as exc:
+        logger.debug(f"[FE] Unable to record feature row metric: {exc}")
 
     return features, labels
 

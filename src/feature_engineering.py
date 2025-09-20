@@ -2,6 +2,7 @@ import os
 import boto3
 import pandas as pd
 import numpy as np
+from pandas.api.types import is_datetime64_any_dtype, is_datetime64tz_dtype
 import ta  # Technical Analysis library
 from io import BytesIO
 import logging
@@ -92,11 +93,18 @@ def add_technical_indicators(df):
     df["macd_signal"] = macd.macd_signal()
     df["macd_diff"] = macd.macd_diff()
 
-    # Bollinger Bands
+    # Simple moving averages used by PPO environment and signal logic
+    df["sma_20"] = df["close"].rolling(window=20, min_periods=20).mean()
+    df["sma_50"] = df["close"].rolling(window=50, min_periods=50).mean()
+
+    # Bollinger Bands (keep legacy columns for compatibility)
     bb = ta.volatility.BollingerBands(df["close"])
-    df["bb_high"] = bb.bollinger_hband()
-    df["bb_low"] = bb.bollinger_lband()
+    df["bb_upper"] = bb.bollinger_hband()
+    df["bb_lower"] = bb.bollinger_lband()
+    df["bb_middle"] = bb.bollinger_mavg()
     df["bb_width"] = bb.bollinger_wband()  # Band width (volatility)
+    df["bb_high"] = df["bb_upper"]
+    df["bb_low"] = df["bb_lower"]
 
     # ATR (Average True Range)
     df["atr"] = ta.volatility.AverageTrueRange(
@@ -114,7 +122,7 @@ def add_technical_indicators(df):
     df["vwap"] = (df["volume"] * (df["high"] + df["low"] + df["close"]) / 3).cumsum() / df["volume"].cumsum()
 
     # Volume SMA and spikes
-    df["vol_sma_20"] = df["volume"].rolling(window=20).mean()
+    df["vol_sma_20"] = df["volume"].rolling(window=20, min_periods=20).mean()
     df["vol_spike"] = (df["volume"] > 1.5 * df["vol_sma_20"]).astype(int)
 
     # Time-of-day/session encoding (minute of day, hour, day of week)
@@ -132,6 +140,16 @@ def add_technical_indicators(df):
 
     # Rolling correlation with open (as a proxy for related asset, can be replaced)
     df["roll_corr_open"] = df["close"].rolling(window=20).corr(df["open"])
+
+    # Price z-score relative to 20-period mean (mean-reversion feature)
+    rolling_std_20 = df["close"].rolling(window=20, min_periods=20).std()
+    df["zscore_20"] = (df["close"] - df["sma_20"]) / (rolling_std_20.replace(0, np.nan))
+
+    # Kaufman efficiency ratio encourages smoother trend detection
+    er_window = 20
+    net_change = df["close"].diff(er_window).abs()
+    volatility = df["close"].diff().abs().rolling(window=er_window, min_periods=er_window).sum()
+    df["efficiency_ratio"] = net_change / (volatility.replace(0, np.nan))
 
     # Clean up
     df = df.replace([np.inf, -np.inf], np.nan)
@@ -186,20 +204,20 @@ def generate_features(df):
     # Ensure timestamp column exists and is datetime
     if "timestamp" not in df.columns:
         if "datetime" in df.columns:
-            df["timestamp"] = pd.to_datetime(df["datetime"])
+            df["timestamp"] = pd.to_datetime(df["datetime"], utc=True, errors="coerce")
         else:
             df["timestamp"] = pd.date_range(start="2000-01-01", periods=len(df), freq="min")
     else:
-        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
     # Drop rows with missing values in required columns
     df = df.dropna(subset=required_columns + ["timestamp"])
 
     df = add_technical_indicators(df.copy())
     # Ensure a timestamp column exists for incremental learning
     if "datetime" in df.columns:
-        df["timestamp"] = pd.to_datetime(df["datetime"])
-    elif df.index.name is not None and np.issubdtype(df.index.dtype, np.datetime64):
-        df["timestamp"] = df.index
+        df["timestamp"] = pd.to_datetime(df["datetime"], utc=True, errors="coerce")
+    elif df.index.name is not None and (is_datetime64_any_dtype(df.index) or is_datetime64tz_dtype(df.index)):
+        df["timestamp"] = pd.to_datetime(df.index, utc=True, errors="coerce")
     else:
         df["timestamp"] = np.arange(len(df))
     df = df.dropna()

@@ -160,16 +160,25 @@ class IBKRIngestor:
             print(f"[IBKRIngestor] Using external IB connection (connected={self.connected})")
         else:
             try:
-                from ib_single_socket import init_ib
-                shared_ib = init_ib(host=self.host, port=self.port, client_id=self.clientId)
-                self.ib = shared_ib
-                self.connected = shared_ib.isConnected()
-                self.external_ib = True
-                print(f"[IBKRIngestor] Reusing shared IB connection (clientId={self.ib.client.clientId})")
-            except Exception:
+                from ib_single_socket import init_ib, SingleConnectionError
+            except ImportError:
                 self.ib = IB()
                 self.connected = False
                 self.external_ib = False
+            else:
+                try:
+                    shared_ib = init_ib(host=self.host, port=self.port, client_id=self.clientId)
+                except SingleConnectionError:
+                    # Bubble up so callers understand another process owns the session
+                    raise
+                except Exception as exc:
+                    # Connection-level failures should surface; avoid spawning duplicate sessions
+                    raise
+                else:
+                    self.ib = shared_ib
+                    self.connected = shared_ib.isConnected()
+                    self.external_ib = True
+                    print(f"[IBKRIngestor] Reusing shared IB connection (clientId={self.ib.client.clientId})")
         self.auto_reconnect = True
         self.reconnect_attempts = 0
         self.max_reconnect_attempts = config_get("ibkr.retry_attempts", 10)

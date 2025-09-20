@@ -12,6 +12,11 @@ from pathlib import Path
 from typing import Optional, Any
 import os
 
+
+class SingleConnectionError(RuntimeError):
+    """Raised when another process already owns the single IBKR client session."""
+    pass
+
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
@@ -32,6 +37,9 @@ def init_ib(host="127.0.0.1", port=4002, client_id=9002, timeout=None) -> IB:
         logger.info(f"Already connected (clientId={_ib.client.clientId})")
         return _ib
 
+    # Ensure we are the only process attempting to own the shared client ID
+    enforce_single_connection()
+
     # Write PID file
     pid = os.getpid()
     PID_FILE.write_text(str(pid))
@@ -45,6 +53,11 @@ def init_ib(host="127.0.0.1", port=4002, client_id=9002, timeout=None) -> IB:
         try:
             logger.info(f"Connecting to {host}:{port} (attempt {attempt+1}/3)...")
             _ib = IB()
+            # Allow longer API calls before ib_insync declares a timeout
+            try:
+                _ib.RequestTimeout = int(os.getenv('IBKR_REQUEST_TIMEOUT', '60'))
+            except Exception:
+                _ib.RequestTimeout = 60
             _ib.connect(host, port, clientId=client_id, timeout=timeout)
             logger.info(f"✅ Connected! Server version: {_ib.client.serverVersion()}")
             return _ib
@@ -176,7 +189,7 @@ def enforce_single_connection():
     """Ensure only one connection exists"""
     if check_pipeline_running():
         pid = PID_FILE.read_text().strip()
-        raise RuntimeError(
+        raise SingleConnectionError(
             f"Another process is already connected (PID: {pid})\n"
             f"Only one process can use clientId=9002.\n"
             f"Stop the other process or use cached data."

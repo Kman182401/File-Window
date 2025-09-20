@@ -52,4 +52,4 @@ IBKR_POLL_INTERVAL = 1  # seconds
 # AUDUSD → 6A (CME)     Australian Dollar futures
 # XAUUSD → GC (COMEX)   Gold futures
 #
-IBKR_SYMBOLS = ["ES1!", "NQ1!"]
+IBKR_SYMBOLS = ["ES1!", "NQ1!", "XAUUSD", "EURUSD", "GBPUSD", "AUDUSD"]

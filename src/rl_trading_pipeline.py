@@ -3,7 +3,7 @@ import os
 
 from datetime import datetime, timezone
 import pandas as pd
-from pandas.api.types import is_datetime64_any_dtype
+from pandas.api.types import is_datetime64_any_dtype, is_datetime64tz_dtype
 
 def _coerce_epoch(ts):
     try:
@@ -61,9 +61,10 @@ import numpy as np
 import random
 import math
 import json
+import hashlib
 from datetime import datetime, timedelta
 from dateutil import parser as date_parser
-from collections import deque
+from collections import deque, defaultdict
 from typing import List, Dict, Any, Tuple, Optional
 import boto3
 import io
@@ -316,39 +317,39 @@ from pathlib import Path
 data_dir = os_mod.getenv("DATA_DIR", str(Path.home() / ".local/share/m5_trader/data"))
 
 # === Combined News Ingestion (MarketAux + IBKR) ===
-entity_types = "indices,commodities,currencies,futures"
-countries = "US,GB,EU,AU"
+_news_env_flag = os_mod.getenv("ENABLE_IBKR_NEWS", os_mod.getenv("ENABLE_NEWS_ANALYSIS", "0"))
+_news_enabled = _news_env_flag.lower() in ("1", "true", "yes")
 
-# 1) MarketAux (free tier) first
-try:
-    ma_list = fetch_marketaux_news(
-        symbols=IBKR_SYMBOLS,          # use your canonical symbols list
-        limit=20,                      # tune to free-tier limits
-        entity_types=entity_types,
-        countries="us",
-        language="en",
-        filter_entities="false",
-        must_have_entities="false",
-        min_match_score=0.05
-    )
-    ma_raw = normalize_marketaux_news(ma_list)
-except Exception as e:
-    logging.warning(f"MarketAux fetch failed: {e}")
-    ma_raw = None
+if _news_enabled:
+    entity_types = "indices,commodities,currencies,futures"
 
-ma_df = normalize_marketaux_for_union(ma_raw)
+    # 1) MarketAux (free tier) first
+    try:
+        ma_list = fetch_marketaux_news(
+            symbols=IBKR_SYMBOLS,          # use your canonical symbols list
+            limit=20,                      # tune to free-tier limits
+            entity_types=entity_types,
+            countries="us",
+            language="en",
+            filter_entities="false",
+            must_have_entities="false",
+            min_match_score=0.05
+        )
+        ma_raw = normalize_marketaux_news(ma_list)
+    except Exception as e:
+        logging.warning(f"MarketAux fetch failed: {e}")
+        ma_raw = None
 
-# 2) IBKR Historical News (best-effort; requires whatever news entitlements you have)
-try:
-    ibkr_df = fetch_ibkr_news_for_tickers(IBKR_SYMBOLS, lookback_hours=24, max_results=200)
-except Exception as e:
-    logging.warning(f"IBKR news fetch failed: {e}")
-    import pandas as pd
-    ibkr_df = pd.DataFrame(columns=['published_at','title','description','tickers','provider','source'])
+    ma_df = normalize_marketaux_for_union(ma_raw)
 
-# 3) Union + de-dupe
-import pandas as pd
-if os_mod.getenv("ENABLE_NEWS_ANALYSIS", "0") in ("1", "true", "True"):
+    # 2) IBKR Historical News (best-effort; requires whatever news entitlements you have)
+    try:
+        ibkr_df = fetch_ibkr_news_for_tickers(IBKR_SYMBOLS, lookback_hours=24, max_results=200)
+    except Exception as e:
+        logging.warning(f"IBKR news fetch failed: {e}")
+        ibkr_df = pd.DataFrame(columns=['published_at','title','description','tickers','provider','source'])
+
+    # 3) Union + de-dupe
     try:
         news_df = pd.concat([ma_df, ibkr_df], ignore_index=True)
         if not news_df.empty:
@@ -359,7 +360,9 @@ if os_mod.getenv("ENABLE_NEWS_ANALYSIS", "0") in ("1", "true", "True"):
         logging.warning(f"News analysis disabled due to error: {e}")
         news_df = pd.DataFrame()
 else:
-    # Default: skip heavy news analysis at import time
+    # News ingestion disabled by environment; initialise empties to avoid downstream checks
+    ma_df = pd.DataFrame(columns=['published_at','title','description','tickers','provider','source'])
+    ibkr_df = pd.DataFrame(columns=['published_at','title','description','tickers','provider','source'])
     news_df = pd.DataFrame()
 
 class PPOTrainingLogger(BaseCallback):
@@ -438,6 +441,132 @@ def _s3_enabled() -> bool:
         return str(os_mod.getenv("S3_ENABLE", "0")).lower() in ("1", "true", "yes")
     except Exception:
         return False
+
+
+MODELS_ROOT_DIR = Path(os_mod.getenv("MODELS_DIR", str(Path.home() / "models"))).expanduser()
+LOCAL_STACKING_DIR = MODELS_ROOT_DIR / "stacking"
+LOCAL_PPO_DIR = MODELS_ROOT_DIR / "ppo"
+
+
+def _ensure_dir(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def compute_feature_signature(columns: List[str]) -> str:
+    normalized = [c.strip().lower() for c in columns]
+    joined = "|".join(normalized)
+    return hashlib.sha1(joined.encode("utf-8")).hexdigest()[:12]
+
+
+def ppo_filename(ticker: str, regime_suffix: str, signature: str) -> str:
+    return f"{ticker}_ppo_{regime_suffix}__{signature}.zip"
+
+
+def legacy_ppo_filename(ticker: str, regime_suffix: str) -> str:
+    return f"{ticker}_ppo_{regime_suffix}.zip"
+
+
+def save_model_local(model, run_id: str, filename: str) -> Path:
+    run_dir = _ensure_dir(LOCAL_STACKING_DIR / str(run_id))
+    dest = run_dir / filename
+    joblib.dump(model, dest)
+    logging.info("Saved local model artifact: %s", dest)
+    return dest
+
+
+def load_local_models(run_id: str) -> Dict[str, Dict[str, Any]]:
+    models: Dict[str, Dict[str, Any]] = {}
+    run_dir = LOCAL_STACKING_DIR / str(run_id)
+
+    if not run_dir.exists():
+        candidates = sorted([p for p in LOCAL_STACKING_DIR.glob("*") if p.is_dir()], reverse=True)
+        for candidate in candidates:
+            if candidate.name != str(run_id):
+                logging.info("No local models for run %s; falling back to %s", run_id, candidate.name)
+                run_dir = candidate
+                break
+        else:
+            logging.info("No local model directory available under %s", LOCAL_STACKING_DIR)
+            return models
+
+    for path in run_dir.glob("*.joblib"):
+        match = re.match(r"(.+?)_([A-Za-z0-9]+)\.joblib$", path.name)
+        if not match:
+            continue
+        ticker, model_name = match.groups()
+        try:
+            model = joblib.load(path)
+        except Exception as exc:
+            logging.warning("Failed to load local model %s: %s", path, exc)
+            continue
+        models.setdefault(ticker, {})[model_name] = model
+
+    for path in run_dir.glob("*_ppo*.zip"):
+        match = re.match(r"(.+?)_ppo__(?P<sig>[a-f0-9]+)\.zip$", path.name)
+        signature = None
+        if match:
+            ticker = match.group(1)
+            signature = match.group('sig')
+        else:
+            legacy_match = re.match(r"(.+?)_ppo\.zip$", path.name)
+            if not legacy_match:
+                continue
+            ticker = legacy_match.group(1)
+        try:
+            model = PPO.load(str(path))
+        except Exception as exc:
+            logging.warning("Failed to load local PPO model %s: %s", path, exc)
+            continue
+        if signature:
+            setattr(model, "_feature_signature", signature)
+        models.setdefault(ticker, {})["PPO"] = model
+
+    return models
+
+
+def get_latest_local_artifact(exclude_run_id: Optional[str] = None) -> Optional[Path]:
+    """Return the most recent local model artifact outside the current run."""
+    if not LOCAL_STACKING_DIR.exists():
+        return None
+
+    latest_path: Optional[Path] = None
+    latest_mtime: float = -1.0
+
+    for run_dir in sorted(LOCAL_STACKING_DIR.glob("*"), reverse=True):
+        if not run_dir.is_dir():
+            continue
+        if exclude_run_id and run_dir.name == str(exclude_run_id):
+            continue
+        for path in run_dir.glob("*"):
+            if path.suffix not in (".joblib", ".zip"):
+                continue
+            try:
+                mtime = path.stat().st_mtime
+            except OSError:
+                continue
+            if mtime > latest_mtime:
+                latest_mtime = mtime
+                latest_path = path
+
+    return latest_path
+
+
+def load_local_ppo_model(ticker: str) -> Optional[PPO]:
+    """Load the most recent local PPO model for a ticker."""
+    candidates = sorted(
+        LOCAL_PPO_DIR.glob(f"{ticker}_ppo_*.zip"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    for path in candidates:
+        try:
+            model = PPO.load(str(path))
+            return model
+        except Exception as exc:
+            logging.warning("Failed to load local PPO model %s: %s", path, exc)
+    return None
+
 
 def save_model_to_s3(model, bucket, key):
     """Save a model to S3 using joblib. No-op when S3_ENABLE=0."""
@@ -588,31 +717,33 @@ from stable_baselines3 import PPO
 
 def load_all_models(bucket, run_id):
     """
-    Loads all models (ML and PPO) for a given run_id from S3.
-    Returns a nested dict: {ticker: {model_name: model_object}}
-    If S3 is disabled, returns an empty dict.
+    Load all base models for stacking/ensemble. Prioritises local registry and
+    augments with S3 artifacts when enabled.
     """
+    models = load_local_models(run_id)
+
     if not _s3_enabled():
-        logging.info("S3 disabled (S3_ENABLE=0); load_all_models -> {}")
-        return {}
+        if not models:
+            logging.warning("S3 disabled and no local models found for run %s", run_id)
+        return models
+
     s3 = boto3.client("s3")
     prefix = f"models/{run_id}/"
     response = s3.list_objects_v2(Bucket=bucket, Prefix=prefix)
-    models = {}
     for obj in response.get('Contents', []):
         key = obj['Key']
         filename = os_mod.path.basename(key)
         # ML models: {ticker}_{modelname}.joblib
-        m = re.match(r"(.+?)_(RandomForest|XGBoost|LightGBM)\.joblib$", filename)
+        m = re.match(r"(.+?)_(RandomForest|XGBoost|LightGBM|SGDClassifier|Perceptron|PassiveAggressive)\.joblib$", filename)
         if m:
             ticker, model_name = m.groups()
             local_path = f"/tmp/{filename}"
             s3.download_file(bucket, key, local_path)
             model = joblib.load(local_path)
             os_mod.remove(local_path)
-            if ticker not in models:
-                models[ticker] = {}
-            models[ticker][model_name] = model
+            models.setdefault(ticker, {})[model_name] = model
+            continue
+
         # PPO RL models: {ticker}_ppo.zip
         m2 = re.match(r"(.+?)_ppo\.zip$", filename)
         if m2:
@@ -621,9 +752,8 @@ def load_all_models(bucket, run_id):
             s3.download_file(bucket, key, local_path)
             model = PPO.load(local_path)
             os_mod.remove(local_path)
-            if ticker not in models:
-                models[ticker] = {}
-            models[ticker]["PPO"] = model
+            models.setdefault(ticker, {})["PPO"] = model
+
     return models
 
 class RLTradingPipeline:
@@ -647,7 +777,35 @@ class RLTradingPipeline:
         self.retry_delay = config.get('retry_delay', 10)
         self.max_drawdown_limit = config.get('max_drawdown_limit', 0.2)  # 20% default
         self.max_position_size = config.get('max_position_size', 1)      # 1 contract/lot default
+        self.min_samples_per_model = int(os_mod.getenv(
+            'ML_TRAINING_MIN_SAMPLES',
+            str(config.get('min_samples_per_model', 1440))
+        ))
+        self.ml_full_min_samples = int(os_mod.getenv(
+            'ML_FULL_MIN_SAMPLES',
+            str(config.get('ml_full_min_samples', 1440))
+        ))
+        self.ml_incremental_min_samples = int(os_mod.getenv(
+            'ML_INCREMENTAL_MIN_SAMPLES',
+            str(config.get('ml_incremental_min_samples', 120))
+        ))
+        self.ml_rolling_window = int(os_mod.getenv(
+            'ML_ROLLING_WINDOW',
+            str(config.get('ml_rolling_window', 1440))
+        ))
+        self.ml_retrain_every_min = int(os_mod.getenv(
+            'ML_RETRAIN_EVERY_MIN',
+            str(config.get('ml_retrain_every_min', 60))
+        ))
         self.run_id = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        self.local_model_dir = _ensure_dir(LOCAL_STACKING_DIR / self.run_id)
+        _ensure_dir(LOCAL_PPO_DIR)
+        self.ml_model_store: Dict[str, Dict[str, Any]] = defaultdict(dict)
+        self.ml_feature_columns: Dict[str, List[str]] = defaultdict(list)
+        self.ml_last_incremental_rows: Dict[str, int] = defaultdict(int)
+        self.ml_last_incremental_time: Dict[str, datetime] = defaultdict(lambda: datetime(1970, 1, 1))
+        self.ml_last_full_retrain_time: datetime = datetime.utcnow() - timedelta(minutes=self.ml_retrain_every_min)
+        self.ppo_live_positions: Dict[str, int] = defaultdict(int)
         self.status = "initialized"
         self.last_error = None
         self.notification_hook = None  # Extensibility: notification system
@@ -808,24 +966,30 @@ class RLTradingPipeline:
     def _main_loop(self):
         global last_retrain_time
         retries = 0
-        last_hb = 0.0
+        last_hb = time.monotonic()
         while retries < self.max_retries:
             try:
                 logging.info("Fetching market data...")
                 # Canonical adapter-supported tickers
-                tickers = ["ES1!", "NQ1!", "XAUUSD", "EURUSD", "GBPUSD", "AUDUSD"]
+                tickers = list(TICKERS)
                 last_check_times = {ticker: 0 for ticker in tickers}
                 raw_data = {}
                 for idx, ticker in enumerate(tickers):
                     # Lightweight heartbeat every 30s to keep socket sticky
                     now_mono = time.monotonic()
-                    if now_mono - last_hb > 30:
+                    heartbeat_interval = self.config.get("heartbeat_interval", 30)
+                    heartbeat_enabled = (
+                        not self.config.get("use_mock_data", True)
+                        and not self.config.get("disable_ib_heartbeat", False)
+                        and getattr(self.market_data_adapter, 'ib', None) is not None
+                    )
+                    if heartbeat_enabled and (now_mono - last_hb) >= heartbeat_interval:
                         try:
-                            if getattr(self.market_data_adapter, 'ib', None):
-                                self.market_data_adapter.ib.reqCurrentTime()
+                            self.market_data_adapter.ib.reqCurrentTime()
                         except Exception as _hb_e:
                             logging.warning(f"Heartbeat error: {_hb_e}")
-                        last_hb = now_mono
+                        finally:
+                            last_hb = time.monotonic()
                     start_time = time.time()
                     try:
                         if self.config.get("use_mock_data", True):
@@ -856,13 +1020,7 @@ class RLTradingPipeline:
                         current_time = time.time()
                         if (current_time - last_retrain_time) > RETRAIN_INTERVAL or new_data_available(data_dir, ticker, last_check_times[ticker]):
                             print(f"Training PPO for {ticker} (scheduled or new data)...")
-                            regime = detect_regime(df['close'])
-                            models_dir = Path(os_mod.getenv("MODELS_DIR", str(Path.home()/"models")))
-                            if regime == "high_vol":
-                                model_path = str(models_dir / f"ppo_model_{ticker}_highvol.zip")
-                            else:
-                                model_path = str(models_dir / f"ppo_model_{ticker}_normal.zip")
-                            self.train_ppo(df, ticker, save_path=model_path)
+                            self.train_ppo(df, ticker)
                             last_check_times[ticker] = current_time
                             last_retrain_time = current_time
                             # (rest of your retraining logic)
@@ -935,13 +1093,6 @@ class RLTradingPipeline:
 
                 for ticker, df in raw_data.items():
                     X, y = generate_features(df)
-                    if last_trained_time and "timestamp" in X.columns:
-                        if np.issubdtype(X["timestamp"].dtype, np.datetime64):
-                            last_trained_time = pd.to_datetime(last_trained_time)
-                        else:
-                            last_trained_time = _coerce_epoch(last_trained_time)
-                        X = X[X["timestamp"] > last_trained_time]
-                        y = y.loc[X.index]
                     logging.info(f"{ticker} features shape: {X.shape}, labels shape: {y.shape}")
                     if X is None or X.empty or y is None or y.empty:
                         logging.warning(f"No features/labels for {ticker} after feature engineering, skipping.")
@@ -984,131 +1135,168 @@ class RLTradingPipeline:
                 logging.warning("ML SYSTEM: Running ML model training and prediction for all tickers.")
                 from sklearn.metrics import accuracy_score, confusion_matrix
 
-                # Define models
-                models = {
-                    "SGDClassifier": SGDClassifier(loss="log_loss", random_state=42, max_iter=1000, tol=1e-3),
-                    "Perceptron": Perceptron(),
-                    "PassiveAggressive": PassiveAggressiveClassifier(),
-                    "RandomForest": RandomForestClassifier(n_estimators=100, random_state=42)  # Optional batch model
+
+                base_model_factories = {
+                    "SGDClassifier": lambda: SGDClassifier(loss="log_loss", random_state=42, max_iter=1000, tol=1e-3),
+                    "Perceptron": lambda: Perceptron(),
+                    "PassiveAggressive": lambda: PassiveAggressiveClassifier(),
+                    "RandomForest": lambda: RandomForestClassifier(n_estimators=100, random_state=42)
                 }
 
-                fitted_models = {}
-
-                # Metrics storage
-                results = {}
-                # Ensure X_train symbol exists for later timestamp save guard
-                try:
-                    import pandas as pd  # ensure pd alias
-                except Exception:
-                    pass
-                X_train = 'X_train_unset'
+                fitted_models: Dict[str, Dict[str, Any]] = {}
+                results: Dict[str, Dict[str, Any]] = {}
+                now_utc = datetime.utcnow()
+                full_retrain_timestamp = None
 
                 for ticker in features:
-                    X = feature_store.get(ticker)
-                    if X is None:
+                    X_all = feature_store.get(ticker)
+                    if X_all is None or X_all.empty:
                         logging.warning(f"No real-time features for {ticker}, skipping.")
                         continue
-                    y = labels[ticker]
-                    # Optional: Log the features being used
-                    logging.info(f"Features for {ticker}: {X}")
 
-                    if len(y) == 0:
-                        logging.warning(f"No labels for {ticker}, skipping ML for this ticker.")
+                    y_all = labels[ticker]
+                    if y_all is None or y_all.empty:
+                        logging.warning(f"No labels for {ticker} (features={len(X_all)}). Skipping ML for this ticker.")
                         continue
 
-                    # Split into train/test (last 20% for test)
-                    split_idx = int(len(X) * 0.95)
-                    X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
-                    y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
+                    total_rows = len(X_all)
+                    new_rows = total_rows - self.ml_last_incremental_rows.get(ticker, 0)
+                    incremental_ready = new_rows >= self.ml_incremental_min_samples
 
-                    # Drop any datetime or identifier columns from features
-                    cols_to_drop = []
-                    for col in X_train.columns:
-                        if (is_datetime64_any_dtype(X_train[col])
-                                or col in ["datetime", "timestamp"]):
-                            cols_to_drop.append(col)
-                    if cols_to_drop:
-                        X_train = X_train.drop(columns=cols_to_drop)
-                        X_test = X_test.drop(columns=cols_to_drop)
+                    X_window = X_all.tail(self.ml_rolling_window)
+                    y_window = y_all.loc[X_window.index]
+                    window_timestamp = None
+                    if "timestamp" in X_window.columns:
+                        window_timestamp = X_window["timestamp"].max()
 
-                    if X_train.empty or X_test.empty or y_train.empty or y_test.empty:
-                        logging.warning(f"Not enough data for {ticker}: X_train={len(X_train)}, X_test={len(X_test)}. Skipping.")
+                    full_ready = (
+                        len(X_window) >= self.ml_full_min_samples
+                        and (now_utc - self.ml_last_full_retrain_time) >= timedelta(minutes=self.ml_retrain_every_min)
+                    )
+
+                    if full_ready:
+                        models = {name: factory() for name, factory in base_model_factories.items()}
+                        split_idx = max(int(len(X_window) * 0.90), 1)
+                        X_train = X_window.iloc[:split_idx].copy()
+                        X_test = X_window.iloc[split_idx:].copy()
+                        y_train = y_window.iloc[:split_idx].copy()
+                        y_test = y_window.iloc[split_idx:].copy()
+
+                        cols_to_drop = [
+                            col for col in X_train.columns
+                            if is_datetime64_any_dtype(X_train[col]) or is_datetime64tz_dtype(X_train[col])
+                            or col in ("datetime", "timestamp")
+                        ]
+                        if cols_to_drop:
+                            X_train = X_train.drop(columns=cols_to_drop)
+                            X_test = X_test.drop(columns=cols_to_drop)
+
+                        if X_train.empty or X_test.empty or y_train.empty or y_test.empty:
+                            logging.warning(
+                                f"Split produced insufficient data for {ticker}: "
+                                f"X_train={len(X_train)}, X_test={len(X_test)}, "
+                                f"y_train={len(y_train)}, y_test={len(y_test)}. Skipping."
+                            )
+                            continue
+
+                        if len(X_train) < self.min_samples_per_model or len(y_train) < self.min_samples_per_model:
+                            logging.warning(
+                                f"Not enough samples for {ticker}: X={len(X_train)}, y={len(y_train)} "
+                                f"(min={self.min_samples_per_model}). Skipping."
+                            )
+                            continue
+
+                        ticker_results = {}
+                        feature_columns = list(X_train.columns)
+
+                        for name, model in models.items():
+                            classes = np.unique(y_train)
+                            if len(classes) < 2 and hasattr(model, 'partial_fit'):
+                                logging.warning(f"Skipping model update for {ticker}/{name}: only one class present.")
+                                continue
+
+                            model.fit(X_train, y_train)
+
+                            self.ml_model_store[ticker][name] = model
+                            fitted_models.setdefault(ticker, {})[name] = model
+                            self.ml_feature_columns[ticker] = feature_columns
+
+                            save_model_local(model, self.run_id, f"{ticker}_{name}.joblib")
+                            save_key = f"models/{self.run_id}/{ticker}_{name}.joblib"
+                            save_model_to_s3(model, self.config['s3_bucket'], save_key)
+
+                            preds = model.predict(X_test)
+                            acc = accuracy_score(y_test, preds)
+                            cm = confusion_matrix(y_test, preds)
+                            wins = int((preds == 1).sum())
+                            losses = int((preds == 0).sum())
+                            total_trades = len(preds)
+                            win_rate = (preds == y_test).sum() / total_trades if total_trades > 0 else 0
+                            pnl = ((preds == y_test) * 1 + (preds != y_test) * -1).sum()
+
+                            ticker_results[name] = {
+                                "accuracy": acc,
+                                "win_rate": win_rate,
+                                "trades": total_trades,
+                                "wins": wins,
+                                "losses": losses,
+                                "pnl": pnl,
+                                "confusion_matrix": cm.tolist()
+                            }
+
+                            logging.info(
+                                f"[{ticker}][{name}] Trades: {total_trades}, Wins: {wins}, Losses: {losses}, "
+                                f"Accuracy: {acc:.2%}, Win Rate: {win_rate:.2%}, PnL: {pnl}"
+                            )
+
+                        if ticker_results:
+                            results[ticker] = ticker_results
+
+                        self.ml_last_incremental_rows[ticker] = total_rows
+                        self.ml_last_incremental_time[ticker] = now_utc
+                        self.ml_last_full_retrain_time = now_utc
+                        if window_timestamp is not None:
+                            full_retrain_timestamp = window_timestamp
                         continue
 
-                    ticker_results = {}
-
-                    for name, model in models.items():
-                        model_key = get_latest_model_key(self.config['s3_bucket'], f"models/{self.run_id}/{ticker}_{name}")
-                        if model_key:
-                            prev_model = load_model_from_s3(self.config['s3_bucket'], model_key)
-                            if hasattr(prev_model, "partial_fit"):
-                                if X_train.shape[0] == 0 or y_train.shape[0] == 0:
-                                    logger.error("No data available for model training.")
-                                    raise ValueError("No data available for model training.")
-                                if X_train.shape[0] != y_train.shape[0]:
-                                    logger.error(f"Feature/label row mismatch: {X_train.shape[0]} vs {y_train.shape[0]}")
-                                    raise ValueError(f"Feature/label row mismatch: {X_train.shape[0]} vs {y_train.shape[0]}")
-                                if np.any(pd.isnull(X_train)) or np.any(pd.isnull(y_train)):
-                                    logger.error("NaN values detected in features or labels.")
-                                    raise ValueError("NaN values detected in features or labels.")
-                                if len(np.unique(y_train)) < 2:
-                                    logger.warning("Skipping model update: only one class present in y_train.")
-                                    continue
-                                prev_model.partial_fit(X_train, y_train, classes=np.unique(y_train))
-                                model = prev_model
-                            else:
-                                if X_train.shape[0] == 0 or y_train.shape[0] == 0:
-                                    logger.error("No data available for model training.")
-                                    raise ValueError("No data available for model training.")
-                                if X_train.shape[0] != y_train.shape[0]:
-                                    logger.error(f"Feature/label row mismatch: {X_train.shape[0]} vs {y_train.shape[0]}")
-                                    raise ValueError(f"Feature/label row mismatch: {X_train.shape[0]} vs {y_train.shape[0]}")
-                                if np.any(pd.isnull(X_train)) or np.any(pd.isnull(y_train)):
-                                    logger.error("NaN values detected in features or labels.")
-                                    raise ValueError("NaN values detected in features or labels.")
-                                model.fit(X_train, y_train)
+                    if incremental_ready:
+                        existing = self.ml_model_store.get(ticker, {})
+                        if not existing:
+                            logging.info(
+                                f"Incremental update for {ticker} skipped: no prior trained models."
+                            )
                         else:
-                            if hasattr(model, "partial_fit"):
-                                if len(np.unique(y_train)) < 2:
-                                    logger.warning("Skipping model update: only one class present in y_train.")
-                                    continue
-                                model.partial_fit(X_train, y_train, classes=np.unique(y_train))
+                            feature_columns = self.ml_feature_columns.get(ticker)
+                            if not feature_columns:
+                                logging.info(
+                                    f"Incremental update for {ticker} skipped: no feature column metadata."
+                                )
                             else:
-                                model.fit(X_train, y_train)
-                        # Store the fitted model for this ticker
-                        if ticker not in fitted_models:
-                            fitted_models[ticker] = {}
-                        fitted_models[ticker][name] = model
-                        save_key = f"models/{self.run_id}/{ticker}_{name}.joblib"
-                        save_model_to_s3(model, self.config['s3_bucket'], save_key)
-                        preds = model.predict(X_test)
+                                X_inc = X_all.iloc[-new_rows:]
+                                y_inc = y_all.loc[X_inc.index]
+                                X_inc = X_inc[feature_columns]
+                                classes = np.unique(y_inc)
+                                if len(classes) == 0:
+                                    logging.warning(f"No label variation in incremental window for {ticker}.")
+                                else:
+                                    for name, model in existing.items():
+                                        if hasattr(model, 'partial_fit'):
+                                            try:
+                                                if hasattr(model, 'classes_'):
+                                                    model.partial_fit(X_inc, y_inc)
+                                                else:
+                                                    model.partial_fit(X_inc, y_inc, classes=classes)
+                                            except Exception as exc:
+                                                logging.warning(f"Incremental update failed for {ticker}/{name}: {exc}")
+                                    fitted_models[ticker] = existing
+                                    self.ml_last_incremental_rows[ticker] = total_rows
+                                    self.ml_last_incremental_time[ticker] = now_utc
+                        continue
 
-                        acc = accuracy_score(y_test, preds)
-                        cm = confusion_matrix(y_test, preds)
-                        wins = int((preds == 1).sum())
-                        losses = int((preds == 0).sum())
-                        total_trades = len(preds)
-                        win_rate = (preds == y_test).sum() / total_trades if total_trades > 0 else 0
-
-                        # Simulate PnL: assume +1 for correct, -1 for incorrect (customize for your logic)
-                        pnl = ((preds == y_test) * 1 + (preds != y_test) * -1).sum()
-
-                        ticker_results[name] = {
-                            "accuracy": acc,
-                            "win_rate": win_rate,
-                            "trades": total_trades,
-                            "wins": wins,
-                            "losses": losses,
-                            "pnl": pnl,
-                            "confusion_matrix": cm.tolist()
-                        }
-
-                        # Log results to terminal
-                        logging.info(f"[{ticker}][{name}] Trades: {total_trades}, Wins: {wins}, Losses: {losses}, Accuracy: {acc:.2%}, Win Rate: {win_rate:.2%}, PnL: {pnl}")
-
-                    results[ticker] = ticker_results
-
-
+                    fitted_models[ticker] = self.ml_model_store.get(ticker, {})
+                    logging.info(
+                        f"ML update skipped for {ticker}: new_rows={new_rows}, total={total_rows}, full_ready={full_ready}."
+                    )
 
                 summary_rows = []
                 for ticker, ticker_results in results.items():
@@ -1124,18 +1312,14 @@ class RLTradingPipeline:
                             "PnL": metrics['pnl']
                         })
 
-                summary_df = pd.DataFrame(summary_rows)
-                print("\n=== ML Model Performance Summary ===")
-                print(summary_df.to_string(index=False))
+                if summary_rows:
+                    summary_df = pd.DataFrame(summary_rows)
+                    print("\n=== ML Model Performance Summary ===")
+                    print(summary_df.to_string(index=False))
 
-                # Save the last trained timestamp/index
-                if 'X_train' in locals() and hasattr(X_train, 'empty') and (not X_train.empty) and ("timestamp" in X_train.columns):
-                    last_trained_time = X_train["timestamp"].max()
+                if full_retrain_timestamp is not None:
                     with open(LAST_TRAINED_FILE, "w") as f:
-                        f.write(str(last_trained_time))
-
-                # --- End ML Model Block ---
-
+                        f.write(str(full_retrain_timestamp))
                 # --- RL PPO Training and Inference Block ---
                 logging.warning("RL SYSTEM: Running PPO RL training and inference.")
                 # Example: Use the first ticker with enough data for PPO
@@ -1151,12 +1335,7 @@ class RLTradingPipeline:
                         test_data = X.iloc[split_idx:]
                         y_train = y.iloc[:split_idx]
                         y_test = y.iloc[split_idx:]
-                        regime = detect_regime(train_data['close'])
-                        if regime == "high_vol":
-                            model_path = f"/home/karson/models/ppo_model_{ticker}_highvol.zip"
-                        else:
-                            model_path = f"/home/karson/models/ppo_model_{ticker}_normal.zip"
-                        self.train_ppo(train_data, ticker, save_path=model_path)
+                        self.train_ppo(train_data, ticker)
                         self.run_ppo(test_data, ticker)
                         break  # Only run PPO on the first valid ticker for now
                 # --- End RL PPO Block ---
@@ -1206,15 +1385,16 @@ class RLTradingPipeline:
                             # Drop any datetime or identifier columns from features before prediction
                             cols_to_drop = []
                             for col in X_test.columns:
-                                if np.issubdtype(X_test[col].dtype, np.datetime64) or col in ["datetime", "timestamp"]:
+                                if (is_datetime64_any_dtype(X_test[col]) or is_datetime64tz_dtype(X_test[col])
+                                        or col in ["datetime", "timestamp"]):
                                     cols_to_drop.append(col)
                             if cols_to_drop:
                                 X_test_pred = X_test.drop(columns=cols_to_drop)
                             else:
                                 X_test_pred = X_test
-                                ml_preds = model.predict(X_test_pred)
-                                ml_preds = np.array(ml_preds).flatten()
-                                preds.append(ml_preds)
+                            ml_preds = model.predict(X_test_pred)
+                            ml_preds = np.array(ml_preds).flatten()
+                            preds.append(ml_preds)
 
                         # Align all predictions to the minimum available length
                         min_len = min(len(p) for p in preds)
@@ -1299,8 +1479,14 @@ class RLTradingPipeline:
                 # We'll assume meta_signals are in the same order as meta_X/meta_y, which are built sequentially for all tickers.
                 # We'll split meta_signals back into per-ticker segments for reporting.
 
+                ib = getattr(self.market_data_adapter, 'ib', None)
+                if ib is not None and not ib.isConnected():
+                    logging.warning("Meta-model trading skipped: IB connection unavailable.")
+                    ib = None
+
                 signal_idx = 0
                 tickers_with_meta = []
+                meta_trades_executed = False
                 for ticker in features:
                     X = features[ticker]
                     y = labels[ticker]
@@ -1309,9 +1495,22 @@ class RLTradingPipeline:
                         X_test = X.iloc[split_idx:]
                         n = len(X_test)
                         if meta_signals is not None and signal_idx + n <= len(meta_signals):
+                            if ib is None:
+                                logging.warning("Meta-model trading skipped for %s: IB connection unavailable.", ticker)
+                                signal_idx += n
+                                continue
+
+                            try:
+                                canonical = self.market_data_adapter._canonical_symbol(ticker)
+                                contract = self.market_data_adapter._get_contract(canonical)
+                            except Exception as exc:
+                                logging.warning("Meta-model trading skipped for %s: contract error %s", ticker, exc)
+                                signal_idx += n
+                                continue
+
                             ticker_signals = meta_signals[signal_idx:signal_idx + n]
                             prices = X_test['close'].values
-                            position = 0  # if=long, -1=short, 0=flat
+                            position = self.ppo_live_positions.get(ticker, 0)
                             balance = 100000
                             trade_log = []
 
@@ -1320,6 +1519,7 @@ class RLTradingPipeline:
                             starting_equity = balance
                             daily_pnl = 0.0
                             trading_halted_for_day = False
+                            trades_today = 0
 
                             for i, signal in enumerate(ticker_signals):
                                 # check if a new day has started
@@ -1332,6 +1532,8 @@ class RLTradingPipeline:
                                     trades_today = 0
 
                                 prev_position = position
+                                current_price = float(prices[min(i, len(prices) - 1)])
+                                previous_price = float(prices[i - 1]) if i > 0 else current_price
 
                                 # Update daily PnL
                                 daily_pnl = balance - starting_equity
@@ -1358,7 +1560,10 @@ class RLTradingPipeline:
                                         if order_size <= MAX_ORDER_SIZE:
                                             position += order_size
                                             execute_trade(ib, contract, 'BUY', order_size)
+                                            self._emit_bridge_decision(ticker, 'BUY', order_size, confidence=0.6, reason="meta_model")
                                             trades_today += 1
+                                            trade_log.append(("buy", order_size, current_price))
+                                            meta_trades_executed = True
                                         else:
                                             print(f"Order size {order_size} exceeds max allowed ({MAX_ORDER_SIZE}). No BUY executed.")
                                     else:
@@ -1368,7 +1573,10 @@ class RLTradingPipeline:
                                         if order_size <= MAX_ORDER_SIZE:
                                             position -= order_size
                                             execute_trade(ib, contract, 'SELL', order_size)
+                                            self._emit_bridge_decision(ticker, 'SELL', order_size, confidence=0.6, reason="meta_model")
                                             trades_today += 1
+                                            trade_log.append(("sell", order_size, current_price))
+                                            meta_trades_executed = True
                                         else:
                                             print(f"Order size {order_size} exceeds max allowed ({MAX_ORDER_SIZE}). No SELL executed.")
                                     else:
@@ -1377,11 +1585,12 @@ class RLTradingPipeline:
                                     position = 0
                                 # No trade for hold
                             if i > 0:
-                                balance += prev_position * (price - prices[i-1])
+                                balance += prev_position * (current_price - previous_price)
                             print(f"\n=== Meta-Model Trading Results for {ticker} ===")
                             print(f"Final balance: {balance:.2f}")
                             print(f"Total trades: {len([t for t in trade_log if t[0] != 'hold'])}")
                             print(f"Trade log (first 10): {trade_log[:10]}")
+                            self.ppo_live_positions[ticker] = position
                             signal_idx += n
                             tickers_with_meta.append(ticker)
                         else:
@@ -1392,6 +1601,13 @@ class RLTradingPipeline:
                             else:
                                 print("meta_signals is None (meta-model was not trained this run).")
                 # === End Meta-Model Trading Simulation Block ===
+
+                if not meta_trades_executed:
+                    fallback_executed = self._execute_ppo_fallback(features, models_from_s3)
+                    if fallback_executed:
+                        logging.info("Executed PPO fallback orders (meta stack unavailable).")
+                    else:
+                        logging.info("No trades executed: meta stack and PPO fallback both idle this run.")
 
                 # === Begin Ensemble Voting Block ===
                 logging.warning("ENSEMBLE SYSTEM: Running ensemble voting for all tickers.")
@@ -1418,7 +1634,8 @@ class RLTradingPipeline:
                         # Drop any datetime or identifier columns from features before prediction
                         cols_to_drop = []
                         for col in X_test.columns:
-                            if np.issubdtype(X_test[col].dtype, np.datetime64) or col in ["datetime", "timestamp"]:
+                            if (is_datetime64_any_dtype(X_test[col]) or is_datetime64tz_dtype(X_test[col])
+                                    or col in ["datetime", "timestamp"]):
                                 cols_to_drop.append(col)
                         if cols_to_drop:
                             X_test_pred = X_test.drop(columns=cols_to_drop)
@@ -1501,30 +1718,59 @@ class RLTradingPipeline:
                 prev_key = get_latest_model_key(self.config['s3_bucket'], "models/", exclude_run_id=self.run_id)
                 if prev_key:
                     model = load_model_from_s3(self.config['s3_bucket'], prev_key)
-                    logging.info(f"Rolled back to previous model: {prev_key}")
-                    # RL model rollback
-                    if prev_key.endswith("_ppo.zip"):
-                        from stable_baselines3 import PPO
-                        local_ppo_path = "/tmp/" + os_mod.path.basename(prev_key)
-                        s3 = boto3.client("s3")
-                        s3.download_file(self.config['s3_bucket'], prev_key, local_ppo_path)
-                        self.ppo_model = PPO.load(local_ppo_path)
-                        logging.info("self.ppo_model has been set to the rolled-back PPO model.")
-                        os_mod.remove(local_ppo_path)
-                    # ML model rollback
-                    elif prev_key.endswith(".joblib"):
-                        import re
-                        match = re.search(r"models/[^/]+/([^_]+)_([^/]+)\.joblib", prev_key)
-                        if match:
-                            ticker, model_name = match.groups()
-                            if not hasattr(self, "ml_models"):
-                                self.ml_models = {}
-                            if ticker not in self.ml_models:
-                                self.ml_models[ticker] = {}
-                            self.ml_models[ticker][model_name] = model
-                            logging.info(f"Rolled back ML model for {ticker} - {model_name}.")
+                    if model is None and prev_key.endswith(".joblib"):
+                        logging.warning("S3 load returned None for %s despite key presence.", prev_key)
+                    else:
+                        logging.info(f"Rolled back to previous model: {prev_key}")
+                        # RL model rollback
+                        if prev_key.endswith("_ppo.zip"):
+                            from stable_baselines3 import PPO
+                            local_ppo_path = "/tmp/" + os_mod.path.basename(prev_key)
+                            s3 = boto3.client("s3")
+                            s3.download_file(self.config['s3_bucket'], prev_key, local_ppo_path)
+                            self.ppo_model = PPO.load(local_ppo_path)
+                            logging.info("self.ppo_model has been set to the rolled-back PPO model.")
+                            os_mod.remove(local_ppo_path)
+                        # ML model rollback
+                        elif prev_key.endswith(".joblib"):
+                            import re
+                            match = re.search(r"models/[^/]+/([^_]+)_([^/]+)\.joblib", prev_key)
+                            if match:
+                                ticker, model_name = match.groups()
+                                if not hasattr(self, "ml_models"):
+                                    self.ml_models = {}
+                                if ticker not in self.ml_models:
+                                    self.ml_models[ticker] = {}
+                                self.ml_models[ticker][model_name] = model
+                                logging.info(f"Rolled back ML model for {ticker} - {model_name}.")
                 else:
-                    logger.error("No previous model found for rollback.")
+                    prev_path = get_latest_local_artifact(exclude_run_id=self.run_id)
+                    if prev_path:
+                        logging.info("Rolled back using local artifact: %s", prev_path)
+                        if prev_path.suffix == ".zip":
+                            try:
+                                self.ppo_model = PPO.load(str(prev_path))
+                                logging.info("self.ppo_model has been set to the rolled-back local PPO model.")
+                            except Exception as exc:
+                                logging.error("Failed to load local PPO rollback artifact %s: %s", prev_path, exc)
+                        elif prev_path.suffix == ".joblib":
+                            try:
+                                model = joblib.load(prev_path)
+                            except Exception as exc:
+                                logging.error("Failed to load local ML rollback artifact %s: %s", prev_path, exc)
+                            else:
+                                import re
+                                match = re.match(r"(.+?)_([^_]+)\.joblib$", prev_path.name)
+                                if match:
+                                    ticker, model_name = match.groups()
+                                    if not hasattr(self, "ml_models"):
+                                        self.ml_models = {}
+                                    self.ml_models.setdefault(ticker, {})[model_name] = model
+                                    logging.info(f"Rolled back ML model for {ticker} - {model_name} from local cache.")
+                                else:
+                                    logging.warning("Could not parse ticker/model from %s; rollback skipped.", prev_path)
+                    else:
+                        logger.error("No previous model found for rollback (S3 disabled and no local checkpoints).")
                 if retries >= self.max_retries:
                     logger.error("Max retries reached. Failing pipeline.")
                     raise
@@ -1540,11 +1786,106 @@ class RLTradingPipeline:
         else:
             logging.info(f"Notification: {message}")
 
+    def _emit_bridge_decision(self, ticker: str, side: str, quantity: int, confidence: float, reason: str) -> None:
+        """Append a JSON line decision for the orders bridge."""
+        payload = {
+            "ts": datetime.utcnow().isoformat(),
+            "symbol": ticker,
+            "side": side.upper(),
+            "qty": int(quantity),
+            "confidence": float(confidence),
+            "reason": reason,
+        }
+        try:
+            audit_path = Path.home() / "trade_audit_log.jsonl"
+            with audit_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(payload) + "\n")
+        except Exception as exc:
+            logging.warning("Failed to append trade decision for bridge: %s", exc)
+
+    def _execute_ppo_fallback(self, features: Dict[str, pd.DataFrame], models_from_registry: Dict[str, Dict[str, Any]]) -> bool:
+        """Execute trades using PPO-only signals when meta stack is unavailable."""
+        ib = getattr(self.market_data_adapter, 'ib', None)
+        if ib is None or not ib.isConnected():
+            logging.warning("PPO fallback skipped: IB connection unavailable.")
+            return False
+
+        executed = False
+        live_window = int(self.config.get('ppo_live_window', 120))
+
+        for ticker, df in features.items():
+            model = models_from_registry.get(ticker, {}).get("PPO")
+            if model is None:
+                model = load_local_ppo_model(ticker)
+            if model is None:
+                logging.debug("PPO fallback: no model for %s", ticker)
+                continue
+
+            data_window = df.tail(live_window)
+            if data_window.empty:
+                logging.debug("PPO fallback: insufficient data for %s", ticker)
+                continue
+
+            env = TradingEnv(data_window)
+            if getattr(model, 'observation_space', None) is not None:
+                if model.observation_space.shape != env.observation_space.shape:
+                    logging.warning(
+                        "PPO fallback skipped for %s: obs shape mismatch %s != %s",
+                        ticker,
+                        model.observation_space.shape,
+                        env.observation_space.shape,
+                    )
+                    continue
+
+            obs, info = env.reset()
+            done = False
+            last_action = 0
+            while not done:
+                action, _ = model.predict(obs, deterministic=True)
+                obs, reward, terminated, truncated, info = env.step(action)
+                done = terminated or truncated
+                last_action = int(action)
+
+            target_position = 0
+            if last_action == 1:
+                target_position = 1
+            elif last_action == 2:
+                target_position = -1
+
+            prev_position = self.ppo_live_positions.get(ticker, 0)
+            if target_position == prev_position:
+                logging.debug("PPO fallback: no position change for %s", ticker)
+                continue
+
+            side = 'BUY' if target_position > prev_position else 'SELL'
+            quantity = abs(target_position - prev_position)
+            if quantity == 0:
+                continue
+
+            try:
+                canonical = self.market_data_adapter._canonical_symbol(ticker)
+                contract = self.market_data_adapter._get_contract(canonical)
+            except Exception as exc:
+                logging.warning("PPO fallback: failed to qualify contract for %s: %s", ticker, exc)
+                continue
+
+            execute_trade(ib, contract, side, quantity)
+            self._emit_bridge_decision(ticker, side, quantity, confidence=0.55, reason="ppo_fallback")
+            self.ppo_live_positions[ticker] = target_position
+            executed = True
+
+        return executed
+
     def train_ppo(self, train_data, ticker, save_path=None):
         env = TradingEnv(train_data)
         check_env(env)
         ppo_logger = PPOTrainingLogger()
-        ppo_key = get_latest_model_key(self.config['s3_bucket'], f"models/{self.run_id}/{ticker}_ppo.zip")
+        feature_signature = compute_feature_signature(env.numeric_columns)
+        regime_suffix = "highvol" if detect_regime(train_data['close']) == "high_vol" else "normal"
+        ppo_key = get_latest_model_key(
+            self.config['s3_bucket'],
+            f"models/{self.run_id}/{ticker}_ppo__{feature_signature}.zip"
+        )
         local_ppo_path = "/tmp/ppo_model.zip"
         if ppo_key:
             model = None
@@ -1566,35 +1907,83 @@ class RLTradingPipeline:
             model.learn(total_timesteps=10000, callback=ppo_logger)
         self.ppo_model = model
         ppo_logger.print_summary()
-        ppo_key = f"models/{self.run_id}/{ticker}_ppo.zip"
+        target_filename = ppo_filename(ticker, regime_suffix, feature_signature)
         if save_path is None:
-            save_path = "/tmp/ppo_model.zip"
-        model.save(save_path)
+            save_path_path = _ensure_dir(LOCAL_PPO_DIR) / target_filename
+        else:
+            save_path_path = Path(save_path)
+            _ensure_dir(save_path_path.parent)
+        model.save(str(save_path_path))
+
+        stack_dir = _ensure_dir(LOCAL_STACKING_DIR / str(self.run_id))
+        stack_model_path = stack_dir / f"{ticker}_ppo__{feature_signature}.zip"
+        model.save(str(stack_model_path))
+
         if _s3_enabled():
             s3 = boto3.client("s3")
-            s3.upload_file(save_path, self.config['s3_bucket'], ppo_key)
+            s3.upload_file(str(stack_model_path), self.config['s3_bucket'], f"models/{self.run_id}/{stack_model_path.name}")
         else:
-            logging.info("S3 disabled; skipping upload of PPO model to s3://%s/%s", self.config['s3_bucket'], ppo_key)
-        if save_path == "/tmp/ppo_model.zip" and os_mod.path.exists(save_path):
-            os_mod.remove(save_path)
-        logging.info(f"Retraining event: PPO model for {ticker} retrained and saved as {ppo_key}")
+            logging.info(
+                "S3 disabled; skipping upload of PPO model to s3://%s/models/%s",
+                self.config['s3_bucket'],
+                stack_model_path.name,
+            )
+
+        logging.info(
+            "Retraining event: PPO model for %s saved locally to %s and %s",
+            ticker,
+            save_path_path,
+            stack_model_path,
+        )
         print("PPO training complete.")
 
     def run_ppo(self, test_data, ticker):
         from stable_baselines3 import PPO
         env = TradingEnv(test_data)
         regime = detect_regime(test_data['close'])
-        models_dir = Path(os_mod.getenv("MODELS_DIR", str(Path.home()/"models")))
-        if regime == "high_vol":
-            model_path = str(models_dir / f"ppo_model_{ticker}_highvol.zip")
-        else:
-            model_path = str(models_dir / f"ppo_model_{ticker}_normal.zip")
-        if not os_mod.path.exists(model_path):
-            model_path = str(models_dir / f"ppo_model_{ticker}.zip")
-        if not os_mod.path.exists(model_path):
-            logging.warning(f"No PPO model found for {ticker} at {model_path}; skipping PPO run.")
+        regime_suffix = "highvol" if regime == "high_vol" else "normal"
+        expected_signature = compute_feature_signature(env.numeric_columns)
+
+        ppo_dir = LOCAL_PPO_DIR
+        candidate = ppo_dir / ppo_filename(ticker, regime_suffix, expected_signature)
+
+        if not candidate.exists():
+            mismatched = sorted(ppo_dir.glob(ppo_filename(ticker, regime_suffix, "*").replace(expected_signature, "*")))
+            mismatched = [path for path in mismatched if path.name != candidate.name]
+            if mismatched:
+                logging.warning(
+                    "Skipping PPO model for %s: no file matching feature signature %s (found %s)",
+                    ticker,
+                    expected_signature,
+                    [path.name for path in mismatched],
+                )
+                self.ppo_model = None
+                return 0.0
+
+            legacy_candidate = ppo_dir / legacy_ppo_filename(ticker, regime_suffix)
+            if legacy_candidate.exists():
+                candidate = legacy_candidate
+            else:
+                logging.warning(f"No PPO model found for {ticker} at {candidate}; skipping PPO run.")
+                self.ppo_model = None
+                return 0.0
+
+        try:
+            self.ppo_model = PPO.load(str(candidate))
+        except Exception as exc:
+            logging.warning(f"Failed to load PPO model %s: %s", candidate, exc)
+            self.ppo_model = None
             return 0.0
-        self.ppo_model = PPO.load(model_path)
+
+        if self.ppo_model.observation_space.shape != env.observation_space.shape:
+            logging.warning(
+                "Discarding PPO model %s: observation space mismatch %s != %s; retrain required.",
+                candidate,
+                self.ppo_model.observation_space.shape,
+                env.observation_space.shape,
+            )
+            self.ppo_model = None
+            return 0.0
         obs, info = env.reset()
         done = False
         total_reward = 0.0
@@ -1640,6 +2029,11 @@ default_config = {
     "s3_bucket": "omega-singularity-ml",
     "max_retries": 3,
     "retry_delay": 10,
+    "min_samples_per_model": 1440,
+    "ml_full_min_samples": 1440,
+    "ml_incremental_min_samples": 120,
+    "ml_rolling_window": 1440,
+    "ml_retrain_every_min": 60,
     # AI_ASSISTANT_TODO: Set to False before enabling live IBKR data!
     "disable_drift_detection": True,  # TEMP: Disable drift detection for mock data testing
     "drift_detection_threshold": 10.0  # Relaxed for mock data; set to 3.0 for production

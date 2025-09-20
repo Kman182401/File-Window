@@ -174,6 +174,11 @@ class PerformanceTracker:
             'memory_increase': 1.3,  # 30% increase
             'error_rate_increase': 2.0  # 100% increase
         }
+        self.regression_counters = defaultdict(int)
+        self.min_baseline_samples = int(os.getenv('PERF_BASELINE_MIN_SAMPLES', '30'))
+        self.latency_baseline_floor_ms = float(os.getenv('PERF_LATENCY_BASELINE_FLOOR_MS', '5.0'))
+        self.latency_min_absolute_increase_ms = float(os.getenv('PERF_LATENCY_MIN_ABS_MS', '10.0'))
+        self.regression_sustain_count = int(os.getenv('PERF_REGRESSION_SUSTAIN_COUNT', '3'))
         
         # Alert system
         self.alert_callbacks = []
@@ -294,64 +299,117 @@ class PerformanceTracker:
         """Detect if current performance represents a regression"""
         with self._lock:
             history = self.performance_history[metric_name]
-            
-            if len(history) < 10:  # Need sufficient history
-                history.append(current_value)
+            history.append(current_value)
+
+            if len(history) < self.min_baseline_samples:
                 return None
-            
-            # Calculate baseline (median of recent history)
-            baseline = statistics.median(list(history))
-            
-            # Check for regression based on metric type
+
+            values = list(history)
+            if len(values) > 1:
+                baseline_samples = values[:-1]
+                current_sample = values[-1]
+            else:
+                baseline_samples = values
+                current_sample = values[0]
+
+            if not baseline_samples:
+                return None
+
+            baseline_raw = statistics.median(baseline_samples)
+            metric_lower = metric_name.lower()
+            is_latency_metric = 'latency' in metric_lower or 'time' in metric_lower
+
             regression_detected = False
             degradation_percent = 0.0
-            
-            if 'latency' in metric_name.lower() or 'time' in metric_name.lower():
-                # Higher is worse for latency/time metrics
-                if current_value > baseline * self.regression_thresholds['latency_degradation']:
+
+            if is_latency_metric:
+                baseline = max(baseline_raw, self.latency_baseline_floor_ms)
+                current = max(current_sample, self.latency_baseline_floor_ms)
+
+                absolute_delta = current - baseline
+                if absolute_delta < self.latency_min_absolute_increase_ms:
+                    self.regression_counters[metric_name] = 0
+                    history[-1] = current  # store sanitized value
+                    return None
+
+                if current > baseline * self.regression_thresholds['latency_degradation']:
                     regression_detected = True
-                    degradation_percent = ((current_value - baseline) / baseline) * 100
-            
-            elif 'throughput' in metric_name.lower() or 'rate' in metric_name.lower():
-                # Lower is worse for throughput metrics
-                if current_value < baseline * self.regression_thresholds['throughput_degradation']:
+                    degradation_percent = ((current - baseline) / baseline) * 100
+
+                history[-1] = current
+                baseline_value = baseline
+                current_value_sanitized = current
+
+            elif 'throughput' in metric_lower or 'rate' in metric_lower:
+                baseline = baseline_raw
+                current = current_sample
+                if baseline <= 0:
+                    history[-1] = current
+                    return None
+                if current < baseline * self.regression_thresholds['throughput_degradation']:
                     regression_detected = True
-                    degradation_percent = ((baseline - current_value) / baseline) * 100
-            
-            elif 'memory' in metric_name.lower():
-                # Higher is worse for memory metrics
-                if current_value > baseline * self.regression_thresholds['memory_increase']:
+                    degradation_percent = ((baseline - current) / baseline) * 100
+                baseline_value = baseline
+                current_value_sanitized = current
+
+            elif 'memory' in metric_lower:
+                baseline = baseline_raw
+                current = current_sample
+                if baseline <= 0:
+                    history[-1] = current
+                    return None
+                if current > baseline * self.regression_thresholds['memory_increase']:
                     regression_detected = True
-                    degradation_percent = ((current_value - baseline) / baseline) * 100
-            
-            elif 'error' in metric_name.lower():
-                # Higher is worse for error metrics
-                if current_value > baseline * self.regression_thresholds['error_rate_increase']:
+                    degradation_percent = ((current - baseline) / baseline) * 100
+                baseline_value = baseline
+                current_value_sanitized = current
+
+            elif 'error' in metric_lower:
+                baseline = baseline_raw
+                current = current_sample
+                if baseline <= 0:
+                    history[-1] = current
+                    return None
+                if current > baseline * self.regression_thresholds['error_rate_increase']:
                     regression_detected = True
-                    degradation_percent = ((current_value - baseline) / baseline) * 100
-            
-            # Update history
-            history.append(current_value)
-            
+                    degradation_percent = ((current - baseline) / baseline) * 100
+                baseline_value = baseline
+                current_value_sanitized = current
+
+            else:
+                baseline_value = baseline_raw
+                current_value_sanitized = current_sample
+
             if regression_detected:
-                severity = 'CRITICAL' if degradation_percent > 100 else 'HIGH' if degradation_percent > 50 else 'MEDIUM'
-                
-                regression_info = {
-                    'timestamp': datetime.now().isoformat(),
-                    'metric_name': metric_name,
-                    'baseline_value': baseline,
-                    'current_value': current_value,
-                    'degradation_percent': degradation_percent,
-                    'severity': severity
-                }
-                
-                # Log to audit database
-                self._log_regression_to_db(regression_info)
-                
-                logger.warning(f"Performance regression detected: {metric_name} degraded by {degradation_percent:.1f}% (severity: {severity})")
-                return regression_info
-            
-            return None
+                self.regression_counters[metric_name] += 1
+                if self.regression_counters[metric_name] < self.regression_sustain_count:
+                    return None
+            else:
+                if self.regression_counters.get(metric_name):
+                    self.regression_counters[metric_name] = 0
+                return None
+
+            severity = 'CRITICAL' if degradation_percent > 100 else 'HIGH' if degradation_percent > 50 else 'MEDIUM'
+
+            regression_info = {
+                'timestamp': datetime.now().isoformat(),
+                'metric_name': metric_name,
+                'baseline_value': baseline_value,
+                'current_value': current_value_sanitized,
+                'degradation_percent': degradation_percent,
+                'severity': severity,
+                'sustain_count': self.regression_counters[metric_name]
+            }
+
+            self._log_regression_to_db(regression_info)
+
+            logger.warning(
+                "Performance regression detected: %s degraded by %.1f%% (severity: %s)",
+                metric_name,
+                degradation_percent,
+                severity,
+            )
+            return regression_info
     
     def _log_regression_to_db(self, regression_info: Dict[str, Any]):
         """Log performance regression to audit database"""
