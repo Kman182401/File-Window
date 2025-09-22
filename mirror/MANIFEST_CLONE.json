@@ -1,11 +1,16 @@
 {
-  "generated_at": "2025-09-22T17:05:31Z",
+  "generated_at": "2025-09-22T17:45:02Z",
   "root": "/home/karson/File-Window/mirror",
   "files": [
     {
       "path": ".gitkeep",
       "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
       "size": 0
+    },
+    {
+      "path": "MANIFEST_CLONE.json",
+      "sha256": "c3a7076516da726dd8023a4fd9b06330f46b2ea70b082322ef51e28c68a3f5fc",
+      "size": 2694
     },
     {
       "path": "repo/config/env.example",
@@ -74,8 +79,8 @@
     },
     {
       "path": "repo/src/rl_trading_pipeline.py",
-      "sha256": "bdfa85b2b39e39e1ffa2ef898b85e0c49a5ed74ab5a6a206317cc00036ce016c",
-      "size": 134691
+      "sha256": "39ded9d6dbbab29a906f23c462f9d3d340dfa3db5cc40b75737cf3b75b5cd11f",
+      "size": 134769
     },
     {
       "path": "repo/src/trading_config.py",
