@@ -7,8 +7,6 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
-
-import numpy as np
 import torch
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
