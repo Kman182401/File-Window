@@ -17,3 +17,16 @@ Help me retire the 2016 high school budget PC and move this system onto a real A
 
 - Primary: Cash App tag: `$YaBoiBroke7567` → https://cash.app/$YaBoiBroke7567
 - Prefer email for larger contributions or hardware offers: komanderkody18@gmail.com
+
+## Syncing for ChatGPT
+
+The `bin/file_window_sync` utility mirrors the live trading system into this repository without touching source locations. Key pieces:
+
+- Configuration lives in `.file-window-sync.yml`; an annotated sample is available at `examples/.file-window-sync.example.yml`.
+- Default mirrors land under `mirror/` alongside a generated `MANIFEST_SYNC.json` so ChatGPT can locate every file with checksums.
+- Run a dry-run audit: `./bin/file_window_sync`.
+- Apply changes and push: `./bin/file_window_sync --push` or the shorthand wrapper `./bin/fw-sync`.
+- Optional safety rails: `--scan-secrets`, `--allow-large`, `--tag`, `--pr`, `--manifest/--no-manifest`, and `--update-metadata` for `GPT_SYNC_VERSION.md`. Mark rarely used sources with `optional: true` to skip missing directories.
+- A `Makefile` target (`make sync`) and cron/example snippets in `docs/file_window_sync.md` provide additional automation options.
+
+The script never edits the original sources—only the mirrored copies living inside this repository.

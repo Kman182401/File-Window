@@ -1,5 +1,14 @@
 # GPT Files Repository Sync Version
 
+<!-- SYNC METADATA START -->
+- Last sync: not yet run with file_window_sync
+- Files mirrored: unknown
+- Total mirror bytes: unknown
+- Added files: 0
+- Changed files: 0
+- Deleted files: 0
+<!-- SYNC METADATA END -->
+
 ## Current Version: 2025.09.13.001
 
 ### Last Sync Information

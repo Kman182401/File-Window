@@ -1,0 +1,138 @@
+# Example configuration for file_window_sync
+# Copy to .file-window-sync.yml and tweak paths and exclusions as needed.
+dest_subdir: mirror
+prune_deleted: true
+max_file_size_mb: 15
+manifest:
+  enabled: true
+  path: mirror/MANIFEST_SYNC.json
+metadata:
+  gpt_sync_version: GPT_SYNC_VERSION.md
+exclude:
+  - "*.log"
+  - "*.tmp"
+  - "*.cache"
+  - "*.parquet"
+  - "*.csv"
+  - "*.csv.gz"
+  - "*.feather"
+  - "*.ipynb"
+  - "*.bak"
+  - "*.pid"
+  - "__pycache__/"
+  - ".mypy_cache/"
+  - ".pytest_cache/"
+  - ".git/"
+  - ".DS_Store"
+  - "mirror/"
+  - "logs/"
+  - "ibg_logs/"
+  - "env/"
+sources:
+  # Core top-level modules
+  - path: ~/File-Window/run_adaptive_trading.py
+    dest: root
+  - path: ~/File-Window/market_data_ibkr_adapter.py
+    dest: root
+  - path: ~/File-Window/feature_engineering.py
+    dest: root
+  - path: ~/File-Window/enhanced_trading_environment.py
+    dest: root
+  - path: ~/File-Window/sac_trading_agent.py
+    dest: root
+  - path: ~/File-Window/recurrent_ppo_agent.py
+    dest: root
+  - path: ~/File-Window/algorithm_selector.py
+    dest: root
+  - path: ~/File-Window/paper_trading_executor.py
+    dest: root
+  - path: ~/File-Window/phase3_enhanced_system.py
+    dest: root
+  - path: ~/File-Window/ensemble_rl_coordinator.py
+    dest: root
+  - path: ~/File-Window/online_learning_system.py
+    dest: root
+  - path: ~/File-Window/meta_learning_selector.py
+    dest: root
+  - path: ~/File-Window/lightgbm_signal_validator.py
+    dest: root
+  - path: ~/File-Window/jax_advanced_features.py
+    dest: root
+  - path: ~/File-Window/jax_technical_indicators.py
+    dest: root
+  - path: ~/File-Window/demo_complete_trading_intelligence.py
+    dest: root
+  - path: ~/File-Window/verify_trading_intelligence.py
+    dest: root
+  - path: ~/File-Window/test_production_readiness.py
+    dest: root
+  - path: ~/File-Window/advanced_risk_management.py
+    dest: root
+  - path: ~/File-Window/comprehensive_system_monitor.py
+    dest: root
+  - path: ~/File-Window/market_data_config.py
+    dest: root
+  - path: ~/File-Window/memory_management_system.py
+    dest: root
+  - path: ~/File-Window/error_handling_system.py
+    dest: root
+  - path: ~/File-Window/system_optimization_config.py
+    dest: root
+  - path: ~/File-Window/audit_logging_utils.py
+    dest: root
+  - path: ~/File-Window/neural_feature_extractor.py
+    dest: root
+  - path: ~/File-Window/news_ingestion_marketaux.py
+    dest: root
+  - path: ~/File-Window/news_ingestion_ibkr.py
+    dest: root
+  - path: ~/File-Window/news_data_utils.py
+    dest: root
+  - path: ~/File-Window/ibkr_paper_broker.py
+    dest: root
+  - path: ~/File-Window/order_management_system.py
+    dest: root
+  - path: ~/File-Window/requirements.txt
+    dest: root
+
+  # Repository directories (mirrored under repo/)
+  - path: ~/File-Window/src
+    dest: repo/src
+    exclude:
+      - "__pycache__/"
+  - path: ~/File-Window/utils
+    dest: repo/utils
+  - path: ~/File-Window/tests
+    dest: repo/tests
+  - path: ~/File-Window/configs
+    dest: repo/configs
+  - path: ~/File-Window/docs
+    dest: repo/docs
+  - path: ~/File-Window/bin
+    dest: repo/bin
+    exclude:
+      - "*.bak*"
+  - path: ~/File-Window/monitoring
+    dest: repo/monitoring
+  - path: ~/File-Window/ml
+    dest: repo/ml
+  - path: ~/File-Window/ops
+    dest: repo/ops
+  - path: ~/File-Window/orders
+    dest: repo/orders
+  - path: ~/File-Window/tools
+    dest: repo/tools
+
+  # Optional external directories (skipped if missing)
+  - path: ~/orders
+    dest: external/orders
+    optional: true
+  - path: ~/tools
+    dest: external/tools
+    optional: true
+  - path: ~/configs
+    dest: external/configs
+    optional: true
+  - path: ~/tests
+    dest: external/tests
+    optional: true

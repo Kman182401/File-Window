@@ -1,0 +1,573 @@
+#!/usr/bin/env python3
+"""Mirror trading-system files into the File-Window repo and push updates.
+
+This script implements the Option A workflow described in the sync plan. It
+copies whitelisted files into the repo under the configured mirror directory
+without mutating the original sources, stages the results, optionally commits,
+creates manifests/tags/branches, and pushes to GitHub.
+"""
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import fnmatch
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+
+try:
+    import yaml  # type: ignore
+except Exception:  # pragma: no cover - PyYAML is required for this tool
+    print("[file_window_sync] Missing dependency: PyYAML. Install with 'pip install pyyaml'.", file=sys.stderr)
+    sys.exit(2)
+
+RSYNC_OUT_FORMAT = "%i|%n%L"
+ALWAYS_EXCLUDES = [".git/", "mirror/"]
+
+
+@dataclass
+class SourceSpec:
+    source: Path
+    dest: Path
+    is_dir: bool
+    excludes: List[str] = field(default_factory=list)
+    allow_delete: bool = False
+    optional: bool = False
+
+
+@dataclass
+class SyncSummary:
+    added: int = 0
+    changed: int = 0
+    deleted: int = 0
+    dirs_added: int = 0
+    missing_sources: List[Path] = field(default_factory=list)
+    skipped_large: List[Tuple[Path, int]] = field(default_factory=list)
+    rsync_outputs: Dict[str, List[str]] = field(default_factory=dict)
+
+    def record(self, key: str, lines: Sequence[str]) -> None:
+        if lines:
+            self.rsync_outputs.setdefault(key, []).extend(lines)
+
+    def aggregate(self, other: "SyncSummary") -> None:
+        self.added += other.added
+        self.changed += other.changed
+        self.deleted += other.deleted
+        self.dirs_added += other.dirs_added
+        self.missing_sources.extend(other.missing_sources)
+        self.skipped_large.extend(other.skipped_large)
+        for key, lines in other.rsync_outputs.items():
+            self.record(key, lines)
+
+
+def run(cmd: Sequence[str], cwd: Optional[Path] = None, check: bool = True, capture: bool = False) -> subprocess.CompletedProcess:
+    proc = subprocess.run(
+        cmd,
+        cwd=str(cwd) if cwd else None,
+        check=check,
+        text=True,
+        capture_output=capture,
+    )
+    return proc
+
+
+def git_root() -> Path:
+    proc = run(["git", "rev-parse", "--show-toplevel"], capture=True)
+    return Path(proc.stdout.strip())
+
+
+def load_config(path: Path) -> Dict:
+    with path.open("r", encoding="utf-8") as fh:
+        return yaml.safe_load(fh) or {}
+
+
+def ensure_clean_tree(root: Path, force: bool) -> None:
+    status = run(["git", "status", "--porcelain"], cwd=root, capture=True)
+    if status.stdout.strip() and not force:
+        print("[file_window_sync] Working tree is dirty. Use --force to override.", file=sys.stderr)
+        sys.exit(1)
+
+
+def build_source_specs(config: Dict, root: Path) -> Tuple[List[SourceSpec], List[str]]:
+    dest_dir = config.get("dest_subdir")
+    if not dest_dir:
+        raise SystemExit("dest_subdir must be set in .file-window-sync.yml")
+    dest_base = root / dest_dir
+    dest_base.mkdir(parents=True, exist_ok=True)
+
+    global_excludes = list(config.get("exclude", [])) + ALWAYS_EXCLUDES
+    specs: List[SourceSpec] = []
+    warnings: List[str] = []
+
+    for entry in config.get("sources", []):
+        optional = False
+        entry_excludes: List[str] = []
+        dest_rel = None
+
+        if isinstance(entry, str):
+            src_raw = entry
+        elif isinstance(entry, dict):
+            src_raw = entry.get("path")
+            if not src_raw:
+                warnings.append("Skipping source entry without 'path'.")
+                continue
+            entry_excludes = list(entry.get("exclude", []))
+            optional = bool(entry.get("optional"))
+            dest_rel_raw = entry.get("dest")
+            if dest_rel_raw:
+                dest_rel = Path(str(dest_rel_raw))
+        else:
+            warnings.append(f"Skipping unsupported source entry: {entry}")
+            continue
+
+        src_path = Path(os.path.expanduser(str(src_raw))).resolve()
+        if dest_rel is None:
+            dest_rel = Path(src_path.name)
+
+        if not src_path.exists():
+            if optional:
+                continue
+            warnings.append(f"Source missing: {src_path}")
+            continue
+
+        is_dir = src_path.is_dir()
+        allow_delete = bool(config.get("prune_deleted", True) and is_dir)
+
+        if is_dir:
+            dest_path = dest_base / dest_rel
+        else:
+            if dest_rel.suffix:
+                dest_path = dest_base / dest_rel
+            else:
+                dest_path = dest_base / dest_rel / src_path.name
+
+        dest_parent = dest_path if is_dir else dest_path.parent
+        dest_parent.mkdir(parents=True, exist_ok=True)
+
+        combined_excludes = global_excludes + entry_excludes
+        specs.append(SourceSpec(
+            source=src_path,
+            dest=dest_path,
+            is_dir=is_dir,
+            excludes=combined_excludes,
+            allow_delete=allow_delete,
+            optional=optional,
+        ))
+
+    return specs, warnings
+
+
+def rsync_available() -> bool:
+    return shutil.which("rsync") is not None
+
+
+def build_rsync_cmd(spec: SourceSpec, dry_run: bool, max_size_mb: Optional[float], allow_large: bool) -> List[str]:
+    if not rsync_available():
+        raise SystemExit("rsync is required but not installed.")
+
+    cmd = [
+        "rsync",
+        "--archive",
+        "--human-readable",
+        "--itemize-changes",
+        f"--out-format={RSYNC_OUT_FORMAT}",
+        "--prune-empty-dirs",
+    ]
+    if spec.allow_delete:
+        cmd.append("--delete")
+    if dry_run:
+        cmd.append("--dry-run")
+    if max_size_mb and not allow_large:
+        cmd.append(f"--max-size={max_size_mb}m")
+    for pattern in spec.excludes:
+        cmd.extend(["--exclude", pattern])
+
+    if spec.is_dir:
+        src_arg = str(spec.source) + "/"
+        dst_arg = str(spec.dest)
+        if not dst_arg.endswith("/"):
+            dst_arg = dst_arg + "/"
+    else:
+        src_arg = str(spec.source)
+        dst_arg = str(spec.dest.parent) + "/"
+    cmd.extend([src_arg, dst_arg])
+    return cmd
+
+
+def parse_rsync_output(lines: Iterable[str]) -> SyncSummary:
+    summary = SyncSummary()
+    for raw in lines:
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith("sending incremental file list") or line.startswith("sent ") or line.startswith("total size is"):
+            continue
+        if line.startswith("*deleting "):
+            summary.deleted += 1
+            continue
+        if "|" not in line:
+            continue
+        meta, name = line.split("|", 1)
+        if "++++" in meta:
+            if meta[1] == "d":
+                summary.dirs_added += 1
+            else:
+                summary.added += 1
+        else:
+            summary.changed += 1
+    return summary
+
+
+def walk_large_files(path: Path, max_bytes: int, excludes: Sequence[str]) -> List[Tuple[Path, int]]:
+    results: List[Tuple[Path, int]] = []
+    if path.is_file():
+        size = path.stat().st_size
+        if size > max_bytes:
+            results.append((path, size))
+        return results
+
+    exclude_dirs = [pat.rstrip("/") for pat in excludes]
+    for root, dirs, files in os.walk(path):
+        root_path = Path(root)
+        dirs[:] = [d for d in dirs if not any(fnmatch.fnmatch(os.path.join(root, d) + "/", f"*{ex}*") for ex in exclude_dirs)]
+        for name in files:
+            full = root_path / name
+            rel = full
+            if any(fnmatch.fnmatch(str(rel), pattern) for pattern in excludes):
+                continue
+            try:
+                size = full.stat().st_size
+            except OSError:
+                continue
+            if size > max_bytes:
+                results.append((full, size))
+    return results
+
+
+def stage_changes(root: Path, dest_subdir: str, manifest_path: Optional[Path], metadata_path: Optional[Path]) -> None:
+    paths = [dest_subdir]
+    if manifest_path:
+        paths.append(str(manifest_path.relative_to(root)))
+    if metadata_path:
+        paths.append(str(metadata_path.relative_to(root)))
+    run(["git", "add", "-A", *paths], cwd=root)
+
+
+def git_diff_cached(root: Path) -> str:
+    proc = run(["git", "diff", "--cached", "--stat"], cwd=root, capture=True)
+    return proc.stdout.strip()
+
+
+def has_staged_changes(root: Path) -> bool:
+    proc = run(["git", "diff", "--cached"], cwd=root, capture=True)
+    return bool(proc.stdout.strip())
+
+
+def secret_scan(root: Path) -> None:
+    tool = shutil.which("git-secrets") or shutil.which("gitsecrets") or shutil.which("git-secrets.sh")
+    if tool:
+        try:
+            run([tool, "--scan"], cwd=root)
+        except subprocess.CalledProcessError as exc:
+            print("[file_window_sync] Secret scan failed.", file=sys.stderr)
+            raise SystemExit(exc.returncode)
+    else:
+        print("[file_window_sync] git-secrets not found; skipping secret scan.")
+
+
+def commit_changes(root: Path, summary: SyncSummary) -> Optional[str]:
+    if not has_staged_changes(root):
+        print("[file_window_sync] No staged changes; nothing to commit.")
+        return None
+    timestamp = dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    message = (
+        f"sync(mirror): {summary.added} added, {summary.changed} changed, {summary.deleted} deleted — {timestamp}"
+    )
+    run(["git", "commit", "-m", message], cwd=root)
+    return message
+
+
+def git_push(root: Path, ref: str, remote: str = "origin", push_tags: bool = False) -> None:
+    run(["git", "push", remote, ref], cwd=root)
+    if push_tags:
+        run(["git", "push", remote, "--tags"], cwd=root)
+
+
+def create_tag(root: Path, prefix: str, message: str) -> str:
+    timestamp = dt.datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+    tag_name = f"{prefix}-{timestamp}"
+    run(["git", "tag", "-a", tag_name, "-m", message], cwd=root)
+    return tag_name
+
+
+def ensure_branch(root: Path, enable_pr: bool, branch_name: Optional[str]) -> Tuple[str, Optional[str]]:
+    proc = run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=root, capture=True)
+    current = proc.stdout.strip()
+    if not enable_pr:
+        return current, None
+    if not branch_name:
+        branch_name = dt.datetime.utcnow().strftime("sync/%Y%m%d-%H%M%S")
+    run(["git", "checkout", "-b", branch_name], cwd=root)
+    return current, branch_name
+
+
+def restore_branch(root: Path, original: str, new_branch: Optional[str]) -> None:
+    if new_branch:
+        run(["git", "checkout", original], cwd=root)
+
+
+def fetch_remote(root: Path) -> None:
+    run(["git", "fetch", "--all", "--prune", "--tags"], cwd=root)
+
+
+def rebase_main(root: Path, remote: str, branch: str) -> None:
+    run(["git", "pull", "--rebase", remote, branch], cwd=root)
+
+
+def generate_manifest(dest_base: Path, manifest_path: Path, summary: SyncSummary) -> Tuple[int, int]:
+    files: List[Dict[str, object]] = []
+    total_size = 0
+    for file_path in sorted(dest_base.rglob("*")):
+        if not file_path.is_file():
+            continue
+        if file_path == manifest_path:
+            continue
+        rel = file_path.relative_to(dest_base)
+        with file_path.open("rb") as fh:
+            digest = hashlib.sha256(fh.read()).hexdigest()
+        stat = file_path.stat()
+        files.append(
+            {
+                "path": str(rel),
+                "size": stat.st_size,
+                "sha256": digest,
+                "mtime": dt.datetime.utcfromtimestamp(stat.st_mtime).isoformat() + "Z",
+            }
+        )
+        total_size += stat.st_size
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    with manifest_path.open("w", encoding="utf-8") as fh:
+        json.dump({
+            "generated_at": dt.datetime.utcnow().isoformat() + "Z",
+            "file_count": len(files),
+            "total_size": total_size,
+            "summary": {
+                "added": summary.added,
+                "changed": summary.changed,
+                "deleted": summary.deleted,
+            },
+            "files": files,
+        }, fh, indent=2)
+    return len(files), total_size
+
+
+def update_metadata(metadata_path: Path, summary: SyncSummary, manifest_info: Optional[Tuple[int, int]]) -> None:
+    timestamp = dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    file_count = manifest_info[0] if manifest_info else "unknown"
+    total_size = manifest_info[1] if manifest_info else "unknown"
+    block = [
+        "<!-- SYNC METADATA START -->",
+        f"- Last sync: {timestamp}",
+        f"- Files mirrored: {file_count}",
+        f"- Total mirror bytes: {total_size}",
+        f"- Added files: {summary.added}",
+        f"- Changed files: {summary.changed}",
+        f"- Deleted files: {summary.deleted}",
+        "<!-- SYNC METADATA END -->",
+        "",
+    ]
+    metadata_path.parent.mkdir(parents=True, exist_ok=True)
+    existing = metadata_path.read_text(encoding="utf-8") if metadata_path.exists() else ""
+    if "<!-- SYNC METADATA START -->" in existing and "<!-- SYNC METADATA END -->" in existing:
+        pre, _start, rest = existing.partition("<!-- SYNC METADATA START -->")
+        _mid, _end, post = rest.partition("<!-- SYNC METADATA END -->")
+        new_content = pre.rstrip() + "\n" + "\n".join(block) + post
+    else:
+        new_content = "\n".join(block) + existing
+    with metadata_path.open("w", encoding="utf-8") as fh:
+        fh.write(new_content.strip() + "\n")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Mirror local trading-system files into the repo.")
+    parser.add_argument("--config", default=".file-window-sync.yml", help="Path to sync configuration file")
+    parser.add_argument("--apply", action="store_true", help="Execute sync (default is dry-run)")
+    parser.add_argument("--push", action="store_true", help="Execute sync and push to origin/main")
+    parser.add_argument("--dry-run", action="store_true", help="Force dry-run even with --apply")
+    parser.add_argument("--force", action="store_true", help="Proceed when working tree is dirty")
+    parser.add_argument("--allow-large", action="store_true", help="Ignore max file size limits")
+    parser.add_argument("--max-file-size-mb", type=float, help="Override max file size in megabytes")
+    parser.add_argument("--scan-secrets", action="store_true", help="Run git-secrets scan before committing")
+    parser.add_argument("--no-manifest", action="store_true", help="Skip manifest generation")
+    parser.add_argument("--manifest", action="store_true", help="Force manifest generation")
+    parser.add_argument("--no-metadata", action="store_true", help="Skip GPT_SYNC_VERSION update")
+    parser.add_argument("--update-metadata", action="store_true", help="Force GPT_SYNC_VERSION update")
+    parser.add_argument("--tag", action="store_true", help="Create annotated tag after commit")
+    parser.add_argument("--tag-prefix", default="file-window-sync", help="Prefix for generated tag names")
+    parser.add_argument("--pr", action="store_true", help="Commit on a fresh sync/<timestamp> branch instead of main")
+    parser.add_argument("--branch", help="Explicit branch name when using --pr")
+    parser.add_argument("--rebase", action="store_true", help="git pull --rebase origin main before pushing")
+    parser.add_argument("--skip-fetch", action="store_true", help="Skip git fetch step")
+    parser.add_argument("--verbose", action="store_true", help="Print rsync command output")
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    root = git_root()
+    os.chdir(root)
+
+    config_path = (root / args.config).resolve() if not Path(args.config).is_absolute() else Path(args.config)
+    if not config_path.exists():
+        raise SystemExit(f"Config file not found: {config_path}")
+
+    config = load_config(config_path)
+    ensure_clean_tree(root, force=args.force)
+
+    if not args.skip_fetch:
+        fetch_remote(root)
+    if args.rebase:
+        rebase_main(root, "origin", "main")
+
+    specs, warnings = build_source_specs(config, root)
+    summary = SyncSummary()
+    for warning in warnings:
+        print(f"[file_window_sync] {warning}")
+        if warning.startswith("Source missing: "):
+            missing = warning.split(": ", 1)[1]
+            summary.missing_sources.append(Path(missing))
+
+    if not specs:
+        raise SystemExit("No valid sources configured.")
+
+    dest_base = root / config["dest_subdir"]
+    manifest_cfg = config.get("manifest", {}) or {}
+    manifest_enabled = manifest_cfg.get("enabled", True)
+    if args.no_manifest:
+        manifest_enabled = False
+    if args.manifest:
+        manifest_enabled = True
+    manifest_path = None
+    if manifest_enabled:
+        manifest_rel = manifest_cfg.get("path", f"{config['dest_subdir'].rstrip('/')}/MANIFEST_SYNC.json")
+        manifest_path = (root / manifest_rel).resolve()
+
+    metadata_rel = None
+    metadata_cfg = config.get("metadata", {})
+    metadata_target = metadata_cfg.get("gpt_sync_version")
+    if metadata_target:
+        metadata_rel = metadata_target
+    metadata_path = (root / metadata_rel).resolve() if metadata_rel else None
+    update_metadata_flag = bool(metadata_path and not args.no_metadata)
+    if args.update_metadata:
+        update_metadata_flag = True
+
+    max_size_mb = args.max_file_size_mb or config.get("max_file_size_mb")
+
+    # Large-file screening
+    if max_size_mb and not args.allow_large:
+        limit_bytes = int(float(max_size_mb) * 1024 * 1024)
+        for spec in specs:
+            large = walk_large_files(spec.source, limit_bytes, spec.excludes)
+            if large:
+                summary.skipped_large.extend(large)
+                for path, size in large:
+                    print(f"[file_window_sync] Skipping large file (> {max_size_mb} MB): {path} ({size} bytes)")
+
+    # Dry-run planning
+    for spec in specs:
+        cmd = build_rsync_cmd(spec, True, max_size_mb, args.allow_large)
+        proc = run(cmd, capture=True)
+        if args.verbose:
+            print(proc.stdout)
+        spec_summary = parse_rsync_output(proc.stdout.splitlines())
+        summary.aggregate(spec_summary)
+        summary.record(str(spec.source), proc.stdout.splitlines())
+
+    print("[file_window_sync] Planned changes: "
+          f"{summary.added} added, {summary.changed} changed, {summary.deleted} deleted, {summary.dirs_added} dirs added.")
+
+    if summary.missing_sources:
+        print("[file_window_sync] Missing sources detected:")
+        for path in summary.missing_sources:
+            print(f"  - {path}")
+
+    if summary.skipped_large and not args.allow_large:
+        print("[file_window_sync] Large files skipped (use --allow-large to include):")
+        for path, size in summary.skipped_large:
+            print(f"  - {path} ({size} bytes)")
+
+    execute = args.apply or args.push or args.pr or args.tag
+    if args.dry_run and execute:
+        print("[file_window_sync] --dry-run set; skipping execution phase.")
+        execute = False
+
+    if execute:
+        live_summary = SyncSummary()
+        for spec in specs:
+            cmd = build_rsync_cmd(spec, False, max_size_mb, args.allow_large)
+            proc = run(cmd, capture=True)
+            if args.verbose:
+                print(proc.stdout)
+            spec_summary = parse_rsync_output(proc.stdout.splitlines())
+            live_summary.aggregate(spec_summary)
+        if live_summary.added or live_summary.changed or live_summary.deleted:
+            summary = live_summary
+
+        manifest_info: Optional[Tuple[int, int]] = None
+        if manifest_enabled and manifest_path:
+            manifest_info = generate_manifest(dest_base, manifest_path, summary)
+            print(f"[file_window_sync] Manifest written to {manifest_path} ({manifest_info[0]} files).")
+        else:
+            manifest_info = None
+
+        if update_metadata_flag and metadata_path:
+            update_metadata(metadata_path, summary, manifest_info)
+            print(f"[file_window_sync] Updated metadata at {metadata_path}.")
+
+        current_branch, new_branch = ensure_branch(root, args.pr, args.branch)
+        try:
+            stage_changes(root, config["dest_subdir"], manifest_path, metadata_path if update_metadata_flag else None)
+
+            if args.scan_secrets:
+                secret_scan(root)
+
+            diff = git_diff_cached(root)
+            if diff:
+                print(diff)
+            commit_msg = commit_changes(root, summary)
+            if commit_msg:
+                tag_name = None
+                if args.tag:
+                    tag_name = create_tag(root, args.tag_prefix, commit_msg)
+                    print(f"[file_window_sync] Created tag {tag_name}.")
+
+                if args.push:
+                    target_ref = new_branch or "HEAD:main"
+                    git_push(root, target_ref, push_tags=bool(tag_name))
+                    print(f"[file_window_sync] Pushed changes to origin/{'main' if not new_branch else new_branch}.")
+                elif args.pr and new_branch:
+                    git_push(root, f"HEAD:{new_branch}", push_tags=bool(tag_name))
+                    print(f"[file_window_sync] Pushed branch {new_branch}. Create a PR manually on GitHub.")
+                elif args.tag and not args.push:
+                    print("[file_window_sync] Tag created locally; rerun with --push to publish tags.")
+            else:
+                print("[file_window_sync] Nothing staged after sync; aborting commit.")
+        finally:
+            restore_branch(root, current_branch, new_branch)
+    else:
+        print("[file_window_sync] Dry-run only. Re-run with --apply or --push to persist changes.")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("[file_window_sync] Aborted by user.", file=sys.stderr)
+        sys.exit(130)
