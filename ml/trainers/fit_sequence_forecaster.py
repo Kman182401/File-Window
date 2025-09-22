@@ -170,7 +170,7 @@ def fit_seq_forecaster_for_symbol(
         n_steps=n_steps,
         metrics=metrics,
         training_args=training_args,
-        artifact_version=1,
+        artifact_version=2,
     )
 
     # Persist diagnostic files alongside the artifact for quick inspection.
