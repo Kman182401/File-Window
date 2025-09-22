@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
@@ -72,7 +74,7 @@ class SequenceForecasterArtifact:
     n_steps: int
     metrics: Dict[str, float]
     training_args: Dict[str, float]
-    artifact_version: int = 1
+    artifact_version: int = 2
 
 
 def _to_tensor(X: np.ndarray) -> torch.Tensor:
@@ -214,39 +216,69 @@ def save_artifact(
     n_steps: int,
     metrics: Dict[str, float],
     training_args: Dict[str, float],
-    artifact_version: int = 1,
+    artifact_version: int = 2,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    state = {
-        "state_dict": model.state_dict(),
+
+    weights_path = path
+    meta_path = path.with_name("artifact.json")
+
+    torch.save(model.state_dict(), weights_path)
+
+    scaler_state = scaler.state_dict()
+    metadata = {
         "feature_cols": list(feature_cols),
-        "horizons": list(int(h) for h in horizons),
+        "horizons": [int(h) for h in horizons],
         "n_steps": int(n_steps),
-        "scaler": scaler.state_dict(),
+        "scaler": {
+            "mu": scaler_state["mu"].tolist(),
+            "sigma": scaler_state["sigma"].tolist(),
+        },
         "metrics": metrics,
         "training_args": training_args,
         "artifact_version": int(artifact_version),
     }
-    torch.save(state, path)
+
+    tmp_meta = meta_path.with_suffix(".tmp")
+    with open(tmp_meta, "w", encoding="utf-8") as fh:
+        json.dump(metadata, fh)
+    os.replace(tmp_meta, meta_path)
 
 
 def load_artifact(path: Path, device: Optional[torch.device] = None) -> SequenceForecasterArtifact:
-    payload = torch.load(path, map_location=device or "cpu")
-    feature_cols = payload["feature_cols"]
-    horizons = tuple(payload["horizons"])
-    n_steps = int(payload["n_steps"])
+    meta_path = path.with_name("artifact.json")
+    if not meta_path.exists():
+        raise FileNotFoundError(f"Sequence forecaster metadata missing: {meta_path}")
+
+    with open(meta_path, "r", encoding="utf-8") as fh:
+        metadata = json.load(fh)
+
+    feature_cols = list(metadata.get("feature_cols", []))
+    horizons = tuple(int(h) for h in metadata.get("horizons", []))
+    n_steps = int(metadata.get("n_steps", 0))
 
     model = SequenceForecaster(
         input_size=len(feature_cols),
         horizons=horizons,
     )
-    model.load_state_dict(payload["state_dict"])
+    state_dict = torch.load(path, map_location=device or "cpu", weights_only=True)
+    model.load_state_dict(state_dict)
     if device is not None:
         model = model.to(device)
     model.eval()
 
+    scaler_state = metadata.get("scaler", {})
     scaler = Standardizer()
-    scaler.load_state_dict(payload["scaler"])
+    scaler.load_state_dict(
+        {
+            "mu": np.asarray(scaler_state.get("mu", []), dtype=np.float32),
+            "sigma": np.asarray(scaler_state.get("sigma", []), dtype=np.float32),
+        }
+    )
+    if scaler.mu.shape[-1] != len(feature_cols) or scaler.sigma.shape[-1] != len(feature_cols):
+        raise ValueError(
+            f"Scaler shape mismatch: mu={scaler.mu.shape}, sigma={scaler.sigma.shape}, features={len(feature_cols)}"
+        )
 
     return SequenceForecasterArtifact(
         model=model,
@@ -254,7 +286,7 @@ def load_artifact(path: Path, device: Optional[torch.device] = None) -> Sequence
         feature_cols=feature_cols,
         horizons=horizons,
         n_steps=n_steps,
-        metrics=payload.get("metrics", {}),
-        training_args=payload.get("training_args", {}),
-        artifact_version=int(payload.get("artifact_version", 1)),
+        metrics=metadata.get("metrics", {}),
+        training_args=metadata.get("training_args", {}),
+        artifact_version=int(metadata.get("artifact_version", 2)),
     )

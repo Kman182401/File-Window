@@ -2016,45 +2016,62 @@ class RLTradingPipeline:
                     preds.append(np.asarray(rl_preds[: len(X_test)], dtype=float).flatten())
                     pred_sources.append("PPO")
 
-                    if self.seq_enabled and self.seq_feature_names:
-                        seq_df = seq_preds_by_ticker.get(ticker)
-                        seq_arrays: Dict[str, np.ndarray] = {}
-                        if seq_df is not None and not seq_df.empty:
-                            seq_aligned = seq_df.reindex(X_test.index)
-                            seq_aligned = seq_aligned.fillna(method="ffill").fillna(0.0)
-                            for name in self.seq_feature_names:
-                                if name in seq_aligned.columns:
-                                    seq_arrays[name] = seq_aligned[name].to_numpy(dtype=float)
-                        for name in self.seq_feature_names:
-                            arr = seq_arrays.get(name)
-                            if arr is None or len(arr) != len(X_test):
-                                arr = np.zeros(len(X_test), dtype=float)
-                            preds.append(arr)
-                            pred_sources.append(name)
+                    seq_df = seq_preds_by_ticker.get(ticker)
+                    if self.seq_enabled and seq_df is not None and not seq_df.empty:
+                        seq_aligned = seq_df.reindex(X_test.index)
+                        seq_aligned = seq_aligned.apply(pd.to_numeric, errors="coerce").ffill().fillna(0.0)
+                        seq_columns = [
+                            col
+                            for col in seq_aligned.columns
+                            if col.startswith("seq_") and pd.api.types.is_numeric_dtype(seq_aligned[col])
+                        ]
+                        if seq_columns:
+                            merged = list(dict.fromkeys(self.seq_feature_names + seq_columns))
+                            self.seq_feature_names = merged
+                            for col in seq_columns:
+                                preds.append(seq_aligned[col].to_numpy(dtype=float))
+                                pred_sources.append(col)
+                            logging.info("Seq features appended for %s: %s", ticker, seq_columns)
 
                     if not preds:
                         logging.warning("Stacking skipped for %s: no predictions available.", ticker)
                         continue
 
+                    lens = [len(p) for p in preds]
+                    self._emit_event(
+                        component="stacking",
+                        category="ml",
+                        event="pre_stack",
+                        symbol=ticker,
+                        corr_id=self._corr(ticker),
+                        data={
+                            "sources": pred_sources,
+                            "lengths": lens,
+                            "labels": int(len(y_test)),
+                        },
+                    )
+
                     try:
-                        min_len = min(len(p) for p in preds)
+                        min_len = min(lens + [len(y_test)])
                     except ValueError:
                         logging.warning("Stacking skipped for %s: no predictions available.", ticker)
                         continue
 
-                    if min_len == 0:
-                        logging.debug("Stacking skipped for %s: zero-length predictions.", ticker)
+                    if min_len <= 0:
+                        logging.warning(
+                            "Stacking skipped for %s: min_len=%s (sources=%s, lengths=%s)",
+                            ticker,
+                            min_len,
+                            pred_sources,
+                            lens,
+                        )
                         continue
 
-                    if len(y_test) < min_len:
-                        min_len = len(y_test)
-
-                    if min_len == 0:
-                        logging.debug("Stacking skipped for %s: insufficient labels for meta training.", ticker)
-                        continue
+                    preds = [p[:min_len] for p in preds]
+                    y_cut = y_test.iloc[:min_len]
 
                     try:
-                        stack = np.column_stack([p[:min_len] for p in preds])
+                        stack = np.column_stack(preds)
                     except Exception as exc:
                         logging.warning("Stacking failed for %s during column stack: %s", ticker, exc)
                         continue
@@ -2070,7 +2087,13 @@ class RLTradingPipeline:
                         )
 
                     meta_X.extend(stack.tolist())
-                    meta_y.extend(y_test.iloc[:min_len].astype(int).tolist())
+                    meta_y.extend(y_cut.astype(int).tolist())
+                    logging.info(
+                        "Stacking features for %s: sources=%s, rows=%s",
+                        ticker,
+                        pred_sources,
+                        min_len,
+                    )
 
                 # Final check before fitting meta-model
                 if len(meta_X) == 0:
