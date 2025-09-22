@@ -11,7 +11,8 @@ untouched.
 - `optional = true` lets you skip missing paths without failing the run.
 - `global.global_excludes` applies to every source (logs, caches, etc.).
 - `max_file_size_mb` limits file size unless `--allow-large` is passed.
-- `delete_on_repo = true` prunes mirror files removed locally.
+- `delete_on_repo = true` prunes files that no longer exist locally.
+- When only the auto-commit fires (no new repo diffs), the command still pushes that commit whenever `--push` is active.
 
 ## Usage
 
