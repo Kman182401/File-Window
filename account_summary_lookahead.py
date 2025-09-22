@@ -30,7 +30,12 @@ class AccountSummaryLookahead:
 
     def _subscribe(self):
         # Request summary; ib-insync keeps results in ib.accountSummary()
-        self.ib.reqAccountSummary(self.account_group)
+        try:
+            # Modern ib_insync drops the account_group argument
+            self.ib.reqAccountSummary()
+        except TypeError:
+            # Fall back to legacy signature
+            self.ib.reqAccountSummary(self.account_group)
         # Build initial map
         self._rebuild_map()
 
@@ -50,16 +55,25 @@ class AccountSummaryLookahead:
         with self._lock:
             self._data = m
 
-    def _on_account_summary(self, values):
-        # values is a list of AccountValue
-        changed = False
+    def _on_account_summary(self, *values):
+        """Handle accountSummaryEvent with both legacy and modern signatures."""
+        if not values:
+            return
+
+        if len(values) == 4 and isinstance(values[1], str):
+            account, tag, value, currency = values
+            payload = [AccountValue(account=account, tag=tag, value=value, currency=currency, modelCode="")]
+        elif len(values) == 1 and isinstance(values[0], (list, tuple)):
+            payload = values[0]
+        else:
+            payload = values
+
         with self._lock:
-            for v in values:
-                if v.tag in _TAGS:
+            for v in payload:
+                if isinstance(v, AccountValue) and v.tag in _TAGS:
                     key = (v.tag, (v.currency or "BASE"))
                     try:
                         self._data[key] = float(v.value)
-                        changed = True
                     except Exception:
                         pass
         # No further action needed; readers will see latest snapshot
@@ -87,4 +101,3 @@ class AccountSummaryLookahead:
         if "LookAheadExcessLiquidity" in out and "NetLiquidation" in out and out["NetLiquidation"] > 0:
             out["LookAheadExcessLiquidityPct"] = out["LookAheadExcessLiquidity"] / out["NetLiquidation"]
         return out
-

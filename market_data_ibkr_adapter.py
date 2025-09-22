@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Optional, List, Dict, Any, Tuple, Callable
 import logging
 import time
-from utils.persist_market_data import persist_bars
+from utils.persist_market_data import persist_bars, load_latest_bars
 import asyncio
 import os
 from dataclasses import dataclass
@@ -428,6 +428,19 @@ class IBKRIngestor:
 
             return df[cols]
         except Exception as e:
+            err_msg = str(e)
+            if "different ip address" in err_msg.lower():
+                cached = load_latest_bars(ticker, max_age_minutes=60, allow_stale=True)
+                if cached:
+                    cached_df, age_minutes = cached
+                    logger.warning(
+                        "IBKR denied historical data for %s due to remote session; "
+                        "using cached bars from %s (age %.1f min).",
+                        ticker,
+                        cached_df["timestamp"].iloc[-1].isoformat() if not cached_df.empty else "unknown",
+                        age_minutes,
+                    )
+                    return cached_df
             raise RuntimeError(f"Exception during IBKR data fetch for {ticker}: {e}")
 
     def _get_contract(self, ticker, asof: Optional[datetime] = None):

@@ -108,6 +108,49 @@ logger = logging.getLogger(__name__)
 
 LAST_TRAINED_FILE = "last_trained_time.txt"
 
+
+def _coerce_epoch(value: Any) -> Optional[int]:
+    """Best-effort conversion of persisted timestamps into epoch seconds."""
+    if value is None:
+        return None
+
+    if isinstance(value, (int, float)):
+        return int(value)
+
+    if isinstance(value, datetime):
+        return int(value.timestamp())
+
+    if isinstance(value, str):
+        candidate = value.strip()
+        if not candidate:
+            return None
+        try:
+            return int(float(candidate))
+        except ValueError:
+            try:
+                dt = date_parser.parse(candidate)
+            except Exception:
+                logger.warning("Unable to parse last trained timestamp '%s'", value)
+                return None
+            return int(dt.timestamp())
+
+    logger.warning("Unsupported last trained timestamp type: %r", type(value))
+    return None
+
+
+def _ppo_observation_frame(df: pd.DataFrame) -> Optional[pd.DataFrame]:
+    """Return OHLCV-only frame suitable for PPO models."""
+
+    base_cols = [col for col in ("open", "high", "low", "close", "volume") if col in df.columns]
+    if len(base_cols) < 5:
+        return None
+
+    frame = df[base_cols].copy()
+    for col in base_cols:
+        frame[col] = pd.to_numeric(frame[col], errors="coerce")
+    frame = frame.dropna()
+    return frame
+
 try:
     from news_ingestion_marketaux import fetch_marketaux_news, normalize_marketaux_news
 except Exception:
@@ -809,7 +852,7 @@ class RLTradingPipeline:
         self.ml_feature_columns: Dict[str, List[str]] = defaultdict(list)
         self.ml_last_incremental_rows: Dict[str, int] = defaultdict(int)
         self.ml_last_incremental_time: Dict[str, datetime] = defaultdict(lambda: datetime(1970, 1, 1))
-        self.ml_last_full_retrain_time: datetime = datetime.utcnow() - timedelta(minutes=self.ml_retrain_every_min)
+        self.ml_last_full_retrain_time: Dict[str, datetime] = defaultdict(lambda: datetime(1970, 1, 1))
         self.ppo_live_positions: Dict[str, int] = defaultdict(int)
         self.meta_daily_state: Dict[str, Dict[str, Any]] = defaultdict(lambda: {"day": None, "trades": 0})
         self.micropoll_enable = str(os_mod.getenv('MICROPOLL_ENABLE', '0')).lower() in ('1', 'true', 'yes')
@@ -907,11 +950,13 @@ class RLTradingPipeline:
         self.seq_hidden_size = max(_parse_int_env("SEQ_FORECASTER_HIDDEN_SIZE", 128), 16)
         self.seq_num_layers = max(_parse_int_env("SEQ_FORECASTER_NUM_LAYERS", 2), 1)
         self.seq_dropout = min(max(_parse_float_env("SEQ_FORECASTER_DROPOUT", 0.2), 0.0), 0.9)
-        self.seq_epochs = max(_parse_int_env("SEQ_FORECASTER_EPOCHS", 40), 1)
-        self.seq_batch_size = max(_parse_int_env("SEQ_FORECASTER_BATCH_SIZE", 256), 32)
+        self.seq_epochs = max(_parse_int_env("SEQ_FORECASTER_EPOCHS", 10), 1)
+        self.seq_batch_size = max(_parse_int_env("SEQ_FORECASTER_BATCH_SIZE", 128), 32)
         self.seq_lr = _parse_float_env("SEQ_FORECASTER_LR", 3e-4)
         self.seq_weight_decay = _parse_float_env("SEQ_FORECASTER_WEIGHT_DECAY", 0.0)
-        self.seq_patience = max(_parse_int_env("SEQ_FORECASTER_PATIENCE", 6), 1)
+        self.seq_patience = max(_parse_int_env("SEQ_FORECASTER_PATIENCE", 3), 1)
+        self.seq_min_train_rows = max(_parse_int_env("SEQ_FORECASTER_MIN_ROWS", max(self.seq_n_steps * 2, 1000)), self.seq_n_steps + 10)
+        self.seq_retrain_every_min = max(_parse_int_env("SEQ_FORECASTER_RETRAIN_MIN", 180), 1)
 
         seed_env = os_mod.getenv("SEQ_FORECASTER_SEED", "42")
         try:
@@ -921,6 +966,7 @@ class RLTradingPipeline:
             self.seq_seed = None
 
         self.meta_feature_names: List[str] = []
+        self.seq_last_train_time: Dict[str, datetime] = defaultdict(lambda: datetime(1970, 1, 1))
 
     def _corr(self, ticker: Optional[str] = None) -> str:
         return f"{self.pipeline_corr_id}:{ticker}" if ticker else self.pipeline_corr_id
@@ -1457,14 +1503,37 @@ class RLTradingPipeline:
                     if "timestamp" in X_window.columns:
                         window_timestamp = X_window["timestamp"].max()
 
+                    last_full_time = self.ml_last_full_retrain_time.get(ticker, datetime(1970, 1, 1))
                     full_ready = (
                         len(X_window) >= self.ml_full_min_samples
-                        and (now_utc - self.ml_last_full_retrain_time) >= timedelta(minutes=self.ml_retrain_every_min)
+                        and (now_utc - last_full_time) >= timedelta(minutes=self.ml_retrain_every_min)
                     )
 
                     if full_ready:
+                        window_rows = len(X_window)
+                        if window_rows < self.min_samples_per_model:
+                            logging.warning(
+                                f"Window below min samples for {ticker}: rows={window_rows} (min={self.min_samples_per_model}). Skipping."
+                            )
+                            self._emit_event(
+                                component="ml",
+                                category="training",
+                                event="retrain_skipped",
+                                symbol=ticker,
+                                corr_id=self._corr(ticker),
+                                state="WARN",
+                                data={
+                                    "reason": "window_min_samples",
+                                    "window_rows": int(window_rows),
+                                    "min_required": int(self.min_samples_per_model),
+                                },
+                            )
+                            continue
+
                         models = {name: factory() for name, factory in base_model_factories.items()}
-                        split_idx = max(int(len(X_window) * 0.90), 1)
+                        split_idx = max(int(window_rows * 0.90), 1)
+                        train_ratio = split_idx / window_rows
+                        min_train_rows = max(1, int(round(self.min_samples_per_model * train_ratio)))
                         self._emit_event(
                             component="ml",
                             category="training",
@@ -1516,10 +1585,10 @@ class RLTradingPipeline:
                             )
                             continue
 
-                        if len(X_train) < self.min_samples_per_model or len(y_train) < self.min_samples_per_model:
+                        if len(X_train) < min_train_rows or len(y_train) < min_train_rows:
                             logging.warning(
                                 f"Not enough samples for {ticker}: X={len(X_train)}, y={len(y_train)} "
-                                f"(min={self.min_samples_per_model}). Skipping."
+                                f"(min={min_train_rows}). Skipping."
                             )
                             self._emit_event(
                                 component="ml",
@@ -1531,7 +1600,7 @@ class RLTradingPipeline:
                                 data={
                                     "reason": "min_samples",
                                     "samples": int(len(X_train)),
-                                    "min_required": int(self.min_samples_per_model),
+                                    "min_required": int(min_train_rows),
                                 },
                             )
                             continue
@@ -1633,6 +1702,23 @@ class RLTradingPipeline:
                                     )
                                 else:
                                     try:
+                                        if len(df_seq) < self.seq_min_train_rows:
+                                            logging.debug(
+                                                "Sequence forecaster skipped for %s: only %s rows (min=%s).",
+                                                ticker,
+                                                len(df_seq),
+                                                self.seq_min_train_rows,
+                                            )
+                                            continue
+                                        last_seq_train = self.seq_last_train_time.get(ticker, datetime(1970, 1, 1))
+                                        if (now_utc - last_seq_train) < timedelta(minutes=self.seq_retrain_every_min):
+                                            logging.debug(
+                                                "Sequence forecaster throttled for %s: %.1f min since last run (min interval %s).",
+                                                ticker,
+                                                (now_utc - last_seq_train).total_seconds() / 60.0,
+                                                self.seq_retrain_every_min,
+                                            )
+                                            continue
                                         seq_metrics = self._fit_seq_forecaster(
                                             df_seq,
                                             seq_feature_cols,
@@ -1654,6 +1740,7 @@ class RLTradingPipeline:
                                             device=self.seq_device,
                                             seed=self.seq_seed,
                                         )
+                                        self.seq_last_train_time[ticker] = now_utc
                                         self.seq_models.pop(ticker, None)
                                         artifact = self._get_seq_artifact(ticker)
                                         self._emit_event(
@@ -1687,7 +1774,7 @@ class RLTradingPipeline:
                                         )
                         self.ml_last_incremental_rows[ticker] = total_rows
                         self.ml_last_incremental_time[ticker] = now_utc
-                        self.ml_last_full_retrain_time = now_utc
+                        self.ml_last_full_retrain_time[ticker] = now_utc
                         if window_timestamp is not None:
                             full_retrain_timestamp = window_timestamp
                         continue
@@ -1909,8 +1996,15 @@ class RLTradingPipeline:
                     pred_sources.append("RandomForest")
 
                     ppo_model = model_dict["PPO"]
+                    ppo_frame = _ppo_observation_frame(X_test)
+                    if ppo_frame is None:
+                        logging.warning(
+                            "Stacking skipped for %s PPO contribution: missing base price columns.",
+                            ticker,
+                        )
+                        continue
                     rl_preds: List[float] = []
-                    env = TradingEnv(X_test)
+                    env = TradingEnv(ppo_frame)
                     obs, info = env.reset()
                     done = False
                     while not done:
@@ -2200,7 +2294,7 @@ class RLTradingPipeline:
                 # === End Meta-Model Trading Simulation Block ===
 
                 if not meta_trades_executed:
-                    fallback_executed = self._execute_ppo_fallback(features, models_from_s3)
+                    fallback_executed = self._execute_ppo_fallback(raw_data, models_from_s3)
                     if fallback_executed:
                         logging.info("Executed PPO fallback orders (meta stack unavailable).")
                     else:
@@ -2253,23 +2347,33 @@ class RLTradingPipeline:
 
                         rl_preds = []
                         if rl_model is not None:
-                            env = TradingEnv(X_test)
-                            if getattr(rl_model, 'observation_space', None) is not None and rl_model.observation_space.shape != env.observation_space.shape:
-                                logging.warning(
-                                    "Skipping PPO predictions for %s in ensemble: obs shape mismatch %s != %s",
-                                    ticker,
-                                    rl_model.observation_space.shape,
-                                    env.observation_space.shape,
-                                )
+                            # IMPORTANT: Build PPO observation frame from raw OHLCV so the
+                            # observation shape matches the PPO training setup (5,)
+                            base_df = raw_data.get(ticker)
+                            ppo_frame = _ppo_observation_frame(base_df) if base_df is not None else None
+                            if ppo_frame is None or ppo_frame.empty:
+                                logging.warning("Ensemble PPO vote skipped for %s: no OHLCV frame available", ticker)
+                                rl_preds = np.zeros(len(X_test_pred))
                             else:
-                                obs, info = env.reset()
-                                done = False
-                                while not done:
-                                    action, _ = rl_model.predict(obs, deterministic=True)
-                                    rl_preds.append(action)
-                                    obs, reward, terminated, truncated, info = env.step(action)
-                                    done = terminated or truncated
-                                rl_preds = np.array(rl_preds[:len(X_test)]).flatten()
+                                env = TradingEnv(ppo_frame)
+                                if getattr(rl_model, 'observation_space', None) is not None and rl_model.observation_space.shape != env.observation_space.shape:
+                                    logging.warning(
+                                        "Skipping PPO predictions for %s in ensemble: obs shape mismatch %s != %s",
+                                        ticker,
+                                        rl_model.observation_space.shape,
+                                        env.observation_space.shape,
+                                    )
+                                    rl_preds = np.zeros(len(X_test_pred))
+                                else:
+                                    obs, info = env.reset()
+                                    done = False
+                                    while not done:
+                                        action, _ = rl_model.predict(obs, deterministic=True)
+                                        rl_preds.append(action)
+                                        obs, reward, terminated, truncated, info = env.step(action)
+                                        done = terminated or truncated
+                                    # Align length with X_test
+                                    rl_preds = np.array(rl_preds[:len(X_test)]).flatten()
                         else:
                             logging.warning("Ensemble skipping PPO vote for %s: no PPO model available", ticker)
                             rl_preds = np.zeros(len(X_test_pred))
@@ -2417,7 +2521,7 @@ class RLTradingPipeline:
         except Exception as exc:
             logging.warning("Failed to append trade decision for bridge: %s", exc)
 
-    def _execute_ppo_fallback(self, features: Dict[str, pd.DataFrame], models_from_registry: Dict[str, Dict[str, Any]]) -> bool:
+    def _execute_ppo_fallback(self, raw_data: Dict[str, pd.DataFrame], models_from_registry: Dict[str, Dict[str, Any]]) -> bool:
         """Execute trades using PPO-only signals when meta stack is unavailable."""
         ib = getattr(self.market_data_adapter, 'ib', None)
         if ib is None or not ib.isConnected():
@@ -2427,7 +2531,7 @@ class RLTradingPipeline:
         executed = False
         live_window = int(self.config.get('ppo_live_window', 120))
 
-        for ticker, df in features.items():
+        for ticker, df in raw_data.items():
             model = models_from_registry.get(ticker, {}).get("PPO")
             if model is None:
                 model = load_local_ppo_model(ticker)
@@ -2436,11 +2540,12 @@ class RLTradingPipeline:
                 continue
 
             data_window = df.tail(live_window)
-            if data_window.empty:
+            ppo_frame = _ppo_observation_frame(data_window)
+            if ppo_frame is None or ppo_frame.empty:
                 logging.debug("PPO fallback: insufficient data for %s", ticker)
                 continue
 
-            env = TradingEnv(data_window)
+            env = TradingEnv(ppo_frame)
             if getattr(model, 'observation_space', None) is not None:
                 if model.observation_space.shape != env.observation_space.shape:
                     logging.warning(
@@ -2513,7 +2618,14 @@ class RLTradingPipeline:
             corr_id=self._corr(ticker),
             data={"rows": int(len(train_data))},
         )
-        env = TradingEnv(train_data)
+        train_frame = _ppo_observation_frame(train_data)
+        if train_frame is None or train_frame.empty:
+            logging.warning(
+                "PPO training skipped for %s: missing OHLCV columns or empty frame.",
+                ticker,
+            )
+            return
+        env = TradingEnv(train_frame)
         check_env(env)
         ppo_logger = PPOTrainingLogger()
         feature_signature = compute_feature_signature(env.numeric_columns)
@@ -2548,8 +2660,12 @@ class RLTradingPipeline:
         if model is None:
             logging.info("Initializing fresh PPO model (no reusable checkpoint available).")
             model = PPO("MlpPolicy", env, verbose=0)
-
-        model.learn(total_timesteps=10000, callback=ppo_logger)
+        train_steps = int(os_mod.getenv("PPO_TRAIN_STEPS", str(self.config.get("ppo_train_steps", 200))))
+        model.learn(
+            total_timesteps=train_steps,
+            callback=ppo_logger,
+            progress_bar=False,
+        )
         self.ppo_model = model
         ppo_logger.print_summary()
         if save_path is None:
@@ -2596,7 +2712,15 @@ class RLTradingPipeline:
     def run_ppo(self, test_data, ticker):
         from stable_baselines3 import PPO
         start = time.time()
-        env = TradingEnv(test_data)
+        test_frame = _ppo_observation_frame(test_data)
+        if test_frame is None or test_frame.empty:
+            logging.warning(
+                "PPO run skipped for %s: missing OHLCV columns or empty frame.",
+                ticker,
+            )
+            self.ppo_model = None
+            return 0.0
+        env = TradingEnv(test_frame)
         regime = detect_regime(test_data['close'])
         regime_suffix = "highvol" if regime == "high_vol" else "normal"
         expected_signature = compute_feature_signature(env.numeric_columns)
@@ -2665,16 +2789,25 @@ class RLTradingPipeline:
         return total_reward
 
     def train_ensemble_ppo(self, train_data, n_models=3):
+        frame = _ppo_observation_frame(train_data)
+        if frame is None or frame.empty:
+            logging.warning("PPO ensemble training skipped: invalid training frame.")
+            return
+
         self.ensemble_models = []
         for i in range(n_models):
-            env = TradingEnv(train_data)
+            env = TradingEnv(frame.copy())
             model = PPO("MlpPolicy", env, verbose=0, seed=i)
             model.learn(total_timesteps=10000)
             self.ensemble_models.append(model)
         print(f"Trained ensemble of {n_models} PPO models.")
 
     def run_ensemble_ppo(self, test_data):
-        env = TradingEnv(test_data)
+        frame = _ppo_observation_frame(test_data)
+        if frame is None or frame.empty:
+            logging.warning("PPO ensemble run skipped: invalid test frame.")
+            return 0
+        env = TradingEnv(frame)
         obs, info = env.reset()
         done = False
         total_reward = 0

@@ -1,4 +1,6 @@
 import os, io, gzip, datetime as dt
+from pathlib import Path
+from typing import Optional, Tuple
 import pandas as pd
 try:
     import boto3  # optional if S3_ENABLE=0
@@ -11,6 +13,10 @@ S3_PREFIX = os.getenv("S3_PREFIX", "market_data")
 LOCAL_DIR = os.path.expanduser(os.getenv("LOCAL_FALLBACK_DIR", "~/data/market_data"))
 from utils.io_config import partition_path
 from utils.io_parquet import write_parquet_any
+
+
+def _data_dir() -> Path:
+    return Path(os.getenv("DATA_DIR", str(Path.home() / ".local/share/m5_trader/data")))
 
 def _to_utc_index(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -125,3 +131,50 @@ def persist_bars(symbol: str, df: pd.DataFrame) -> str:
             print(f"[persist] s3 put failed: {e}")
 
     return str(out_path)
+
+
+def load_latest_bars(
+    symbol: str,
+    *,
+    max_age_minutes: Optional[float] = None,
+    allow_stale: bool = True,
+) -> Optional[Tuple[pd.DataFrame, float]]:
+    """Load the newest locally persisted bars for ``symbol`` if available.
+
+    Parameters
+    ----------
+    symbol:
+        Canonical ticker name (e.g. ``ES1!``) used when calling :func:`persist_bars`.
+    max_age_minutes:
+        Optional freshness window; if provided and the most recent partition is older
+        than this number of minutes, ``None`` is returned unless ``allow_stale`` is
+        True.
+    allow_stale:
+        When ``True`` (default) the newest partition is returned even if it breaches
+        ``max_age_minutes``.  This is useful for smoke runs when the gateway is
+        temporarily unavailable.
+    """
+
+    base = _data_dir() / f"symbol={symbol}"
+    if not base.exists():
+        return None
+
+    candidates = sorted(base.rglob("bars.parquet"))
+    if not candidates:
+        return None
+
+    latest = candidates[-1]
+    mtime = dt.datetime.fromtimestamp(latest.stat().st_mtime, tz=dt.timezone.utc)
+    age_minutes = (dt.datetime.now(dt.timezone.utc) - mtime).total_seconds() / 60.0
+    if max_age_minutes is not None and age_minutes > max_age_minutes and not allow_stale:
+        return None
+
+    try:
+        df = pd.read_parquet(latest)
+    except Exception as exc:  # pragma: no cover - IO failure surfaces upstream
+        print(f"[persist] failed to read cached bars for {symbol}: {exc}")
+        return None
+
+    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+    df = df.dropna(subset=["timestamp"])
+    return df, age_minutes
