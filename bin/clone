@@ -252,6 +252,15 @@ def main():
 
     git("add", "-A")
     if git("diff", "--cached", "--quiet", check=False).returncode == 0:
+        if auto_committed:
+            if args.pr:
+                git("checkout", "-B", branch)
+            if args.no_push:
+                print("Auto-commit recorded locally (no push).")
+                sys.exit(0)
+            git("push", "-u", "origin", branch)
+            print(f"Pushed auto-commit to origin/{branch}")
+            sys.exit(0)
         print("No differences detected. Repo already mirrors local sources.")
         sys.exit(0)
 
