@@ -1498,11 +1498,20 @@ class RLTradingPipeline:
                     new_rows = total_rows - self.ml_last_incremental_rows.get(ticker, 0)
                     incremental_ready = new_rows >= self.ml_incremental_min_samples
 
-                    X_window = X_all.tail(self.ml_rolling_window)
-                    y_window = y_all.loc[X_window.index]
+                    window_rows = min(len(X_all), self.ml_rolling_window)
+                    X_window = X_all.iloc[-window_rows:].copy()
                     window_timestamp = None
                     if "timestamp" in X_window.columns:
                         window_timestamp = X_window["timestamp"].max()
+                    y_window = y_all.iloc[-window_rows:].copy()
+
+                    # Once the rolling window is formed, drop the original indices so subsequent
+                    # positional splits stay aligned and we never mix label-based slicing back in.
+                    X_window = X_window.reset_index(drop=True)
+                    if isinstance(y_window, pd.Series):
+                        y_window = y_window.reset_index(drop=True)
+                    else:
+                        y_window = y_window.reset_index(drop=True)
 
                     last_full_time = self.ml_last_full_retrain_time.get(ticker, datetime(1970, 1, 1))
                     full_ready = (
@@ -1811,8 +1820,8 @@ class RLTradingPipeline:
                                     data={"reason": "no_feature_columns", "new_rows": int(new_rows)},
                                 )
                             else:
-                                X_inc = X_all.iloc[-new_rows:]
-                                y_inc = y_all.loc[X_inc.index]
+                                X_inc = X_all.iloc[-new_rows:].copy()
+                                y_inc = y_all.iloc[-new_rows:].copy()
                                 X_inc = X_inc[feature_columns]
                                 classes = np.unique(y_inc)
                                 if len(classes) == 0:
