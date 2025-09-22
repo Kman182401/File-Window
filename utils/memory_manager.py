@@ -29,6 +29,7 @@ import tracemalloc
 import weakref
 import threading
 import warnings
+import platform
 from typing import Dict, Any, Optional, List, Callable, Union, Tuple
 from datetime import datetime, timedelta
 from collections import OrderedDict, deque
@@ -276,8 +277,12 @@ class MemoryManager:
         # Initialize stats
         self.current_stats = self.get_memory_stats()
         
-        logger.info(f"MemoryManager initialized for m5.large instance "
-                   f"(Available: {self.thresholds.total_available_mb}MB)")
+        host_label = platform.node() or "local-workstation"
+        logger.info(
+            "MemoryManager initialized for %s (Available: %sMB)",
+            host_label,
+            self.thresholds.total_available_mb,
+        )
         logger.info("PHASE4A-FIX: Memory level comparison using proper enum values")
     
     def _configure_gc(self):

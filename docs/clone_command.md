@@ -23,6 +23,7 @@ untouched.
 ./bin/clone --allow-large --push
 ./bin/clone --no-push           # keep commit local
 ./bin/clone --scan-secrets      # simple grep-based secret check
+./bin/clone --no-auto-commit --force  # skip auto-commit and proceed even if tree is dirty
 ```
 
 Add an alias for convenience:
@@ -53,6 +54,7 @@ tail -f ~/logs/clone.log
 
 ## Safety
 
-- Refuses to run on a dirty working tree or staged index.
+- By default, the command auto-commits any dirty tree before mirroring so the cron job never stops.
+- Use `--no-auto-commit` (optionally with `--force`) if you want to manage commits manually.
 - Never modifies original source directories; only writes inside `mirror/` and Git metadata.
 - Honors excludes and size caps to avoid leaking logs/secrets or gigantic binaries.

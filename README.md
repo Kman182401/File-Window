@@ -39,5 +39,6 @@ Run `bin/clone` to mirror local sources into `mirror/` and push:
 - Apply and push: `./bin/clone --push`
 - Include large files: `./bin/clone --allow-large --push`
 - Review branch: `./bin/clone --pr --push`
+- Skip auto-commit safeguards: `./bin/clone --no-auto-commit --force`
 
-Configuration lives in `.clone.toml`; manifests land in `mirror/MANIFEST_CLONE.json`.
+By default the command auto-commits any dirty working tree before mirroring. Configuration lives in `.clone.toml`; manifests land in `mirror/MANIFEST_CLONE.json`.

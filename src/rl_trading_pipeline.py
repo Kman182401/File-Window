@@ -885,6 +885,7 @@ class RLTradingPipeline:
             self.seq_torch is not None
             and self._load_seq_artifact is not None
         )
+        logging.info("Sequence forecaster enabled flag=%s", self.seq_enabled)
         self.seq_model_dir = Path(
             os_mod.getenv("SEQ_FORECASTER_DIR", str(MODELS_ROOT_DIR / "seq_forecaster"))
         ).expanduser()
