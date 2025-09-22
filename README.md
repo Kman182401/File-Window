@@ -18,27 +18,16 @@ Help me retire the 2016 high school budget PC and move this system onto a real A
 - Primary: Cash App tag: `$YaBoiBroke7567` → https://cash.app/$YaBoiBroke7567
 - Prefer email for larger contributions or hardware offers: komanderkody18@gmail.com
 
-## Syncing for ChatGPT
+## Sync Workflow
 
-The `bin/file_window_sync` utility mirrors the live trading system into this repository without touching source locations. Key pieces:
+The `bin/clone` command keeps GitHub identical to the live trading system on this workstation. It copies any external folders listed in `.clone.toml` into the repository tree, auto-commits local edits, and pushes whenever changes are detected.
 
-- Configuration lives in `.file-window-sync.yml`; an annotated sample is available at `examples/.file-window-sync.example.yml`.
-- Default mirrors land under `mirror/` alongside a generated `MANIFEST_SYNC.json` so ChatGPT can locate every file with checksums.
-- Run a dry-run audit: `./bin/file_window_sync`.
-- Apply changes and push: `./bin/file_window_sync --push` or the shorthand wrapper `./bin/fw-sync`.
-- Optional safety rails: `--scan-secrets`, `--allow-large`, `--tag`, `--pr`, `--manifest/--no-manifest`, and `--update-metadata` for `GPT_SYNC_VERSION.md`. Mark rarely used sources with `optional: true` to skip missing directories.
-- A `Makefile` target (`make sync`) and cron/example snippets in `docs/file_window_sync.md` provide additional automation options.
+Common calls:
 
-The script never edits the original sources—only the mirrored copies living inside this repository.
+- Preview: `clone --dry-run`
+- Sync + push: `clone --push` (or just `clone`)
+- Include oversized files once: `clone --allow-large --push`
+- Review branch: `clone --pr --push`
+- Opt out of auto-commit: `clone --no-auto-commit --force`
 
-## Clone Workflow
-
-Run `bin/clone` to mirror local sources into `mirror/` and push:
-
-- Preview changes: `./bin/clone --dry-run`
-- Apply and push: `./bin/clone --push`
-- Include large files: `./bin/clone --allow-large --push`
-- Review branch: `./bin/clone --pr --push`
-- Skip auto-commit safeguards: `./bin/clone --no-auto-commit --force`
-
-By default the command auto-commits any dirty working tree before mirroring. Configuration lives in `.clone.toml`; manifests land in `mirror/MANIFEST_CLONE.json`.
+`.clone.toml` maps external directories (e.g., `~/orders`) into subfolders inside the repo. Global and per-source excludes keep logs/caches out of Git. A cron job runs `clone --push --scan-secrets` every 15 minutes so ChatGPT can analyze this GitHub repo and get the full, current system without needing any extra context.

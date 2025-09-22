@@ -1,13 +1,13 @@
 # Clone Command Workflow
 
-This script mirrors selected local paths into the repository under `mirror/` so that
+This script mirrors selected local paths directly into the repository tree so that
 GitHub reflects the exact state of your workstation files while keeping the sources
 untouched.
 
 ## Configuration
 
 - Edit `.clone.toml` to declare sources, excludes, size caps, and behaviour flags.
-- Each `[[source]]` entry copies a local path into `mirror/<dest>/...`.
+- Each `[[source]]` entry copies a local path into `<dest>` inside the repository.
 - `optional = true` lets you skip missing paths without failing the run.
 - `global.global_excludes` applies to every source (logs, caches, etc.).
 - `max_file_size_mb` limits file size unless `--allow-large` is passed.
@@ -34,8 +34,8 @@ echo 'alias clone="$HOME/File-Window/bin/clone"' >> ~/.bashrc
 
 ## Outputs
 
-- Mirrored files live under `mirror/` grouped by `dest`.
-- `mirror/MANIFEST_CLONE.json` lists every mirrored file with SHA256 hashes.
+- Mirrored files land inside the repository grouped by `dest` values.
+- `MANIFEST_CLONE.json` lists every mirrored file with SHA256 hashes.
 - Commits use the message prefix `clone(sync)`.
 
 ## Automation
@@ -56,5 +56,5 @@ tail -f ~/logs/clone.log
 
 - By default, the command auto-commits any dirty tree before mirroring so the cron job never stops.
 - Use `--no-auto-commit` (optionally with `--force`) if you want to manage commits manually.
-- Never modifies original source directories; only writes inside `mirror/` and Git metadata.
+- Never modifies the original source directories; only writes inside the repository tree and Git metadata.
 - Honors excludes and size caps to avoid leaking logs/secrets or gigantic binaries.
