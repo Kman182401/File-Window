@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
+
+import numpy as np
 import torch
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
@@ -261,7 +263,10 @@ def load_artifact(path: Path, device: Optional[torch.device] = None) -> Sequence
         input_size=len(feature_cols),
         horizons=horizons,
     )
-    state_dict = torch.load(path, map_location=device or "cpu", weights_only=True)
+    try:
+        state_dict = torch.load(path, map_location=device or "cpu", weights_only=True)
+    except TypeError:
+        state_dict = torch.load(path, map_location=device or "cpu")
     model.load_state_dict(state_dict)
     if device is not None:
         model = model.to(device)
