@@ -1,0 +1,212 @@
+#!/usr/bin/env python3
+import argparse
+import hashlib
+import json
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+try:
+    import tomllib
+except ModuleNotFoundError:
+    print("Python 3.11+ required (tomllib stdlib).", file=sys.stderr)
+    sys.exit(2)
+
+REPO = Path(__file__).resolve().parents[1]
+MIRROR = REPO / "mirror"
+MANIFEST = MIRROR / "MANIFEST_CLONE.json"
+
+def run(cmd, *, check=True, capture=False):
+    kwargs = {"check": check}
+    if capture:
+        kwargs["stdout"] = subprocess.PIPE
+        kwargs["stderr"] = subprocess.PIPE
+    return subprocess.run(cmd, **kwargs)
+
+def git(*args, capture=False, check=True):
+    return run(["git", "-C", str(REPO), *args], check=check, capture=capture)
+
+def rsync_copy(src: Path, dest: Path, excludes, *, dry_run: bool, size_cap_mb, delete: bool):
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    args = [
+        "rsync",
+        "-a",
+        "--no-perms",
+        "--no-owner",
+        "--no-group",
+        "--prune-empty-dirs",
+    ]
+    if dry_run:
+        args.append("-n")
+    if delete:
+        args.append("--delete")
+    if size_cap_mb and size_cap_mb > 0:
+        args.extend(["--max-size", f"{int(size_cap_mb)}m"])
+    for pattern in excludes:
+        args.extend(["--exclude", pattern])
+    src_arg = str(src)
+    if src.is_dir() and not src_arg.endswith("/"):
+        src_arg += "/"
+    dest_arg = str(dest)
+    if not dest_arg.endswith("/"):
+        dest_arg += "/"
+    args.extend([src_arg, dest_arg])
+    return run(args, capture=True)
+
+def build_manifest(root: Path):
+    records = []
+    for path in sorted(root.rglob("*")):
+        if not path.is_file():
+            continue
+        h = hashlib.sha256()
+        with path.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                h.update(chunk)
+        records.append(
+            {
+                "path": str(path.relative_to(root)),
+                "sha256": h.hexdigest(),
+                "size": path.stat().st_size,
+            }
+        )
+    return {
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "root": str(root),
+        "files": records,
+    }
+
+def ensure_clean_tree():
+    if git("diff", "--quiet", "--no-ext-diff", check=False).returncode != 0:
+        print("Working tree is dirty. Commit or stash unrelated edits first.", file=sys.stderr)
+        sys.exit(2)
+    if git("diff", "--cached", "--quiet", check=False).returncode != 0:
+        print("Index has staged changes. Commit or reset before running clone.", file=sys.stderr)
+        sys.exit(2)
+
+def main():
+    parser = argparse.ArgumentParser(description="Mirror local sources into repo/mirror and push.")
+    parser.add_argument("--dry-run", action="store_true", help="Analyze only; no writes or commits")
+    parser.add_argument("--push", action="store_true", help="Push after committing (default if not --no-push)")
+    parser.add_argument("--no-push", action="store_true", help="Do not push even if a commit is made")
+    parser.add_argument("--rebase", action="store_true", help="git fetch && rebase origin/<branch> before syncing")
+    parser.add_argument("--pr", action="store_true", help="Commit to sync/review-<timestamp> branch instead of main")
+    parser.add_argument("--allow-large", action="store_true", help="Disable size cap on rsync")
+    parser.add_argument("--scan-secrets", action="store_true", help="grep for potential secrets before committing")
+    args = parser.parse_args()
+
+    cfg_path = REPO / ".clone.toml"
+    if not cfg_path.exists():
+        print(f"Config missing: {cfg_path}", file=sys.stderr)
+        sys.exit(2)
+
+    config = tomllib.loads(cfg_path.read_text(encoding="utf-8"))
+    global_cfg = config.get("global", {})
+    branch = global_cfg.get("branch", "main")
+    delete_on_repo = bool(global_cfg.get("delete_on_repo", True))
+    write_manifest = bool(global_cfg.get("write_manifest", True))
+    size_cap = None if args.allow_large else global_cfg.get("max_file_size_mb", 15)
+    global_excludes = set(global_cfg.get("global_excludes", []))
+    sources = config.get("source", [])
+    if not sources:
+        print("No [[source]] entries found in .clone.toml", file=sys.stderr)
+        sys.exit(2)
+
+    # Ensure repo
+    try:
+        git("rev-parse", "--is-inside-work-tree")
+    except subprocess.CalledProcessError:
+        print(f"{REPO} is not a git repository", file=sys.stderr)
+        sys.exit(2)
+
+    ensure_clean_tree()
+
+    git("fetch", "origin", "--prune")
+    if args.rebase:
+        git("rebase", f"origin/{branch}")
+
+    if args.pr:
+        branch = f"sync/review-{time.strftime('%Y%m%d-%H%M%S')}"
+
+    MIRROR.mkdir(exist_ok=True)
+
+    rsync_outputs = []
+    for src_cfg in sources:
+        source_path = Path(src_cfg.get("path", "")).expanduser().resolve()
+        dest_prefix = src_cfg.get("dest", "root")
+        optional = bool(src_cfg.get("optional", False))
+        local_excludes = set(src_cfg.get("excludes", []))
+        excludes = sorted(global_excludes | local_excludes)
+
+        if not source_path.exists():
+            if optional:
+                continue
+            print(f"Source missing: {source_path}", file=sys.stderr)
+            sys.exit(2)
+
+        dest_root = MIRROR / dest_prefix
+        dest_root.mkdir(parents=True, exist_ok=True)
+        result = rsync_copy(
+            source_path,
+            dest_root,
+            excludes,
+            dry_run=args.dry_run,
+            size_cap_mb=size_cap,
+            delete=delete_on_repo,
+        )
+        rsync_outputs.append(result.stdout.decode("utf-8", "ignore"))
+
+    if args.dry_run:
+        print("==== rsync dry-run summaries ====")
+        for output in rsync_outputs:
+            if output.strip():
+                print(output.strip())
+        print("==== end dry-run ====")
+        sys.exit(0)
+
+    if write_manifest:
+        manifest = build_manifest(MIRROR)
+        MANIFEST.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+    git("add", "mirror")
+    if git("diff", "--cached", "--quiet", check=False).returncode == 0:
+        print("No differences detected. Repo already matches local sources.")
+        sys.exit(0)
+
+    if args.scan_secrets:
+        scan = run(
+            [
+                "grep",
+                "-RniE",
+                "(api[_-]?key|secret|password|token|AKIA[0-9A-Z]{16})",
+                "mirror",
+            ],
+            check=False,
+            capture=True,
+        )
+        if scan.returncode == 0 and scan.stdout:
+            print("Potential secrets detected:\n" + scan.stdout.decode(), file=sys.stderr)
+            print("Aborting commit. Adjust excludes or remove sensitive files and retry.", file=sys.stderr)
+            sys.exit(3)
+
+    diff_stat = git("diff", "--cached", "--stat", capture=True).stdout.decode()
+    commit_message = "clone(sync): reconcile mirror with local sources\n\n" + diff_stat
+    git("commit", "-m", commit_message)
+
+    if args.pr:
+        git("checkout", "-B", branch)
+
+    if args.no_push:
+        print("Committed locally (no push).")
+        sys.exit(0)
+
+    target_branch = branch
+    git("push", "-u", "origin", target_branch)
+    print(f"Pushed to origin/{target_branch}")
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("clone aborted by user.", file=sys.stderr)
+        sys.exit(130)

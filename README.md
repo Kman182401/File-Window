@@ -30,3 +30,14 @@ The `bin/file_window_sync` utility mirrors the live trading system into this rep
 - A `Makefile` target (`make sync`) and cron/example snippets in `docs/file_window_sync.md` provide additional automation options.
 
 The script never edits the original sources—only the mirrored copies living inside this repository.
+
+## Clone Workflow
+
+Run `bin/clone` to mirror local sources into `mirror/` and push:
+
+- Preview changes: `./bin/clone --dry-run`
+- Apply and push: `./bin/clone --push`
+- Include large files: `./bin/clone --allow-large --push`
+- Review branch: `./bin/clone --pr --push`
+
+Configuration lives in `.clone.toml`; manifests land in `mirror/MANIFEST_CLONE.json`.

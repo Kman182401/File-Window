@@ -1,0 +1,38 @@
+[global]
+max_file_size_mb = 15
+delete_on_repo = true
+write_manifest   = true
+branch           = "main"
+
+global_excludes = [
+  "*.log",
+  "*.tmp",
+  "*.csv",
+  "*.parquet",
+  "__pycache__",
+  ".git",
+  ".mypy_cache",
+  ".pytest_cache",
+  ".ipynb_checkpoints",
+  "ml_env",
+  "venv",
+  ".venv",
+  "node_modules",
+  "*.ibgzenc"
+]
+
+[[source]]
+path = "/home/karson/File-Window/src"
+dest = "repo/src"
+optional = false
+
+[[source]]
+path = "/home/karson/File-Window/config"
+dest = "repo/config"
+optional = true
+excludes = ["secrets/*", "*.env"]
+
+[[source]]
+path = "/home/karson/workspace/tools"
+dest = "external/tools"
+optional = true
