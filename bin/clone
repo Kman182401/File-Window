@@ -49,26 +49,28 @@ def auto_commit_dirty_tree() -> bool:
     return True
 
 
-def ensure_repo_clean(force: bool, auto_commit_enabled: bool) -> None:
+def ensure_repo_clean(force: bool, auto_commit_enabled: bool) -> bool:
+    auto_committed = False
     state = working_tree_state()
     if not state.strip():
-        return
+        return auto_committed
     if auto_commit_enabled:
-        auto_commit_dirty_tree()
+        auto_committed = auto_commit_dirty_tree()
         state = working_tree_state()
         if not state.strip():
-            return
+            return auto_committed
         if force:
             print("[clone] Warning: tree still dirty after auto-commit; proceeding because --force was supplied.", file=sys.stderr)
-            return
+            return auto_committed
         print("Working tree remains dirty after auto-commit. Resolve manually or rerun with --force.", file=sys.stderr)
         sys.exit(2)
     else:
         if force:
             print("[clone] Proceeding with dirty tree (auto-commit disabled).", file=sys.stderr)
-            return
+            return auto_committed
         print("Working tree is dirty. Commit or stash unrelated edits first, or use --force.", file=sys.stderr)
         sys.exit(2)
+    return auto_committed
 
 
 def rsync_copy(src: Path, dest: Path, excludes, *, dry_run: bool, size_cap_mb, delete: bool) -> subprocess.CompletedProcess:
@@ -192,9 +194,9 @@ def main():
         sys.exit(2)
 
     if args.dry_run:
-        ensure_repo_clean(force=True, auto_commit_enabled=False)
+        auto_committed = ensure_repo_clean(force=True, auto_commit_enabled=False)
     else:
-        ensure_repo_clean(force=args.force, auto_commit_enabled=not args.no_auto_commit)
+        auto_committed = ensure_repo_clean(force=args.force, auto_commit_enabled=not args.no_auto_commit)
 
     git("fetch", "origin", "--prune")
     if args.rebase:
