@@ -1,5 +1,5 @@
 {
-  "generated_at": "2025-09-22T17:45:02Z",
+  "generated_at": "2025-09-22T17:45:11Z",
   "root": "/home/karson/File-Window/mirror",
   "files": [
     {
@@ -9,8 +9,8 @@
     },
     {
       "path": "MANIFEST_CLONE.json",
-      "sha256": "c3a7076516da726dd8023a4fd9b06330f46b2ea70b082322ef51e28c68a3f5fc",
-      "size": 2694
+      "sha256": "6a4c0a99d4f28b347eec06eef0572f2f74a2db688eb61c7617ec03af6050fbbf",
+      "size": 2847
     },
     {
       "path": "repo/config/env.example",
