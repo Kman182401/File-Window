@@ -1929,6 +1929,7 @@ class RLTradingPipeline:
 
                 meta_X = []
                 meta_y = []
+                stack_lengths: Dict[str, int] = {}
 
                 meta_signals = None
 
@@ -2088,6 +2089,7 @@ class RLTradingPipeline:
 
                     meta_X.extend(stack.tolist())
                     meta_y.extend(y_cut.astype(int).tolist())
+                    stack_lengths[ticker] = min_len
                     logging.info(
                         "Stacking features for %s: sources=%s, rows=%s",
                         ticker,
@@ -2197,7 +2199,7 @@ class RLTradingPipeline:
                     if len(X) > 20:
                         split_idx = int(len(X) * 0.8)
                         X_test = X.iloc[split_idx:]
-                        n = len(X_test)
+                        n = stack_lengths.get(ticker, len(X_test))
                         if meta_signals is not None and signal_idx + n <= len(meta_signals):
                             if ib is None:
                                 logging.warning("Meta-model trading skipped for %s: IB connection unavailable.", ticker)
