@@ -1075,11 +1075,14 @@ class RLTradingPipeline:
                 logging.warning("Sequence forecaster device fallback to CPU: %s", exc)
                 self.seq_device = self.seq_torch.device("cpu")
             logging.info(
-                "Sequence forecaster enabled (dir=%s, device=%s)", self.seq_model_dir, self.seq_device
+                "Sequence forecaster enabled flag=%s dir=%s device=%s",
+                self.seq_enabled,
+                self.seq_model_dir,
+                self.seq_device,
             )
         else:
             self.seq_device = None
-            logging.info("Sequence forecaster disabled (missing torch or artifact loader).")
+            logging.info("Sequence forecaster enabled flag=%s (missing torch or artifact loader).", self.seq_enabled)
 
         self.seq_training_enabled = (
             self.seq_enabled
@@ -1269,9 +1272,66 @@ class RLTradingPipeline:
         missing = [col for col in feature_cols if col not in df.columns]
         if missing:
             logging.warning(
-                "Sequence forecaster skipped for %s: missing feature columns %s", ticker, missing
+                "Seq forecaster feature mismatch for %s; missing=%s. Triggering retrain.",
+                ticker,
+                missing,
             )
-            return None
+            if self.seq_training_enabled:
+                try:
+                    seq_metrics = self._fit_seq_forecaster(
+                        df,
+                        [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c]) and c != "close"],
+                        symbol=ticker,
+                        horizons=self.seq_horizons,
+                        n_steps=self.seq_n_steps,
+                        step=self.seq_step,
+                        out_dir=str(self.seq_model_dir),
+                        train_split=self.seq_train_split,
+                        val_split=self.seq_val_split,
+                        hidden_size=self.seq_hidden_size,
+                        num_layers=self.seq_num_layers,
+                        dropout=self.seq_dropout,
+                        epochs=self.seq_epochs,
+                        batch_size=self.seq_batch_size,
+                        lr=self.seq_lr,
+                        weight_decay=self.seq_weight_decay,
+                        patience=self.seq_patience,
+                        device=self.seq_device,
+                        seed=self.seq_seed,
+                    )
+                    self.seq_last_train_time[ticker] = datetime.utcnow()
+                    self.seq_models.pop(ticker, None)
+                    artifact = self._get_seq_artifact(ticker)
+                    self._emit_event(
+                        component="sequence_forecaster",
+                        category="ml",
+                        event="train_complete",
+                        symbol=ticker,
+                        corr_id=self._corr(ticker),
+                        data=seq_metrics,
+                    )
+                except Exception as exc:
+                    logging.warning(
+                        "Sequence forecaster retrain failed during mismatch heal for %s: %s",
+                        ticker,
+                        exc,
+                    )
+                    self._emit_event(
+                        component="sequence_forecaster",
+                        category="ml",
+                        event="train_error",
+                        symbol=ticker,
+                        corr_id=self._corr(ticker),
+                        state="ERROR",
+                        message=str(exc),
+                    )
+                    return None
+                artifact = self._get_seq_artifact(ticker)
+                if artifact is None:
+                    return None
+                feature_cols = artifact.feature_cols
+            else:
+                return None
 
         df_feat = (
             df[feature_cols]
@@ -2130,6 +2190,11 @@ class RLTradingPipeline:
                         if feature_df is None or feature_df.empty:
                             self._get_seq_artifact(ticker)
                             continue
+                        logging.info(
+                            "Computing sequence forecasts for %s (feature_rows=%s)",
+                            ticker,
+                            len(feature_df),
+                        )
                         seq_df = self._compute_sequence_forecasts(ticker, feature_df)
                         if seq_df is not None:
                             seq_preds_by_ticker[ticker] = seq_df

@@ -81,7 +81,7 @@ Subsystem Plans (What and Why)
 
 8) Safety and Run Modes
 - Defaults: `ALLOW_ORDERS=0`, `DRY_RUN=1`, and paper trading on `127.0.0.1:4002` until baseline is validated.
-- Reserve client IDs to avoid collisions: 9001 (smokes), 9002 (pipeline), 9007 (orders bridge) as documented in scripts.
+- Reserve client IDs to avoid collisions: 9001 (smokes) and 9002 (pipeline + order placement). The legacy 9007 orders bridge has been retired.
 
 9) Dependencies and CUDA Alignment
 - Torch: current pin `torch==2.0.1` likely CPU‑only for this box; for CUDA, install compatible wheel (e.g., PyTorch 2.4.x cu121) and verify `torch.cuda.is_available()`.

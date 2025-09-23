@@ -75,13 +75,8 @@ else
   ~/jobs/run_news_ingestion.sh   >"$LOG_DIR/news.out"     2>"$LOG_DIR/news.err" &
   echo "Started bg jobs. Tail logs in $LOG_DIR."
 fi
-# --- Omega orders sidecar (idempotent) ---
-if tmux has-session -t "$SESSION" 2>/dev/null; then
-  if ! tmux list-windows -t "$SESSION" | grep -q '\<orders\>'; then
-    tmux new-window -t "$SESSION" -n orders "bash -lc 'IBKR_HOST=${IBKR_HOST:-127.0.0.1} IBKR_PORT=${IBKR_PORT:-4002} IBKR_ORDERS_CLIENT_ID=${IBKR_ORDERS_CLIENT_ID:-9007} DRY_RUN=${DRY_RUN:-1} ~/orders/start_orders_bridge.sh'"
-  fi
-fi
-# --- end orders sidecar ---
+# Orders sidecar retired: pipeline (clientId 9002) now places trades directly.
+# Leaving the window disabled keeps tmux clean and prevents accidental 9007 sessions.
 
 # --- Omega IB holder (keeps one client connected) ---
 if tmux has-session -t "$SESSION" 2>/dev/null; then
