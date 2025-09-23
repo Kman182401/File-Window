@@ -1,5 +1,6 @@
 import logging
 import os
+import sys
 import uuid
 from pathlib import Path
 
@@ -48,13 +49,22 @@ except Exception:
             return self._store.get(key)
         def clear(self):
             self._store.clear()
+# Configure root logger to stream INFO+ to stdout so tee captures pipeline diagnostics.
+ROOT_LOGGER = logging.getLogger()
+for handler in list(ROOT_LOGGER.handlers):
+    ROOT_LOGGER.removeHandler(handler)
+stream_handler = logging.StreamHandler(sys.stdout)
+stream_handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)-7s | %(message)s"))
+ROOT_LOGGER.addHandler(stream_handler)
+ROOT_LOGGER.setLevel(logging.INFO)
+
 feature_store = RealTimeFeatureStore()
 
 from market_data_config import MAX_POSITION_EXPOSURE
 from ib_single_socket import init_ib
 import datetime
 from market_data_config import MAX_DAILY_LOSS_PCT, MAX_TRADES_PER_DAY
-from ib_insync import MarketOrder, util
+from ib_insync import MarketOrder, LimitOrder, StopOrder, util
 from account_summary_lookahead import AccountSummaryLookahead
 from market_data_ibkr_adapter import IBKRIngestor
 from utils.persist_market_data import persist_bars
@@ -329,17 +339,181 @@ def new_data_available(data_dir, ticker, last_check_time):
         return False
     return mtime > last_check_time
 
+def _round_to_tick(price: float, tick: float) -> float:
+    if tick <= 0:
+        return price
+    return round(price / tick) * tick
+
+
+def _contract_tick_size(ib, contract) -> float:
+    """Best-effort retrieval of the contract's minimum tick size."""
+    try:
+        details = ib.reqContractDetails(contract) or []
+    except Exception:
+        details = []
+    for cd in details:
+        tick = getattr(cd, "minTick", None)
+        if tick and tick > 0:
+            return float(tick)
+        magnifier = getattr(cd, "priceMagnifier", None)
+        if magnifier and magnifier > 0:
+            return 1.0 / float(magnifier)
+    return 0.25  # sensible default for CME futures
+
+
+def _last_trade_price(ib, contract) -> float:
+    ticker = ib.reqMktData(contract, "", False, False)
+    for _ in range(40):
+        last = ticker.last
+        if last and not math.isinf(last) and last > 0:
+            return float(last)
+        mid = ticker.marketPrice()
+        if mid and not math.isinf(mid) and mid > 0:
+            return float(mid)
+        close = ticker.close
+        if close and not math.isinf(close) and close > 0:
+            return float(close)
+        ib.sleep(0.1)
+
+    try:
+        bars = ib.reqHistoricalData(
+            contract,
+            endDateTime="",
+            durationStr="1 D",
+            barSizeSetting="1 min",
+            whatToShow="TRADES",
+            useRTH=False,
+            formatDate=2,
+        )
+    except Exception:
+        bars = []
+
+    if bars:
+        return float(bars[-1].close)
+    raise RuntimeError("Unable to retrieve last trade price for contract")
+
+
+def _build_bracket_order(action: str, qty: int, last_px: float, tick: float,
+                         entry_type: str, limit_offset_ticks: float,
+                         stop_ticks: float, take_ticks: float, tif: str):
+    action = action.upper()
+    if entry_type == "LIMIT":
+        offset = (limit_offset_ticks or 0.0) * tick
+        entry_px = last_px - offset if action == "BUY" else last_px + offset
+        entry_px = _round_to_tick(entry_px, tick)
+        parent = LimitOrder(action, qty, entry_px, tif=tif)
+    else:
+        parent = MarketOrder(action, qty, tif=tif)
+    parent.outsideRth = True
+    parent.transmit = False
+
+    stop_action = "SELL" if action == "BUY" else "BUY"
+    stop_px = last_px - (stop_ticks * tick) if action == "BUY" else last_px + (stop_ticks * tick)
+    stop_px = _round_to_tick(stop_px, tick)
+    stop = StopOrder(stop_action, qty, stop_px, tif=tif)
+    stop.outsideRth = True
+    stop.transmit = False
+
+    take_px = last_px + (take_ticks * tick) if action == "BUY" else last_px - (take_ticks * tick)
+    take_px = _round_to_tick(take_px, tick)
+    take = LimitOrder(stop_action, qty, take_px, tif=tif)
+    take.outsideRth = True
+    take.transmit = True
+
+    oca = f"OCA_{abs(hash((last_px, qty, action)) % 10_000_000)}"
+    stop.ocaGroup = take.ocaGroup = oca
+    stop.ocaType = take.ocaType = 1
+
+    return parent, stop, take
+
+
 def execute_trade(ib, contract, action, quantity):
-    """
-    Place a market order via IBKR API.
-    ib: ib_insync.IB instance (connected)
-    contract: ib_insync.Contract instance (for the symbol)
-    action: 'BUY' or 'SELL'
-    quantity: int
-    """
-    order = MarketOrder(action, quantity)
+    """Place an order via the shared IB connection (clientId 9002)."""
+    action = action.upper()
+    quantity = int(quantity)
+    allow_orders = os_mod.getenv("ALLOW_ORDERS", "0").lower() in ("1", "true", "yes")
+    dry_run = os_mod.getenv("DRY_RUN", "1").lower() in ("1", "true", "yes")
+    use_bracket = os_mod.getenv("ORDER_USE_BRACKET", "1").lower() in ("1", "true", "yes")
+    entry_type = os_mod.getenv("ENTRY_TYPE", "MARKET").upper()
+    limit_offset_ticks = float(os_mod.getenv("LIMIT_OFFSET_TICKS", "0"))
+    stop_ticks = float(os_mod.getenv("STOP_TICKS", "8"))
+    take_ticks = float(os_mod.getenv("TAKE_TICKS", "16"))
+    tif = os_mod.getenv("TIF", "DAY").upper()
+
+    tick_size = _contract_tick_size(ib, contract)
+    try:
+        last_price = _last_trade_price(ib, contract)
+    except Exception as exc:
+        logging.warning("Failed to acquire last price for %s: %s", contract.localSymbol, exc)
+        last_price = None
+
+    if dry_run or not allow_orders:
+        logging.info(
+            "Order suppressed (dry_run=%s allow_orders=%s): %s %s %s @ last=%s tick=%s",
+            dry_run,
+            allow_orders,
+            action,
+            quantity,
+            contract.localSymbol,
+            last_price,
+            tick_size,
+        )
+        return None
+
+    if last_price is None:
+        raise RuntimeError(f"No market price available for {contract.localSymbol}")
+
+    if use_bracket:
+        parent, stop, take = _build_bracket_order(
+            action,
+            quantity,
+            last_price,
+            tick_size,
+            entry_type,
+            limit_offset_ticks,
+            stop_ticks,
+            take_ticks,
+            tif,
+        )
+        parent_trade = ib.placeOrder(contract, parent)
+        ib.sleep(0.2)
+        order_id = getattr(parent_trade.order, "orderId", None)
+        stop.parentId = order_id
+        take.parentId = order_id
+        stop.outsideRth = take.outsideRth = True
+        ib.placeOrder(contract, stop)
+        ib.sleep(0.2)
+        ib.placeOrder(contract, take)
+        logging.info(
+            "Bracket order submitted: %s qty=%s last=%.4f stop=%.4f take=%.4f (orderId=%s)",
+            contract.localSymbol,
+            quantity,
+            last_price,
+            stop.auxPrice,
+            take.lmtPrice,
+            order_id,
+        )
+        return parent_trade
+
+    if entry_type == "LIMIT":
+        offset = (limit_offset_ticks or 0.0) * tick_size
+        limit_price = last_price - offset if action == "BUY" else last_price + offset
+        limit_price = _round_to_tick(limit_price, tick_size)
+        order = LimitOrder(action, quantity, limit_price, tif=tif)
+    else:
+        order = MarketOrder(action, quantity, tif=tif)
+    order.outsideRth = True
+
     trade = ib.placeOrder(contract, order)
-    print(f"Order submitted: {action} {quantity} {contract.localSymbol}")
+    logging.info(
+        "Order submitted: %s %s qty=%s price=%s type=%s orderId=%s",
+        contract.localSymbol,
+        action,
+        quantity,
+        getattr(order, "lmtPrice", last_price),
+        entry_type,
+        getattr(trade.order, "orderId", None),
+    )
     return trade
 
 # Default data dir for new_data_available checks (env-first)
@@ -1135,7 +1309,14 @@ class RLTradingPipeline:
 
         index = df_feat.index[artifact.n_steps - 1 :]
         data = {f"seq_r{int(h)}": preds[:, i] for i, h in enumerate(artifact.horizons)}
-        return pd.DataFrame(data, index=index)
+        seq_df = pd.DataFrame(data, index=index)
+        logging.info(
+            "Sequence forecast generated for %s: rows=%s columns=%s",
+            ticker,
+            len(seq_df),
+            list(seq_df.columns),
+        )
+        return seq_df
 
     def _micro_poll_symbol(self, ticker: str) -> int:
         """Poll a tiny historical window and append only new rows.
