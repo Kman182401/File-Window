@@ -203,6 +203,7 @@ class SACTradingAgent:
             Optimized configuration
         """
         # Base configuration
+        preferred_device = "cuda" if torch.cuda.is_available() else "cpu"
         base_config = {
             # Model architecture
             'policy': 'MlpPolicy',
@@ -232,11 +233,16 @@ class SACTradingAgent:
             'use_sde_at_warmup': True,
             
             # System
-            'device': 'cpu',
+            'device': preferred_device,
             'verbose': 1,
             'tensorboard_log': './tensorboard_logs/sac/',
             'memory_limit_mb': 1000
         }
+
+        if preferred_device == "cuda":
+            logger.info("CUDA available – configuring SAC to run on GPU.")
+        else:
+            logger.info("CUDA not available – falling back to CPU for SAC.")
         
         # Adjust based on available memory
         available_mb = get_available_memory_mb()

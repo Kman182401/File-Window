@@ -126,6 +126,7 @@ class RecurrentPPOAgent:
             Optimized configuration
         """
         # Base configuration
+        preferred_device = "cuda" if torch.cuda.is_available() else "cpu"
         base_config = {
             # Model architecture
             'policy': 'MlpLstmPolicy',
@@ -157,11 +158,16 @@ class RecurrentPPOAgent:
             'max_grad_norm': 0.5,    # Gradient clipping
             
             # System
-            'device': 'cpu',
+            'device': preferred_device,
             'verbose': 1,
             'tensorboard_log': './tensorboard_logs/recurrent_ppo/',
             'memory_limit_mb': 800
         }
+
+        if preferred_device == "cuda":
+            logger.info("CUDA available – configuring RecurrentPPO to run on GPU.")
+        else:
+            logger.info("CUDA not available – falling back to CPU for RecurrentPPO.")
         
         # Adjust based on available memory
         available_mb = get_available_memory_mb()

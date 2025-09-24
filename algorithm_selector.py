@@ -10,10 +10,13 @@ trading brain that can make decisions and learn.
 import os
 import logging
 import numpy as np
+import torch
 from typing import Dict, Any, Optional, Tuple, Union, Type
 from enum import Enum
 import psutil
 from datetime import datetime, timedelta
+
+logger = logging.getLogger(__name__)
 
 # Import system components
 from system_optimization_config import get_available_memory_mb, get_optimal_batch_size
@@ -38,8 +41,6 @@ try:
 except ImportError:
     STANDARD_AGENTS_AVAILABLE = False
     logger.warning("Standard RL agents not available")
-
-logger = logging.getLogger(__name__)
 
 
 class AlgorithmType(Enum):
@@ -394,21 +395,23 @@ class AlgorithmSelector:
                 return create_recurrent_ppo_agent(self.env)
             
             elif algorithm_type == AlgorithmType.PPO and STANDARD_AGENTS_AVAILABLE:
+                preferred_device = "cuda" if torch.cuda.is_available() else "cpu"
                 config = {
                     'policy': 'MlpPolicy',
                     'learning_rate': 3e-4,
                     'n_steps': get_optimal_batch_size('rl_training') * 16,
                     'batch_size': get_optimal_batch_size('rl_training'),
-                    'device': 'cpu',
+                    'device': preferred_device,
                     'verbose': 1
                 }
                 return PPO(config['policy'], self.env, **{k:v for k,v in config.items() if k != 'policy'})
             
             elif algorithm_type == AlgorithmType.A2C and STANDARD_AGENTS_AVAILABLE:
+                preferred_device = "cuda" if torch.cuda.is_available() else "cpu"
                 config = {
                     'policy': 'MlpPolicy',
                     'learning_rate': 3e-4,
-                    'device': 'cpu',
+                    'device': preferred_device,
                     'verbose': 1
                 }
                 return A2C(config['policy'], self.env, **{k:v for k,v in config.items() if k != 'policy'})
