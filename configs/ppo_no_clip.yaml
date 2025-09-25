@@ -1,6 +1,6 @@
 experiment_name: ppo_no_clip
 clip_range_vf: null
 total_timesteps: 5000
-eval_episodes: 5
+eval_episodes: 10
 seed: 42
 rc_iterations: 200

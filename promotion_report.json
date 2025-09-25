@@ -1,0 +1,33 @@
+{
+  "generated_at": "2025-09-25T11:57:41.169198",
+  "runs": [
+    {
+      "experiment": "ppo_clip",
+      "clip_range_vf": 0.2,
+      "oos_sharpe": 4.337879402095301,
+      "deflated_sharpe_ratio": 0.999999999,
+      "reality_check_pvalue": 0.8208955223880597,
+      "episode_return_mean": 385.2,
+      "episode_return_std": 88.79914914507283,
+      "timestamp": "2025-09-25T11:56:32.472734"
+    },
+    {
+      "experiment": "ppo_no_clip",
+      "clip_range_vf": null,
+      "oos_sharpe": 5.926300381260333,
+      "deflated_sharpe_ratio": 0.9918883590473417,
+      "reality_check_pvalue": 0.8208955223880597,
+      "episode_return_mean": 451.5,
+      "episode_return_std": 76.18581086907048,
+      "timestamp": "2025-09-25T11:57:04.912314"
+    }
+  ],
+  "winner": {
+    "experiment": "ppo_no_clip",
+    "clip_range_vf": null,
+    "oos_sharpe": 5.926300381260333,
+    "deflated_sharpe_ratio": 0.9918883590473417,
+    "reality_check_pvalue": 0.8208955223880597,
+    "selection_reason": "Selected highest OOS Sharpe with DSR \u2265 0.95 and acceptable Reality Check p-value."
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "timestamp": "2025-09-25T11:57:04.912314",
+  "experiment": "ppo_no_clip",
+  "clip_range_vf": null,
+  "total_timesteps": 5000,
+  "eval_episodes": 10,
+  "seed": 42,
+  "device": "cuda",
+  "metrics": {
+    "oos_sharpe": 5.926300381260333,
+    "deflated_sharpe_ratio": 0.9918883590473417,
+    "reality_check_pvalue": 0.8208955223880597,
+    "step_return_mean": 1.0,
+    "step_return_std": 0.0,
+    "episode_return_mean": 451.5,
+    "episode_return_std": 76.18581086907048
+  },
+  "counts": {
+    "steps": 4515,
+    "episodes": 10
+  },
+  "artifacts": {
+    "vecnormalize_path": "/home/karson/File-Window/artifacts/walk_forward/vecnorm_ppo_no_clip.pkl"
+  }
+}

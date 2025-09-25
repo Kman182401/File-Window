@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 import argparse
+import sys
 import json
 import logging
 import math
 from datetime import datetime
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 import numpy as np
 import torch
@@ -71,12 +76,6 @@ def train_and_evaluate(cfg: dict) -> dict:
         gamma=cfg["gamma"],
     )
 
-    policy_kwargs = {
-        "lstm_hidden_size": 64,
-        "n_lstm_layers": 1,
-        "shared_lstm": True,
-    }
-
     model = RecurrentPPO(
         policy="MlpLstmPolicy",
         env=train_env,
@@ -93,7 +92,6 @@ def train_and_evaluate(cfg: dict) -> dict:
         vf_coef=cfg["vf_coef"],
         max_grad_norm=cfg["max_grad_norm"],
         target_kl=None,
-        policy_kwargs=policy_kwargs,
         verbose=0,
         seed=seed,
         device="cuda" if torch.cuda.is_available() else "cpu",
@@ -148,17 +146,21 @@ def train_and_evaluate(cfg: dict) -> dict:
             lstm_states = None
             episode_start = np.ones((eval_env.num_envs,), dtype=bool)
 
-    returns_array = np.array(step_returns, dtype=np.float64)
-    benchmark = np.zeros_like(returns_array)
-    returns_matrix = np.column_stack([benchmark, returns_array])
+    episode_array = np.array(episode_returns, dtype=np.float64)
+    if episode_array.size == 0:
+        raise RuntimeError('No evaluation episodes completed')
+    benchmark = np.zeros_like(episode_array)
+    returns_matrix = np.column_stack([benchmark, episode_array])
 
-    sharpe = harness.compute_sharpe_ratio(returns_array)
-    dsr = harness.deflated_sharpe_ratio(returns_array, benchmark_sr=0.0, num_trials=1)
+    sharpe = harness.compute_sharpe_ratio(episode_array)
+    dsr = harness.deflated_sharpe_ratio(episode_array, benchmark_sr=0.0, num_trials=1)
     rc_pvalue = harness.reality_check_pvalue(
         returns_matrix,
         benchmark_index=0,
         n_iterations=int(cfg["rc_iterations"]),
     )
+
+    step_array = np.array(step_returns, dtype=np.float64)
 
     report = {
         "timestamp": datetime.utcnow().isoformat(),
@@ -172,9 +174,10 @@ def train_and_evaluate(cfg: dict) -> dict:
             "oos_sharpe": float(sharpe),
             "deflated_sharpe_ratio": float(dsr),
             "reality_check_pvalue": float(rc_pvalue),
-            "step_return_mean": float(np.mean(returns_array)),
-            "step_return_std": float(np.std(returns_array, ddof=1)) if len(returns_array) > 1 else 0.0,
-            "episode_return_mean": float(np.mean(episode_returns)) if episode_returns else 0.0,
+            "step_return_mean": float(np.mean(step_array)) if step_array.size else 0.0,
+            "step_return_std": float(np.std(step_array, ddof=1)) if step_array.size > 1 else 0.0,
+            "episode_return_mean": float(np.mean(episode_array)),
+            "episode_return_std": float(np.std(episode_array, ddof=1)) if episode_array.size > 1 else 0.0,
         },
         "counts": {
             "steps": len(step_returns),
