@@ -1,33 +1,33 @@
 {
-  "generated_at": "2025-09-25T11:57:41.169198",
+  "generated_at": "2025-09-25T12:52:11.663408",
   "runs": [
     {
       "experiment": "ppo_clip",
       "clip_range_vf": 0.2,
-      "oos_sharpe": 4.337879402095301,
-      "deflated_sharpe_ratio": 0.999999999,
-      "reality_check_pvalue": 0.8208955223880597,
-      "episode_return_mean": 385.2,
-      "episode_return_std": 88.79914914507283,
-      "timestamp": "2025-09-25T11:56:32.472734"
+      "oos_sharpe": -1.0213885705449381,
+      "deflated_sharpe_ratio": 3.9754866065777605e-12,
+      "reality_check_pvalue": 1.0,
+      "episode_return_mean": -19.272292687999908,
+      "episode_return_std": 18.868717786530176,
+      "timestamp": "2025-09-25T12:41:11.487274"
     },
     {
       "experiment": "ppo_no_clip",
       "clip_range_vf": null,
-      "oos_sharpe": 5.926300381260333,
-      "deflated_sharpe_ratio": 0.9918883590473417,
-      "reality_check_pvalue": 0.8208955223880597,
-      "episode_return_mean": 451.5,
-      "episode_return_std": 76.18581086907048,
-      "timestamp": "2025-09-25T11:57:04.912314"
+      "oos_sharpe": -1.5494526997066893,
+      "deflated_sharpe_ratio": 3.9754866065777605e-12,
+      "reality_check_pvalue": 1.0,
+      "episode_return_mean": -38.42581921995305,
+      "episode_return_std": 24.79960777584694,
+      "timestamp": "2025-09-25T12:51:48.632385"
     }
   ],
   "winner": {
-    "experiment": "ppo_no_clip",
-    "clip_range_vf": null,
-    "oos_sharpe": 5.926300381260333,
-    "deflated_sharpe_ratio": 0.9918883590473417,
-    "reality_check_pvalue": 0.8208955223880597,
-    "selection_reason": "Selected highest OOS Sharpe with DSR \u2265 0.95 and acceptable Reality Check p-value."
+    "experiment": "ppo_clip",
+    "clip_range_vf": 0.2,
+    "oos_sharpe": -1.0213885705449381,
+    "deflated_sharpe_ratio": 3.9754866065777605e-12,
+    "reality_check_pvalue": 1.0,
+    "selection_reason": "Selected highest OOS Sharpe under shared seeds and VecNormalize stats."
   }
 }

@@ -1,25 +1,89 @@
 {
-  "timestamp": "2025-09-25T11:57:04.912314",
+  "timestamp": "2025-09-25T12:51:48.632385",
   "experiment": "ppo_no_clip",
   "clip_range_vf": null,
   "total_timesteps": 5000,
-  "eval_episodes": 10,
-  "seed": 42,
+  "eval_episodes": 100,
+  "seeds": [
+    101,
+    202,
+    303,
+    404,
+    505
+  ],
   "device": "cuda",
   "metrics": {
-    "oos_sharpe": 5.926300381260333,
-    "deflated_sharpe_ratio": 0.9918883590473417,
-    "reality_check_pvalue": 0.8208955223880597,
-    "step_return_mean": 1.0,
-    "step_return_std": 0.0,
-    "episode_return_mean": 451.5,
-    "episode_return_std": 76.18581086907048
+    "oos_sharpe": -1.5494526997066893,
+    "deflated_sharpe_ratio": 3.9754866065777605e-12,
+    "reality_check_pvalue": 1.0,
+    "step_return_mean": -0.07505042816397077,
+    "step_return_std": 0.056841013143495184,
+    "episode_return_mean": -38.42581921995305,
+    "episode_return_std": 24.79960777584694
   },
   "counts": {
-    "steps": 4515,
-    "episodes": 10
+    "steps": 256000,
+    "episodes": 500
   },
   "artifacts": {
-    "vecnormalize_path": "/home/karson/File-Window/artifacts/walk_forward/vecnorm_ppo_no_clip.pkl"
-  }
+    "vecnormalize_paths": [
+      "/home/karson/File-Window/artifacts/walk_forward/vecnorm_ppo_no_clip_seed101.pkl",
+      "/home/karson/File-Window/artifacts/walk_forward/vecnorm_ppo_no_clip_seed202.pkl",
+      "/home/karson/File-Window/artifacts/walk_forward/vecnorm_ppo_no_clip_seed303.pkl",
+      "/home/karson/File-Window/artifacts/walk_forward/vecnorm_ppo_no_clip_seed404.pkl",
+      "/home/karson/File-Window/artifacts/walk_forward/vecnorm_ppo_no_clip_seed505.pkl"
+    ]
+  },
+  "seed_metrics": [
+    {
+      "seed": 101,
+      "episode_return_mean": -10.32152676372872,
+      "episode_return_std": 1.8157438406806194,
+      "oos_sharpe": -5.684461944731017,
+      "deflated_sharpe_ratio": 1.0000000272292198e-09,
+      "reality_check_pvalue": 1.0,
+      "episodes": 100,
+      "steps": 51200
+    },
+    {
+      "seed": 202,
+      "episode_return_mean": -51.11383780924887,
+      "episode_return_std": 0.8539329706399126,
+      "oos_sharpe": -59.85696719374314,
+      "deflated_sharpe_ratio": 1.0000000272292198e-09,
+      "reality_check_pvalue": 1.0,
+      "episodes": 100,
+      "steps": 51200
+    },
+    {
+      "seed": 303,
+      "episode_return_mean": -60.28749638882394,
+      "episode_return_std": 0.7526684621437507,
+      "oos_sharpe": -80.09834265821775,
+      "deflated_sharpe_ratio": 1.0000000272292198e-09,
+      "reality_check_pvalue": 1.0,
+      "episodes": 100,
+      "steps": 51200
+    },
+    {
+      "seed": 404,
+      "episode_return_mean": -6.836289980485328,
+      "episode_return_std": 2.2587357929175056,
+      "oos_sharpe": -3.0266001016680244,
+      "deflated_sharpe_ratio": 1.0000000272292198e-09,
+      "reality_check_pvalue": 1.0,
+      "episodes": 100,
+      "steps": 51200
+    },
+    {
+      "seed": 505,
+      "episode_return_mean": -63.56994515747836,
+      "episode_return_std": 0.6812933325999662,
+      "oos_sharpe": -93.30774589394758,
+      "deflated_sharpe_ratio": 1.0000000272292198e-09,
+      "reality_check_pvalue": 1.0,
+      "episodes": 100,
+      "steps": 51200
+    }
+  ]
 }
