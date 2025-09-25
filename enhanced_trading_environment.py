@@ -72,6 +72,7 @@ class EnhancedTradingConfig:
     pnl_weight: float = 0.3
     risk_weight: float = -0.2
     transaction_weight: float = -0.1
+    action_smoothness_weight: float = 0.0
 
 
 class ObservationNormalizer:
@@ -212,7 +213,12 @@ class EnhancedTradingEnvironment(gym.Env):
             'sharpe_ratio': 0,
             'max_drawdown': 0
         }
-        
+
+        # Action smoothness / turnover tracking
+        self.prev_action: Optional[np.ndarray] = None
+        self.action_delta_history: List[float] = []
+        self.turnover_history: List[float] = []
+
         logger.info(f"Initialized enhanced trading environment with {len(self.config.symbols)} symbols")
     
     def _setup_spaces(self):
@@ -293,9 +299,19 @@ class EnhancedTradingEnvironment(gym.Env):
             'n_trades': 0,
             'win_rate': 0,
             'sharpe_ratio': 0,
-            'max_drawdown': 0
+            'max_drawdown': 0,
+            'action_delta_mean': 0,
+            'turnover': 0
         }
-        
+
+        # Reset smoothness tracking
+        if self.config.use_continuous_actions:
+            self.prev_action = np.zeros(2, dtype=np.float32)
+        else:
+            self.prev_action = np.zeros(1, dtype=np.float32)
+        self.action_delta_history = []
+        self.turnover_history = []
+
         return self._get_observation(), self._get_info()
     
     def step(self, action: Union[int, np.ndarray]) -> Tuple[Union[np.ndarray, Dict], float, bool, bool, Dict]:
@@ -315,27 +331,44 @@ class EnhancedTradingEnvironment(gym.Env):
         else:
             direction = action - 1  # Convert 0,1,2 to -1,0,1
             size = 1.0
-        
+
+        action_vector = np.array([direction, size], dtype=np.float32) if self.config.use_continuous_actions else np.array([direction], dtype=np.float32)
+        if self.prev_action is None:
+            self.prev_action = np.zeros_like(action_vector)
+
+        action_delta = float(np.linalg.norm(action_vector - self.prev_action))
+        self.action_delta_history.append(action_delta)
+
         # Execute trade
         self._execute_trade(direction, size)
-        
+
         # Update step
         self.current_step += 1
-        
+
         # Calculate reward
         reward = self._calculate_reward()
-        
+        smooth_weight = getattr(self.config, 'action_smoothness_weight', 0.0)
+        if smooth_weight > 0:
+            reward -= smooth_weight * (action_delta ** 2)
+
         # Check termination
         terminated = self._is_terminated()
         truncated = self._is_truncated()
-        
-        # Get observation and info
-        observation = self._get_observation()
-        info = self._get_info()
-        
+
+        if self.action_delta_history:
+            self.metrics['action_delta_mean'] = float(np.mean(self.action_delta_history[-50:]))
+        if self.turnover_history:
+            self.metrics['turnover'] = float(np.mean(self.turnover_history[-50:]))
+
+        self.prev_action = action_vector
+
         # Update metrics
         self.metrics['total_reward'] += reward
-        
+
+        # Get observation and info (after metric updates)
+        observation = self._get_observation()
+        info = self._get_info()
+
         return observation, reward, terminated, truncated, info
     
     def _execute_trade(self, direction: float, size: float):
@@ -375,6 +408,9 @@ class EnhancedTradingEnvironment(gym.Env):
                 self.metrics['total_profit'] += profit
             
             self.position = target_position
+            self.turnover_history.append(abs(position_change))
+        else:
+            self.turnover_history.append(0.0)
         
         # Record portfolio value
         portfolio_value = self.balance + self.position * current_price

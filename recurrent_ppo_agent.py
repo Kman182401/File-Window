@@ -7,16 +7,20 @@ temporal dependencies in financial markets. Optimized for m5.large.
 """
 
 import os
+import copy
 import logging
+import math
+from typing import Dict, Any, Optional, Tuple, List, Callable
+
 import numpy as np
 import torch
 import torch.nn as nn
-from typing import Dict, Any, Optional, Tuple, List
 from sb3_contrib import RecurrentPPO
 from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback, EvalCallback
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 import gymnasium as gym
 import warnings
+
 warnings.filterwarnings('ignore')
 
 # Import system components
@@ -76,6 +80,48 @@ class TemporalTradingCallback(BaseCallback):
         return True
 
 
+class EntropyControlCallback(BaseCallback):
+    """Bounds policy entropy to avoid degenerate exploration."""
+
+    def __init__(
+        self,
+        entropy_lower: float,
+        entropy_upper: float,
+        adjustment_lr: float = 0.05,
+        min_ent_coef: float = 1e-4,
+        max_ent_coef: float = 0.2,
+        verbose: int = 0,
+    ) -> None:
+        super().__init__(verbose)
+        self.entropy_lower = entropy_lower
+        self.entropy_upper = entropy_upper
+        self.adjustment_lr = adjustment_lr
+        self.min_ent_coef = min_ent_coef
+        self.max_ent_coef = max_ent_coef
+
+    def _on_rollout_end(self) -> None:
+        policy = getattr(self.model, "policy", None)
+        if policy is None or not hasattr(policy, "log_std"):
+            return None
+
+        log_std = policy.log_std.detach().cpu().numpy()
+        current_entropy = float(np.mean(log_std + 0.5 * math.log(2 * math.pi * math.e)))
+
+        current_ent_coef = float(getattr(self.model, "ent_coef", 0.0))
+        updated_ent_coef = current_ent_coef
+
+        if current_entropy < self.entropy_lower:
+            updated_ent_coef = min(current_ent_coef * (1.0 + self.adjustment_lr), self.max_ent_coef)
+        elif current_entropy > self.entropy_upper:
+            updated_ent_coef = max(current_ent_coef * (1.0 - self.adjustment_lr), self.min_ent_coef)
+
+        if not math.isclose(updated_ent_coef, current_ent_coef, rel_tol=1e-6):
+            setattr(self.model, "ent_coef", updated_ent_coef)
+            self.logger.record("entropy/ent_coef", updated_ent_coef)
+        self.logger.record("entropy/estimated", current_entropy)
+        return None
+
+
 class RecurrentPPOAgent:
     """
     Production-ready RecurrentPPO agent for temporal pattern recognition in trading.
@@ -99,13 +145,16 @@ class RecurrentPPOAgent:
         """
         self.env = env
         self.config = self._get_optimized_config(config)
-        self.model = None
-        self.callbacks = []
-        
+        self.model: Optional[RecurrentPPO] = None
+        self.callbacks: List[BaseCallback] = []
+        self.training_env: Optional[VecNormalize] = None
+        self.eval_env: Optional[VecNormalize] = None
+        self._vecnormalize_suffix = "_vecnormalize.pkl"
+
         # Memory management
         self.memory_manager = get_memory_manager()
         self.error_handler = get_error_handler()
-        
+
         # Register with memory manager
         self.memory_manager.register_component(
             'recurrent_ppo_agent',
@@ -127,42 +176,68 @@ class RecurrentPPOAgent:
         """
         # Base configuration
         preferred_device = "cuda" if torch.cuda.is_available() else "cpu"
-        base_config = {
+        observation_space = getattr(env, "observation_space", None)
+        is_dict_obs = isinstance(observation_space, gym.spaces.Dict)
+
+        base_config: Dict[str, Any] = {
             # Model architecture
-            'policy': 'MlpLstmPolicy',
+            'policy': 'MultiInputLstmPolicy' if is_dict_obs else 'MlpLstmPolicy',
             'policy_kwargs': {
-                'lstm_hidden_size': 64,  # Reduced for memory efficiency
-                'n_lstm_layers': 1,      # Single layer for CPU
-                'shared_lstm': True,      # Share LSTM between actor/critic
+                'lstm_hidden_size': 64,
+                'n_lstm_layers': 1,
+                'shared_lstm': True,
                 'enable_critic_lstm': True,
                 'net_arch': {
-                    'pi': [64, 64],      # Actor network
-                    'vf': [64, 64]       # Critic network
+                    'pi': [64, 64],
+                    'vf': [64, 64]
                 },
                 'activation_fn': nn.ReLU,
-                'ortho_init': True       # Orthogonal initialization
+                'ortho_init': True
             },
-            
+
             # PPO hyperparameters
             'learning_rate': 3e-4,
-            'n_steps': 512,          # Reduced for memory
-            'batch_size': 32,
+            'n_steps': 128,
+            'batch_size': 64,
             'n_epochs': 10,
             'gamma': 0.99,
             'gae_lambda': 0.95,
-            'clip_range': 0.2,
+            'clip_range_start': 0.2,
+            'clip_range_end': 0.1,
             'clip_range_vf': None,
             'normalize_advantage': True,
-            'ent_coef': 0.01,        # Entropy coefficient
-            'vf_coef': 0.5,          # Value function coefficient
-            'max_grad_norm': 0.5,    # Gradient clipping
-            
+            'ent_coef': 0.02,
+            'vf_coef': 0.5,
+            'max_grad_norm': 0.5,
+            'target_kl': 0.03,
+
+            # Vectorised env / normalisation
+            'n_envs': 4,
+            'vecnormalize_kwargs': {
+                'norm_obs': True,
+                'norm_reward': True,
+                'clip_obs': 10.0,
+                'clip_reward': 10.0,
+                'gamma': 0.99,
+            },
+
+            # Entropy bounds
+            'entropy_lower_bound': 0.2,
+            'entropy_upper_bound': 1.5,
+            'entropy_adjustment_lr': 0.05,
+            'min_ent_coef': 1e-4,
+            'max_ent_coef': 0.2,
+
             # System
             'device': preferred_device,
             'verbose': 1,
             'tensorboard_log': './tensorboard_logs/recurrent_ppo/',
             'memory_limit_mb': 800
         }
+
+        if is_dict_obs:
+            logger.warning("Dict observations detected – VecNormalize will be disabled for this run")
+            base_config['vecnormalize_kwargs']['norm_obs'] = False
 
         if preferred_device == "cuda":
             logger.info("CUDA available – configuring RecurrentPPO to run on GPU.")
@@ -174,8 +249,8 @@ class RecurrentPPOAgent:
         
         if available_mb < 2000:
             # Low memory mode
-            base_config['n_steps'] = 256
-            base_config['batch_size'] = 16
+            base_config['n_steps'] = 64
+            base_config['batch_size'] = 32
             base_config['policy_kwargs']['lstm_hidden_size'] = 32
             base_config['policy_kwargs']['net_arch'] = {
                 'pi': [32, 32],
@@ -184,17 +259,13 @@ class RecurrentPPOAgent:
             logger.warning(f"Low memory ({available_mb}MB), using reduced RecurrentPPO config")
         elif available_mb < 3000:
             # Medium memory mode
-            base_config['n_steps'] = 512
-            base_config['batch_size'] = 32
-        else:
-            # High memory mode
-            base_config['n_steps'] = 1024
+            base_config['n_steps'] = 128
             base_config['batch_size'] = 64
-        
+
         # Merge with user config
         if config:
             base_config.update(config)
-        
+
         return base_config
     
     @robust_execution(category=ErrorCategory.MODEL, max_retries=2)
@@ -206,10 +277,18 @@ class RecurrentPPOAgent:
         logger.info("Building RecurrentPPO model...")
         
         try:
+            # Prepare environment and clip schedule
+            self.training_env = self._build_vectorised_env(training=True)
+            clip_schedule = self._create_clip_schedule(
+                self.config.pop('clip_range_start', 0.2),
+                self.config.pop('clip_range_end', 0.1)
+            )
+            self.config['clip_range'] = clip_schedule
+
             # Create model
             self.model = RecurrentPPO(
                 policy=self.config['policy'],
-                env=self.env,
+                env=self.training_env,
                 learning_rate=self.config['learning_rate'],
                 n_steps=self.config['n_steps'],
                 batch_size=self.config['batch_size'],
@@ -225,12 +304,13 @@ class RecurrentPPOAgent:
                 policy_kwargs=self.config['policy_kwargs'],
                 verbose=self.config['verbose'],
                 tensorboard_log=self.config['tensorboard_log'],
-                device=self.config['device']
+                device=self.config['device'],
+                target_kl=self.config.get('target_kl', None)
             )
-            
+
             # Setup callbacks
             self._setup_callbacks()
-            
+
             logger.info("✓ RecurrentPPO model built successfully")
             
         except Exception as e:
@@ -244,10 +324,21 @@ class RecurrentPPOAgent:
     
     def _setup_callbacks(self):
         """Setup training callbacks."""
+        entropy_callback = EntropyControlCallback(
+            entropy_lower=self.config.get('entropy_lower_bound', 0.2),
+            entropy_upper=self.config.get('entropy_upper_bound', 1.5),
+            adjustment_lr=self.config.get('entropy_adjustment_lr', 0.05),
+            min_ent_coef=self.config.get('min_ent_coef', 1e-4),
+            max_ent_coef=self.config.get('max_ent_coef', 0.2)
+        )
+
         self.callbacks = [
             # Temporal pattern tracking
             TemporalTradingCallback(),
-            
+
+            # Entropy stabilisation
+            entropy_callback,
+
             # Checkpointing
             CheckpointCallback(
                 save_freq=1000,
@@ -290,7 +381,11 @@ class RecurrentPPOAgent:
             available_mb = get_available_memory_mb()
             if available_mb < 1200:
                 raise MemoryError(f"Insufficient memory for training: {available_mb}MB < 1200MB")
-            
+
+            if isinstance(self.training_env, VecNormalize):
+                self.eval_env = self._build_vectorised_env(training=False)
+                self._sync_eval_env_stats()
+
             # Train model
             self.model.learn(
                 total_timesteps=total_timesteps,
@@ -300,9 +395,11 @@ class RecurrentPPOAgent:
                 reset_num_timesteps=False,
                 progress_bar=progress_bar
             )
-            
+
             logger.info("✓ RecurrentPPO training completed successfully")
-            
+            if isinstance(self.training_env, VecNormalize):
+                self._sync_eval_env_stats()
+
         except Exception as e:
             self.error_handler.handle_error(
                 e,
@@ -336,13 +433,17 @@ class RecurrentPPOAgent:
         if episode_start is None:
             episode_start = np.array([False])
         
+        obs_for_policy = observation
+        if isinstance(self.training_env, VecNormalize) and hasattr(self.training_env, 'obs_rms') and self.training_env.obs_rms.mean is not None:
+            obs_for_policy = self._normalize_observation(observation)
+
         return self.model.predict(
-            observation,
+            obs_for_policy,
             state=lstm_states,
             episode_start=episode_start,
             deterministic=deterministic
         )
-    
+
     def save(self, path: str):
         """
         Save model.
@@ -354,8 +455,14 @@ class RecurrentPPOAgent:
             raise ValueError("No model to save")
         
         self.model.save(path)
+
+        if isinstance(self.training_env, VecNormalize):
+            vec_path = f"{path}{self._vecnormalize_suffix}"
+            self.training_env.save(vec_path)
+            logger.info(f"Saved VecNormalize statistics to {vec_path}")
+
         logger.info(f"RecurrentPPO model saved to {path}")
-    
+
     def load(self, path: str, env: Optional[gym.Env] = None):
         """
         Load model.
@@ -365,10 +472,20 @@ class RecurrentPPOAgent:
             env: Environment (uses self.env if None)
         """
         env = env or self.env
-        
-        self.model = RecurrentPPO.load(path, env=env, device=self.config['device'])
+
+        vec_path = f"{path}{self._vecnormalize_suffix}"
+        if os.path.exists(vec_path):
+            logger.info(f"Loading VecNormalize statistics from {vec_path}")
+            base_env = self._make_env_factory()
+            self.training_env = VecNormalize.load(vec_path, base_env)
+            self.training_env.training = False
+            self.training_env.norm_reward = False
+            self.model = RecurrentPPO.load(path, env=self.training_env, device=self.config['device'])
+        else:
+            self.model = RecurrentPPO.load(path, env=env, device=self.config['device'])
+
         logger.info(f"RecurrentPPO model loaded from {path}")
-    
+
     def get_memory_usage(self) -> Dict[str, float]:
         """Get current memory usage of RecurrentPPO components."""
         if self.model is None:
@@ -393,12 +510,13 @@ class RecurrentPPOAgent:
         
         # Estimate rollout buffer
         if hasattr(self.model, 'rollout_buffer'):
-            n_steps = self.config.get('n_steps', 512)
-            obs_size = np.prod(self.env.observation_space.shape)
+            n_steps = self.config.get('n_steps', 128)
+            obs_space = self.training_env.observation_space if self.training_env else self.env.observation_space
+            obs_size = np.prod(obs_space.shape) if hasattr(obs_space, 'shape') else 0
             memory_usage['rollout_buffer_mb'] = (n_steps * obs_size * 4) / (1024 * 1024)
-        
+
         memory_usage['total_mb'] = sum(memory_usage.values())
-        
+
         return memory_usage
     
     def reduce_memory(self):
@@ -408,7 +526,7 @@ class RecurrentPPOAgent:
             # Clear any cached data
             if hasattr(self.model, 'rollout_buffer'):
                 self.model.rollout_buffer.reset()
-    
+
     def get_lstm_state_info(self) -> Dict[str, Any]:
         """Get information about current LSTM state."""
         if self.model is None or not hasattr(self.model.policy, 'lstm_actor'):
@@ -433,6 +551,104 @@ class RecurrentPPOAgent:
         
         return info
 
+    # --- Internal helpers -------------------------------------------------
+
+    def _build_vectorised_env(self, training: bool):
+        n_envs = max(1, int(self.config.get('n_envs', 1)))
+        vec_kwargs = self.config.get('vecnormalize_kwargs', {})
+
+        env_callables: List = []
+        clone_failed = False
+
+        for _ in range(n_envs):
+            cloned = self._clone_environment(self.env)
+            if cloned is self.env and n_envs > 1:
+                clone_failed = True
+                break
+            env_callables.append(lambda env=cloned: env)
+
+        if clone_failed:
+            logger.warning("Environment cloning failed; falling back to single-env training")
+            env_callables = [lambda: self.env]
+            n_envs = 1
+            self.config['n_envs'] = 1
+
+        vec_env = DummyVecEnv(env_callables)
+
+        if isinstance(vec_env.observation_space, gym.spaces.Dict):
+            logger.warning("VecNormalize not applied because observation space is Dict")
+            return vec_env
+
+        try:
+            vec_norm = VecNormalize(vec_env, **vec_kwargs)
+        except Exception as exc:
+            logger.warning(f"VecNormalize initialisation failed ({exc}); proceeding without normalisation")
+            return vec_env
+
+        vec_norm.training = training
+        vec_norm.norm_reward = training and vec_kwargs.get('norm_reward', True)
+        return vec_norm
+
+    def _clone_environment(self, source_env: gym.Env) -> gym.Env:
+        if hasattr(source_env, 'clone') and callable(getattr(source_env, 'clone')):
+            try:
+                return source_env.clone()
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.debug(f"Environment-provided clone failed: {exc}")
+
+        if hasattr(source_env, 'config'):
+            try:
+                new_config = copy.deepcopy(getattr(source_env, 'config'))
+                data = getattr(source_env, 'data', None)
+                return source_env.__class__(data=data, config=new_config)
+            except Exception as exc:
+                logger.debug(f"Config-based clone failed: {exc}")
+
+        try:
+            return copy.deepcopy(source_env)
+        except Exception as exc:
+            logger.debug(f"Deepcopy clone failed: {exc}")
+            return source_env
+
+    def _create_clip_schedule(self, start: float, end: float) -> Callable[[float], float]:
+        start = float(start)
+        end = float(end)
+
+        def schedule(progress_remaining: float) -> float:
+            progress_remaining = float(np.clip(progress_remaining, 0.0, 1.0))
+            cosine_term = 0.5 * (1.0 + math.cos(math.pi * progress_remaining))
+            return end + (start - end) * cosine_term
+
+        return schedule
+
+    def _normalize_observation(self, observation: np.ndarray) -> np.ndarray:
+        if not isinstance(self.training_env, VecNormalize):
+            return observation
+        obs_rms = getattr(self.training_env, 'obs_rms', None)
+        if obs_rms is None or obs_rms.mean is None:
+            return observation
+
+        obs = np.array(observation, dtype=np.float32, copy=True)
+        eps = getattr(self.training_env, 'epsilon', 1e-8)
+        return (obs - obs_rms.mean) / np.sqrt(obs_rms.var + eps)
+
+    def _sync_eval_env_stats(self) -> None:
+        if not (
+            isinstance(self.training_env, VecNormalize)
+            and isinstance(self.eval_env, VecNormalize)
+        ):
+            return
+
+        self.eval_env.training = False
+        self.eval_env.norm_reward = False
+        if self.training_env.obs_rms is not None:
+            self.eval_env.obs_rms = copy.deepcopy(self.training_env.obs_rms)
+        if self.training_env.ret_rms is not None:
+            self.eval_env.ret_rms = copy.deepcopy(self.training_env.ret_rms)
+
+    def _make_env_factory(self) -> DummyVecEnv:
+        return DummyVecEnv([lambda: self._clone_environment(self.env)])
+
 
 def create_recurrent_ppo_agent(env: gym.Env,
                                config: Optional[Dict[str, Any]] = None) -> RecurrentPPOAgent:
@@ -447,6 +663,16 @@ def create_recurrent_ppo_agent(env: gym.Env,
         Configured RecurrentPPO agent
     """
     try:
+        if hasattr(env, 'config') and getattr(env.config, 'use_dict_obs', False):
+            try:
+                flat_config = copy.deepcopy(env.config)
+                flat_config.use_dict_obs = False
+                data = getattr(env, 'data', None)
+                env = env.__class__(data=data, config=flat_config)
+                logger.info("Recreated trading environment with flat observations for PPO training")
+            except Exception as rebuild_exc:
+                logger.warning(f"Could not rebuild flat-observation environment ({rebuild_exc}); proceeding with dict observations (VecNormalize disabled)")
+
         agent = RecurrentPPOAgent(env, config)
         agent.build_model()
         return agent

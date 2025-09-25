@@ -392,7 +392,16 @@ class AlgorithmSelector:
                 return create_sac_agent(self.env)
             
             elif algorithm_type == AlgorithmType.RECURRENT_PPO:
-                return create_recurrent_ppo_agent(self.env)
+                if hasattr(self.env, 'config') and hasattr(self.env.config, 'action_smoothness_weight'):
+                    if self.env.config.action_smoothness_weight == 0:
+                        self.env.config.action_smoothness_weight = 0.005
+                        logger.info("Applied default action smoothness weight for RecurrentPPO")
+
+                rp_config = {
+                    'n_envs': 4,
+                    'batch_size': max(32, get_optimal_batch_size('rl_training')),
+                }
+                return create_recurrent_ppo_agent(self.env, rp_config)
             
             elif algorithm_type == AlgorithmType.PPO and STANDARD_AGENTS_AVAILABLE:
                 preferred_device = "cuda" if torch.cuda.is_available() else "cpu"
