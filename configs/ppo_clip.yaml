@@ -1,6 +1,19 @@
 experiment_name: ppo_clip
 clip_range_vf: 0.2
 total_timesteps: 5000
-eval_episodes: 10
-seed: 42
-rc_iterations: 200
+eval_episodes: 100
+seeds: [101, 202, 303, 404, 505]
+rc_iterations: 1000
+target_kl: 0.03
+market_data_length: 8000
+environment:
+  config:
+    lookback_window: 64
+    use_dict_obs: false
+    use_continuous_actions: false
+    use_multi_component_reward: true
+    use_domain_randomization: true
+    max_episode_length: 512
+    random_start: true
+  use_domain_randomization_train: true
+  use_domain_randomization_eval: false

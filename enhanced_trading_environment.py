@@ -371,10 +371,12 @@ class EnhancedTradingEnvironment(gym.Env):
             self.decision_interval_counter = 1
 
         if self.config.use_continuous_actions:
-            direction = float(raw_action[0])  # -1 to 1
-            size = float(raw_action[1])  # 0 to 1
+            direction = float(np.asarray(raw_action)[0])  # -1 to 1
+            size = float(np.asarray(raw_action)[1])  # 0 to 1
         else:
-            direction = raw_action - 1  # Convert 0,1,2 to -1,0,1
+            if isinstance(raw_action, np.ndarray):
+                raw_action = float(np.asarray(raw_action).reshape(-1)[0])
+            direction = float(raw_action - 1)
             size = 1.0
 
         action_vector = np.array([direction, size], dtype=np.float32) if self.config.use_continuous_actions else np.array([direction], dtype=np.float32)
@@ -482,8 +484,13 @@ class EnhancedTradingEnvironment(gym.Env):
         
         # Sharpe component (if enough history)
         sharpe = 0
-        if len(self.portfolio_value_history) >= 20:
-            returns = np.diff(self.portfolio_value_history[-20:]) / self.portfolio_value_history[-21:-1]
+        if len(self.portfolio_value_history) >= 21:
+            window = np.asarray(self.portfolio_value_history[-21:], dtype=np.float64)
+            diffs = np.diff(window)
+            base = window[:-1]
+            returns = np.zeros_like(diffs)
+            non_zero = np.abs(base) > 1e-8
+            returns[non_zero] = diffs[non_zero] / base[non_zero]
             if np.std(returns) > 0:
                 sharpe = np.mean(returns) / (np.std(returns) + 1e-8) * np.sqrt(252)
         
@@ -566,6 +573,12 @@ class EnhancedTradingEnvironment(gym.Env):
         if market_data.shape[0] < self.config.lookback_window:
             padding = np.zeros((self.config.lookback_window - market_data.shape[0], market_data.shape[1]))
             market_data = np.vstack([padding, market_data])
+
+        if market_data.shape[1] < 10:
+            col_padding = np.zeros((market_data.shape[0], 10 - market_data.shape[1]))
+            market_data = np.hstack([market_data, col_padding])
+        elif market_data.shape[1] > 10:
+            market_data = market_data[:, :10]
         
         # Portfolio state
         portfolio_state = self.normalizer.normalize_portfolio_state({
