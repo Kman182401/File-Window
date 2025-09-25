@@ -77,6 +77,12 @@ class EnhancedTradingConfig:
     transaction_entropy_window: int = 120
     transaction_entropy_threshold: float = 0.9
     transaction_entropy_gate_strength: float = 0.5
+    use_domain_randomization: bool = False
+    slippage_range: Tuple[float, float] = (0.0003, 0.001)
+    transaction_cost_range: Tuple[float, float] = (0.0005, 0.002)
+    latency_ms_range: Tuple[int, int] = (0, 250)
+    fill_rate_beta: Tuple[float, float] = (5.0, 2.0)
+    decision_interval_range: Tuple[int, int] = (1, 3)
 
 
 class ObservationNormalizer:
@@ -196,10 +202,10 @@ class EnhancedTradingEnvironment(gym.Env):
         self.config = config or EnhancedTradingConfig()
         self.data = data
         self.normalizer = ObservationNormalizer(self.config)
-        
+
         # Initialize spaces
         self._setup_spaces()
-        
+
         # Trading state
         self.current_step = 0
         self.episode_start_step = 0
@@ -207,6 +213,13 @@ class EnhancedTradingEnvironment(gym.Env):
         self.position = 0
         self.entry_price = 0
         self.portfolio_value_history = []
+
+        # Base configuration for domain randomization
+        self._base_transaction_cost = self.config.transaction_cost
+        self._base_slippage = self.config.slippage
+        self._base_decision_interval = self.config.decision_interval
+        self.current_latency_ms: float = 0.0
+        self.current_fill_rate: float = 1.0
         
         # Metrics
         self.metrics = {
@@ -218,7 +231,10 @@ class EnhancedTradingEnvironment(gym.Env):
             'max_drawdown': 0,
             'action_delta_mean': 0,
             'turnover': 0,
-            'transaction_entropy': 0
+            'transaction_entropy': 0,
+            'latency_ms': 0,
+            'fill_rate': 1.0,
+            'decision_interval': self.config.decision_interval
         }
 
         # Action smoothness / turnover / entropy tracking
@@ -312,7 +328,10 @@ class EnhancedTradingEnvironment(gym.Env):
             'max_drawdown': 0,
             'action_delta_mean': 0,
             'turnover': 0,
-            'transaction_entropy': 0
+            'transaction_entropy': 0,
+            'latency_ms': 0,
+            'fill_rate': 1.0,
+            'decision_interval': self.config.decision_interval
         }
 
         # Reset smoothness tracking
@@ -325,6 +344,9 @@ class EnhancedTradingEnvironment(gym.Env):
         self.transaction_history: deque = deque(maxlen=self.config.transaction_entropy_window)
         self.decision_interval_counter = 0
         self.last_action_vector: Optional[np.ndarray] = None
+
+        self._apply_domain_randomization()
+        self._update_dynamic_metric_snapshots()
 
         return self._get_observation(), self._get_info()
     
@@ -385,6 +407,7 @@ class EnhancedTradingEnvironment(gym.Env):
             self.metrics['turnover'] = float(np.mean(self.turnover_history[-50:]))
         transaction_entropy = self._compute_transaction_entropy()
         self.metrics['transaction_entropy'] = transaction_entropy
+        self._update_dynamic_metric_snapshots()
 
         self.prev_action = action_vector
         self.last_action_vector = np.array([gated_direction, gated_size], dtype=np.float32) if self.config.use_continuous_actions else np.array([gated_direction], dtype=np.float32)
@@ -569,7 +592,7 @@ class EnhancedTradingEnvironment(gym.Env):
                 [market_regime]
             ])
             return flat_obs.astype(np.float32)
-    
+
     def _get_current_price(self) -> float:
         """Get current market price."""
         if self.data is None or self.current_step >= len(self.data):
@@ -613,6 +636,39 @@ class EnhancedTradingEnvironment(gym.Env):
             return 2  # Sideways
         else:
             return 3  # Volatile
+
+    def _apply_domain_randomization(self) -> None:
+        """Sample randomized environment parameters per episode."""
+        if not self.config.use_domain_randomization:
+            self.config.transaction_cost = self._base_transaction_cost
+            self.config.slippage = self._base_slippage
+            self.config.decision_interval = self._base_decision_interval
+            self.current_latency_ms = 0.0
+            self.current_fill_rate = 1.0
+            self.decision_interval_counter = 0
+            return
+
+        tc_low, tc_high = self.config.transaction_cost_range
+        sl_low, sl_high = self.config.slippage_range
+        lat_low, lat_high = self.config.latency_ms_range
+        di_low, di_high = self.config.decision_interval_range
+        alpha, beta = self.config.fill_rate_beta
+
+        self.config.transaction_cost = float(np.random.uniform(tc_low, tc_high))
+        self.config.slippage = float(np.random.uniform(sl_low, sl_high))
+        self.config.decision_interval = int(np.random.randint(di_low, di_high + 1))
+        self.config.decision_interval = max(1, self.config.decision_interval)
+
+        self.current_latency_ms = float(np.random.uniform(lat_low, lat_high))
+        self.current_fill_rate = float(np.random.beta(alpha, beta))
+        self.decision_interval_counter = 0
+        self.last_action_vector = None
+
+    def _update_dynamic_metric_snapshots(self) -> None:
+        """Refresh metrics that reflect randomized parameters."""
+        self.metrics['latency_ms'] = self.current_latency_ms
+        self.metrics['fill_rate'] = self.current_fill_rate
+        self.metrics['decision_interval'] = self.config.decision_interval
 
     def _record_transaction(self, direction: float, size: float) -> None:
         """Track transactions for entropy calculation."""

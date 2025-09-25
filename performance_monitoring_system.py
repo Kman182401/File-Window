@@ -686,6 +686,62 @@ class PerformanceMonitoringSystem:
             unit="%",
             tags={"success_count": str(success_count), "total_count": str(total_count)}
         ))
+
+    def record_validation_metrics(
+        self,
+        oos_sharpe: Optional[float] = None,
+        train_sharpe: Optional[float] = None,
+        deflated_sharpe: Optional[float] = None,
+        reality_check_pvalue: Optional[float] = None,
+        num_trials: Optional[int] = None,
+        approx_kl: Optional[float] = None,
+        clip_fraction: Optional[float] = None,
+    ) -> None:
+        """Record evaluation metrics used for promotion gating."""
+
+        if train_sharpe is not None:
+            self.metrics_collector.record_metric(PerformanceMetric(
+                name="train_sharpe",
+                value=float(train_sharpe),
+                unit="ratio",
+            ))
+
+        if oos_sharpe is not None:
+            self.metrics_collector.record_metric(PerformanceMetric(
+                name="oos_sharpe",
+                value=float(oos_sharpe),
+                unit="ratio",
+            ))
+
+        if deflated_sharpe is not None:
+            tags = {"num_trials": str(num_trials)} if num_trials else {}
+            self.metrics_collector.record_metric(PerformanceMetric(
+                name="deflated_sharpe_ratio",
+                value=float(deflated_sharpe),
+                unit="probability",
+                tags=tags,
+            ))
+
+        if reality_check_pvalue is not None:
+            self.metrics_collector.record_metric(PerformanceMetric(
+                name="reality_check_pvalue",
+                value=float(reality_check_pvalue),
+                unit="p-value",
+            ))
+
+        if approx_kl is not None:
+            self.metrics_collector.record_metric(PerformanceMetric(
+                name="ppo_approx_kl",
+                value=float(approx_kl),
+                unit="",
+            ))
+
+        if clip_fraction is not None:
+            self.metrics_collector.record_metric(PerformanceMetric(
+                name="ppo_clip_fraction",
+                value=float(clip_fraction),
+                unit="",
+            ))
     
     def get_performance_dashboard(self) -> Dict[str, Any]:
         """Get comprehensive performance dashboard data"""
@@ -703,6 +759,14 @@ class PerformanceMonitoringSystem:
                 'pipeline_latency': self.metrics_collector.get_metric_stats('pipeline_latency_ms'),
                 'ticker_processing': self.metrics_collector.get_metric_stats('ticker_processing_latency_ms'),
                 'error_rate': self.metrics_collector.get_metric_stats('error_rate_percent')
+            },
+            'validation_metrics': {
+                'train_sharpe': self.metrics_collector.get_metric_stats('train_sharpe'),
+                'oos_sharpe': self.metrics_collector.get_metric_stats('oos_sharpe'),
+                'deflated_sharpe_ratio': self.metrics_collector.get_metric_stats('deflated_sharpe_ratio'),
+                'reality_check_pvalue': self.metrics_collector.get_metric_stats('reality_check_pvalue'),
+                'ppo_approx_kl': self.metrics_collector.get_metric_stats('ppo_approx_kl'),
+                'ppo_clip_fraction': self.metrics_collector.get_metric_stats('ppo_clip_fraction'),
             },
             'alert_summary': self.alert_manager.get_alert_summary(),
             'active_alerts': self.alert_manager.get_active_alerts(),

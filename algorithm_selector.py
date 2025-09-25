@@ -399,6 +399,9 @@ class AlgorithmSelector:
                     if hasattr(self.env.config, 'transaction_entropy_gate_strength') and self.env.config.transaction_entropy_gate_strength == 0:
                         self.env.config.transaction_entropy_gate_strength = 0.5
                         logger.info("Enabled transaction entropy gate for RecurrentPPO")
+                    if hasattr(self.env.config, 'use_domain_randomization') and not self.env.config.use_domain_randomization:
+                        self.env.config.use_domain_randomization = True
+                        logger.info("Activated domain randomization for RecurrentPPO environment")
 
                 rp_config = {
                     'n_envs': 4,

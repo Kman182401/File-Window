@@ -21,10 +21,14 @@ Benefits:
 - Memory efficient (200MB additional)
 """
 
+import json
 import numpy as np
 import pandas as pd
 import logging
-from typing import Dict, List, Tuple, Optional, Any, Union
+from pathlib import Path
+from statistics import NormalDist
+from itertools import combinations
+from typing import Dict, List, Tuple, Optional, Any, Union, Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from collections import deque
@@ -74,6 +78,187 @@ class LearningMetrics:
     performance_trend: float = 0.0
 
 
+class EvaluationHarness:
+    """Provides anti-overfitting validation utilities (walk-forward, DSR, RC/SPA)."""
+
+    def __init__(self) -> None:
+        self._normal = NormalDist()
+
+    # ------------------------------------------------------------------
+    # Splitting utilities
+    # ------------------------------------------------------------------
+
+    def walk_forward_splits(
+        self,
+        n_samples: int,
+        train_size: int,
+        test_size: int,
+        step: Optional[int] = None,
+    ) -> List[Tuple[np.ndarray, np.ndarray]]:
+        """Return sequential train/test index splits for walk-forward analysis."""
+        if train_size <= 0 or test_size <= 0:
+            raise ValueError("train_size and test_size must be positive")
+        step = step or test_size
+        splits: List[Tuple[np.ndarray, np.ndarray]] = []
+        for start in range(0, n_samples - (train_size + test_size) + 1, step):
+            train_indices = np.arange(start, start + train_size)
+            test_indices = np.arange(start + train_size, start + train_size + test_size)
+            splits.append((train_indices, test_indices))
+        return splits
+
+    def purged_kfold_indices(
+        self,
+        n_samples: int,
+        n_splits: int = 5,
+        embargo: int = 0,
+    ) -> List[Tuple[np.ndarray, np.ndarray]]:
+        """Create purged K-fold indices with an optional embargo around test folds."""
+        if n_splits <= 1:
+            raise ValueError("n_splits must be greater than 1")
+        fold_size = n_samples // n_splits
+        splits = []
+        for fold in range(n_splits):
+            start = fold * fold_size
+            stop = n_samples if fold == n_splits - 1 else (start + fold_size)
+            test_idx = np.arange(start, stop)
+            left = max(0, start - embargo)
+            right = min(n_samples, stop + embargo)
+            train_idx = np.concatenate((np.arange(0, left), np.arange(right, n_samples)))
+            splits.append((train_idx, test_idx))
+        return splits
+
+    def combinatorial_purged_cv_indices(
+        self,
+        n_samples: int,
+        n_groups: int = 6,
+        test_group_size: int = 2,
+        embargo: int = 0,
+    ) -> List[Tuple[np.ndarray, np.ndarray]]:
+        """CPCV splitter returning train/test index combinations."""
+        if n_groups <= 1 or test_group_size <= 0 or test_group_size >= n_groups:
+            raise ValueError("Invalid CPCV configuration")
+        group_size = n_samples // n_groups
+        groups = [
+            np.arange(i * group_size, n_samples if i == n_groups - 1 else (i + 1) * group_size)
+            for i in range(n_groups)
+        ]
+        splits = []
+        for test_groups in combinations(range(n_groups), test_group_size):
+            test_idx = np.concatenate([groups[i] for i in test_groups])
+            train_mask = np.ones(n_samples, dtype=bool)
+            train_mask[test_idx] = False
+            if embargo:
+                for g in test_groups:
+                    start = groups[g][0]
+                    stop = groups[g][-1] + 1
+                    lo = max(0, start - embargo)
+                    hi = min(n_samples, stop + embargo)
+                    train_mask[lo:hi] = False
+            train_idx = np.nonzero(train_mask)[0]
+            splits.append((train_idx, test_idx))
+        return splits
+
+    # ------------------------------------------------------------------
+    # Metrics & statistics
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def compute_sharpe_ratio(returns: Union[np.ndarray, pd.Series], risk_free: float = 0.0) -> float:
+        arr = np.asarray(returns, dtype=np.float64)
+        arr = arr[~np.isnan(arr)]
+        if arr.size < 2:
+            return 0.0
+        excess = arr - risk_free
+        mean = np.mean(excess)
+        std = np.std(excess, ddof=1)
+        return 0.0 if std == 0 else mean / std
+
+    def probabilistic_sharpe_ratio(
+        self,
+        returns: Union[np.ndarray, pd.Series],
+        benchmark_sr: float = 0.0,
+    ) -> float:
+        arr = np.asarray(returns, dtype=np.float64)
+        arr = arr[~np.isnan(arr)]
+        n = arr.size
+        if n < 3:
+            return 0.5
+        sr = self.compute_sharpe_ratio(arr)
+        demeaned = arr - np.mean(arr)
+        std = np.std(arr, ddof=1)
+        if std == 0:
+            return 0.5
+        z = (sr - benchmark_sr) * np.sqrt(n - 1)
+        normalized = demeaned / std
+        skew = np.mean(normalized ** 3)
+        kurt = np.mean(normalized ** 4)
+        denominator = np.sqrt(max(1e-12, 1 - skew * sr + ((kurt - 1) / 4.0) * (sr ** 2)))
+        z /= denominator
+        return self._normal.cdf(z)
+
+    def deflated_sharpe_ratio(
+        self,
+        returns: Union[np.ndarray, pd.Series],
+        benchmark_sr: float = 0.0,
+        num_trials: int = 1,
+    ) -> float:
+        arr = np.asarray(returns, dtype=np.float64)
+        arr = arr[~np.isnan(arr)]
+        n = arr.size
+        if n < 3:
+            return 0.0
+        sr = self.compute_sharpe_ratio(arr)
+        psr = self.probabilistic_sharpe_ratio(arr, benchmark_sr)
+        psr_z = self._normal.inv_cdf(min(max(psr, 1e-9), 1 - 1e-9))
+        if num_trials <= 1:
+            return self._normal.cdf(psr_z)
+        z_alpha = self._normal.inv_cdf(1 - 1 / num_trials)
+        return self._normal.cdf(psr_z - z_alpha)
+
+    def stationary_bootstrap(
+        self,
+        returns: np.ndarray,
+        block_size: int = 20,
+        n_iterations: int = 1000,
+    ) -> Iterable[np.ndarray]:
+        n = len(returns)
+        for _ in range(n_iterations):
+            indices = []
+            while len(indices) < n:
+                if not indices or np.random.rand() < 1.0 / block_size:
+                    idx = np.random.randint(0, n)
+                else:
+                    idx = (indices[-1] + 1) % n
+                indices.append(idx)
+            yield returns[np.array(indices[:n])]
+
+    def reality_check_pvalue(
+        self,
+        returns_matrix: np.ndarray,
+        benchmark_index: int = 0,
+        block_size: int = 20,
+        n_iterations: int = 1000,
+    ) -> float:
+        if returns_matrix.ndim != 2:
+            raise ValueError("returns_matrix must be 2D (observations x strategies)")
+        benchmark = returns_matrix[:, benchmark_index]
+        diffs = returns_matrix - benchmark[:, None]
+        observed = np.max(np.mean(diffs, axis=0))
+        count = 0
+        for sample in self.stationary_bootstrap(diffs, block_size=block_size, n_iterations=n_iterations):
+            statistic = np.max(np.mean(sample, axis=0))
+            if statistic >= observed:
+                count += 1
+        return (count + 1) / (n_iterations + 1)
+
+    def write_promotion_report(self, report: Dict[str, Any], output_path: Union[str, Path]) -> Path:
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with output_path.open("w", encoding="utf-8") as fh:
+            json.dump(report, fh, indent=2, default=str)
+        return output_path
+
+
 class OnlineLearningSystem:
     """
     Online learning system that updates models incrementally after each trade.
@@ -117,16 +302,22 @@ class OnlineLearningSystem:
         self.base_learning_rate = 0.001
         self.learning_rate_bounds = (0.0001, 0.01)
         self.volatility_window = 20
-        
+
         # Threading for async updates
         self.update_queue = deque()
         self.update_lock = threading.Lock()
         self.update_thread = None
-        
+
         # Performance tracking
         self.total_learning_updates = 0
         self.successful_adaptations = 0
-        
+
+        # Evaluation & reporting
+        self.evaluation_harness = EvaluationHarness()
+        self.promotion_reports_dir = (Path.home() / "promotion_reports").resolve()
+        self.promotion_reports_dir.mkdir(parents=True, exist_ok=True)
+        self.seed_pool: List[int] = [0]
+
         logger.info(f"Online learning system initialized (enabled: {self.enabled})")
     
     def add_trade_experience(self, 
@@ -374,7 +565,146 @@ class OnlineLearningSystem:
                 self.experience_buffer.popleft()
             
             logger.warning("Memory limit reached, trimmed experience buffer")
-    
+
+    # ------------------------------------------------------------------
+    # Evaluation & Anti-Overfitting Utilities
+    # ------------------------------------------------------------------
+
+    def set_seed_pool(self, seeds: List[int]) -> None:
+        """Define the deterministic seed pool used for evaluation runs."""
+        if not seeds:
+            raise ValueError("Seed pool must contain at least one seed")
+        self.seed_pool = sorted(set(int(seed) for seed in seeds))
+        logger.info(f"Updated evaluation seed pool: {self.seed_pool}")
+
+    def get_seed_pool(self) -> List[int]:
+        """Return the current evaluation seed pool."""
+        return list(self.seed_pool)
+
+    def evaluate_candidate_returns(
+        self,
+        candidate_returns: Dict[str, Union[np.ndarray, pd.Series]],
+        benchmark_returns: Union[np.ndarray, pd.Series, None] = None,
+        num_trials: Optional[int] = None,
+        report_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Compute Sharpe/DSR/RealityCheck metrics for candidate strategies."""
+
+        if not candidate_returns:
+            raise ValueError("candidate_returns cannot be empty")
+
+        harness = self.evaluation_harness
+        arrays = {name: np.asarray(series, dtype=np.float64) for name, series in candidate_returns.items()}
+        min_len = min(arr.size for arr in arrays.values())
+        if benchmark_returns is None:
+            benchmark_arr = np.zeros(min_len, dtype=np.float64)
+        else:
+            benchmark_arr = np.asarray(benchmark_returns, dtype=np.float64)
+            min_len = min(min_len, benchmark_arr.size)
+
+        if min_len < 3:
+            raise ValueError("Not enough observations for evaluation")
+
+        benchmark_aligned = benchmark_arr[-min_len:]
+        names = sorted(arrays.keys())
+        candidate_metrics: Dict[str, Dict[str, float]] = {}
+        returns_matrix = [benchmark_aligned]
+        benchmark_sr = harness.compute_sharpe_ratio(benchmark_aligned)
+        total_trials = num_trials or max(1, len(names))
+
+        for name in names:
+            series = arrays[name][-min_len:]
+            sr = harness.compute_sharpe_ratio(series)
+            psr = harness.probabilistic_sharpe_ratio(series, benchmark_sr=benchmark_sr)
+            dsr = harness.deflated_sharpe_ratio(series, benchmark_sr=benchmark_sr, num_trials=total_trials)
+            candidate_metrics[name] = {
+                'oos_sharpe': float(sr),
+                'probabilistic_sharpe': float(psr),
+                'deflated_sharpe_ratio': float(dsr),
+                'mean_return': float(np.mean(series)),
+                'std_return': float(np.std(series, ddof=1)),
+            }
+            returns_matrix.append(series)
+
+        stacked = np.column_stack(returns_matrix)
+        rc_pvalue = harness.reality_check_pvalue(stacked, benchmark_index=0)
+
+        report = {
+            'timestamp': datetime.utcnow().isoformat(),
+            'num_trials': int(total_trials),
+            'benchmark_sharpe': float(benchmark_sr),
+            'reality_check_pvalue': float(rc_pvalue),
+            'candidates': candidate_metrics,
+        }
+
+        report_filename = report_name or f"promotion_report_{datetime.utcnow().strftime('%Y%m%dT%H%M%S')}.json"
+        report_path = self.promotion_reports_dir / report_filename
+        harness.write_promotion_report(report, report_path)
+        report['report_path'] = str(report_path)
+        logger.info(f"Promotion report saved to {report_path}")
+        return report
+
+    def run_walk_forward_evaluation(
+        self,
+        returns: pd.Series,
+        train_size: int,
+        test_size: int,
+        trainer: Callable[[pd.Series, int], Any],
+        evaluator: Callable[[Any, pd.Series], np.ndarray],
+        seeds: Optional[List[int]] = None,
+    ) -> Dict[str, Any]:
+        """Walk-forward helper that trains/evaluates across windows and seeds."""
+
+        if returns is None or returns.empty:
+            raise ValueError("returns series cannot be empty")
+        seeds = seeds or self.seed_pool
+        splits = self.evaluation_harness.walk_forward_splits(len(returns), train_size, test_size)
+        segment_results: List[Dict[str, Any]] = []
+        aggregated_returns: List[np.ndarray] = []
+
+        for segment_id, (train_idx, test_idx) in enumerate(splits):
+            train_slice = returns.iloc[train_idx]
+            test_slice = returns.iloc[test_idx]
+            for seed in seeds:
+                model = trainer(train_slice, seed)
+                oos_returns = np.asarray(evaluator(model, test_slice), dtype=np.float64)
+                if oos_returns.size == 0:
+                    continue
+                aggregated_returns.append(oos_returns)
+                segment_results.append({
+                    'segment_id': segment_id,
+                    'seed': seed,
+                    'oos_returns': oos_returns.tolist(),
+                    'mean_return': float(np.mean(oos_returns)),
+                    'sharpe': float(self.evaluation_harness.compute_sharpe_ratio(oos_returns)),
+                })
+
+        if not aggregated_returns:
+            raise RuntimeError("No evaluation results were produced by trainer/evaluator callables")
+
+        combined = np.concatenate(aggregated_returns)
+        dsr = self.evaluation_harness.deflated_sharpe_ratio(
+            combined,
+            benchmark_sr=0.0,
+            num_trials=max(1, len(aggregated_returns)),
+        )
+
+        report = {
+            'timestamp': datetime.utcnow().isoformat(),
+            'segments': segment_results,
+            'aggregate_sharpe': float(self.evaluation_harness.compute_sharpe_ratio(combined)),
+            'deflated_sharpe_ratio': float(dsr),
+            'num_segments': len(splits),
+            'num_evaluations': len(aggregated_returns),
+        }
+
+        report_filename = f"walk_forward_{datetime.utcnow().strftime('%Y%m%dT%H%M%S')}.json"
+        report_path = self.promotion_reports_dir / report_filename
+        self.evaluation_harness.write_promotion_report(report, report_path)
+        report['report_path'] = str(report_path)
+        logger.info(f"Walk-forward evaluation report saved to {report_path}")
+        return report
+
     def get_learning_status(self) -> Dict[str, Any]:
         """Get comprehensive learning status."""
         status = {

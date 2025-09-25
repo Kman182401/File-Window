@@ -16,7 +16,12 @@ import numpy as np
 import torch
 import torch.nn as nn
 from sb3_contrib import RecurrentPPO
-from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback, EvalCallback
+from stable_baselines3.common.callbacks import (
+    BaseCallback,
+    CheckpointCallback,
+    EvalCallback,
+    StopTrainingOnNoModelImprovement,
+)
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 import gymnasium as gym
 import warnings
@@ -83,7 +88,16 @@ class TemporalTradingCallback(BaseCallback):
                     self.logger.record("trading/action_delta_mean", float(metrics["action_delta_mean"]))
                 if "turnover" in metrics:
                     self.logger.record("trading/turnover", float(metrics["turnover"]))
-        
+
+        logs = self.locals.get("logs") if isinstance(self.locals, dict) else None
+        if isinstance(logs, dict):
+            if "approx_kl" in logs:
+                self.logger.record("ppo/approx_kl", float(logs["approx_kl"]))
+            if "clip_fraction" in logs:
+                self.logger.record("ppo/clip_fraction", float(logs["clip_fraction"]))
+            if "entropy_loss" in logs:
+                self.logger.record("ppo/entropy_loss", float(logs["entropy_loss"]))
+
         return True
 
 
@@ -262,10 +276,12 @@ class RecurrentPPOAgent:
                 'clip_obs': 10.0,
                 'clip_reward': 10.0,
                 'gamma': 0.99,
+                'norm_obs_keys': None,
             },
 
             'optimizer_kwargs': {
                 'eps': 1e-5,
+                'weight_decay': 1e-4,
             },
 
             # Entropy bounds
@@ -275,12 +291,20 @@ class RecurrentPPOAgent:
             'min_ent_coef': 1e-4,
             'max_ent_coef': 0.2,
 
+            # Early stopping
+            'early_stop_patience': 8,
+
             # System
             'device': preferred_device,
             'verbose': 1,
             'tensorboard_log': './tensorboard_logs/recurrent_ppo/',
             'memory_limit_mb': 800
         }
+
+        if is_dict_obs:
+            box_keys = [key for key, space in observation_space.spaces.items() if isinstance(space, gym.spaces.Box)]
+            if box_keys:
+                base_config['vecnormalize_kwargs']['norm_obs_keys'] = box_keys
 
         if preferred_device == "cuda":
             logger.info("CUDA available – configuring RecurrentPPO to run on GPU.")
@@ -389,6 +413,15 @@ class RecurrentPPOAgent:
             self.eval_env = self._build_vectorised_env(training=False)
         self._sync_eval_env_stats()
 
+        patience = int(self.config.get('early_stop_patience', 8))
+        patience = max(patience, 1)
+        min_evals = max(1, patience // 2)
+        early_stop_callback = StopTrainingOnNoModelImprovement(
+            max_no_improvement_evals=patience,
+            min_evals=min_evals,
+            verbose=1,
+        )
+
         self.callbacks = [
             # Temporal pattern tracking
             TemporalTradingCallback(),
@@ -413,7 +446,8 @@ class RecurrentPPOAgent:
                 eval_freq=500,
                 deterministic=True,
                 render=False,
-                n_eval_episodes=5
+                n_eval_episodes=5,
+                callback_on_new_best=early_stop_callback,
             )
         ]
     
@@ -619,6 +653,8 @@ class RecurrentPPOAgent:
     def _build_vectorised_env(self, training: bool):
         n_envs = max(1, int(self.config.get('n_envs', 1)))
         vec_kwargs = copy.deepcopy(self.config.get('vecnormalize_kwargs', {}))
+        if vec_kwargs.get('norm_obs_keys') is None:
+            vec_kwargs.pop('norm_obs_keys', None)
 
         env_callables: List = []
         clone_failed = False
@@ -749,6 +785,16 @@ class RecurrentPPOAgent:
 
     def _make_env_factory(self) -> DummyVecEnv:
         return DummyVecEnv([lambda: self._clone_environment(self.env)])
+
+    def get_vecnormalize(self) -> Optional[VecNormalize]:
+        """Return the active VecNormalize wrapper, if any."""
+        if isinstance(self.training_env, VecNormalize):
+            return self.training_env
+        try:
+            env = self.model.get_env() if self.model else None
+        except AttributeError:
+            env = None
+        return env if isinstance(env, VecNormalize) else None
 
 
 def create_recurrent_ppo_agent(env: gym.Env,
