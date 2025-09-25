@@ -569,8 +569,8 @@ class RecurrentPPOAgent:
         if hasattr(self.model, 'rollout_buffer'):
             n_steps = self.config.get('n_steps', 128)
             obs_space = self.training_env.observation_space if self.training_env else self.env.observation_space
-            if isinstance(obs_space, spaces.Dict):
-                flat_space = spaces.flatten_space(obs_space)
+            if isinstance(obs_space, gym.spaces.Dict):
+                flat_space = gym.spaces.flatten_space(obs_space)
                 obs_size = int(np.prod(flat_space.shape))
             elif hasattr(obs_space, 'shape') and obs_space.shape is not None:
                 obs_size = int(np.prod(obs_space.shape))

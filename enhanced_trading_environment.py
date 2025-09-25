@@ -73,6 +73,10 @@ class EnhancedTradingConfig:
     risk_weight: float = -0.2
     transaction_weight: float = -0.1
     action_smoothness_weight: float = 0.0
+    decision_interval: int = 1
+    transaction_entropy_window: int = 120
+    transaction_entropy_threshold: float = 0.9
+    transaction_entropy_gate_strength: float = 0.5
 
 
 class ObservationNormalizer:
@@ -211,13 +215,19 @@ class EnhancedTradingEnvironment(gym.Env):
             'n_trades': 0,
             'win_rate': 0,
             'sharpe_ratio': 0,
-            'max_drawdown': 0
+            'max_drawdown': 0,
+            'action_delta_mean': 0,
+            'turnover': 0,
+            'transaction_entropy': 0
         }
 
-        # Action smoothness / turnover tracking
+        # Action smoothness / turnover / entropy tracking
         self.prev_action: Optional[np.ndarray] = None
         self.action_delta_history: List[float] = []
         self.turnover_history: List[float] = []
+        self.transaction_history: deque = deque(maxlen=self.config.transaction_entropy_window)
+        self.decision_interval_counter = 0
+        self.last_action_vector: Optional[np.ndarray] = None
 
         logger.info(f"Initialized enhanced trading environment with {len(self.config.symbols)} symbols")
     
@@ -301,7 +311,8 @@ class EnhancedTradingEnvironment(gym.Env):
             'sharpe_ratio': 0,
             'max_drawdown': 0,
             'action_delta_mean': 0,
-            'turnover': 0
+            'turnover': 0,
+            'transaction_entropy': 0
         }
 
         # Reset smoothness tracking
@@ -311,6 +322,9 @@ class EnhancedTradingEnvironment(gym.Env):
             self.prev_action = np.zeros(1, dtype=np.float32)
         self.action_delta_history = []
         self.turnover_history = []
+        self.transaction_history: deque = deque(maxlen=self.config.transaction_entropy_window)
+        self.decision_interval_counter = 0
+        self.last_action_vector: Optional[np.ndarray] = None
 
         return self._get_observation(), self._get_info()
     
@@ -325,11 +339,20 @@ class EnhancedTradingEnvironment(gym.Env):
             Tuple of (observation, reward, terminated, truncated, info)
         """
         # Parse action
-        if self.config.use_continuous_actions:
-            direction = float(action[0])  # -1 to 1
-            size = float(action[1])  # 0 to 1
+        raw_action = action
+
+        if self.config.decision_interval > 1:
+            if self.decision_interval_counter % self.config.decision_interval != 0:
+                raw_action = self.last_action_vector if self.last_action_vector is not None else action
+            self.decision_interval_counter += 1
         else:
-            direction = action - 1  # Convert 0,1,2 to -1,0,1
+            self.decision_interval_counter = 1
+
+        if self.config.use_continuous_actions:
+            direction = float(raw_action[0])  # -1 to 1
+            size = float(raw_action[1])  # 0 to 1
+        else:
+            direction = raw_action - 1  # Convert 0,1,2 to -1,0,1
             size = 1.0
 
         action_vector = np.array([direction, size], dtype=np.float32) if self.config.use_continuous_actions else np.array([direction], dtype=np.float32)
@@ -340,7 +363,8 @@ class EnhancedTradingEnvironment(gym.Env):
         self.action_delta_history.append(action_delta)
 
         # Execute trade
-        self._execute_trade(direction, size)
+        gated_direction, gated_size = self._apply_transaction_entropy_gate(direction, size)
+        self._execute_trade(gated_direction, gated_size)
 
         # Update step
         self.current_step += 1
@@ -359,8 +383,11 @@ class EnhancedTradingEnvironment(gym.Env):
             self.metrics['action_delta_mean'] = float(np.mean(self.action_delta_history[-50:]))
         if self.turnover_history:
             self.metrics['turnover'] = float(np.mean(self.turnover_history[-50:]))
+        transaction_entropy = self._compute_transaction_entropy()
+        self.metrics['transaction_entropy'] = transaction_entropy
 
         self.prev_action = action_vector
+        self.last_action_vector = np.array([gated_direction, gated_size], dtype=np.float32) if self.config.use_continuous_actions else np.array([gated_direction], dtype=np.float32)
 
         # Update metrics
         self.metrics['total_reward'] += reward
@@ -411,7 +438,10 @@ class EnhancedTradingEnvironment(gym.Env):
             self.turnover_history.append(abs(position_change))
         else:
             self.turnover_history.append(0.0)
-        
+
+        # Record action sign for transaction entropy
+        self._record_transaction(direction, size)
+
         # Record portfolio value
         portfolio_value = self.balance + self.position * current_price
         self.portfolio_value_history.append(portfolio_value)
@@ -583,6 +613,45 @@ class EnhancedTradingEnvironment(gym.Env):
             return 2  # Sideways
         else:
             return 3  # Volatile
+
+    def _record_transaction(self, direction: float, size: float) -> None:
+        """Track transactions for entropy calculation."""
+        if self.transaction_history.maxlen == 0:
+            return
+        signed_size = float(direction * size)
+        self.transaction_history.append(signed_size)
+
+    def _apply_transaction_entropy_gate(self, direction: float, size: float) -> Tuple[float, float]:
+        """Scale trade size in high-entropy regimes."""
+        gate_strength = self.config.transaction_entropy_gate_strength
+        if gate_strength <= 0:
+            return direction, size
+
+        entropy = self._compute_transaction_entropy()
+        threshold = self.config.transaction_entropy_threshold
+        if entropy <= threshold:
+            return direction, size
+
+        excess = entropy - threshold
+        scale = max(0.0, 1.0 - gate_strength * excess)
+        scaled_size = np.clip(size * scale, 0.0, 1.0)
+        return direction, scaled_size
+
+    def _compute_transaction_entropy(self) -> float:
+        """Rolling entropy over sell/hold/buy bins (normalized to [0,1])."""
+        if not self.transaction_history:
+            return 0.0
+
+        data = np.array(self.transaction_history, dtype=np.float32)
+        buy_prob = np.mean(data > 1e-6)
+        sell_prob = np.mean(data < -1e-6)
+        hold_prob = max(0.0, 1.0 - buy_prob - sell_prob)
+        probs = np.array([sell_prob, hold_prob, buy_prob], dtype=np.float32)
+        probs = probs[probs > 0]
+        if probs.size == 0:
+            return 0.0
+        entropy = -float(np.sum(probs * np.log(probs + 1e-8)) / np.log(3.0))
+        return entropy
     
     def _is_terminated(self) -> bool:
         """Check if episode should terminate."""

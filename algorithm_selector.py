@@ -396,6 +396,9 @@ class AlgorithmSelector:
                     if self.env.config.action_smoothness_weight == 0:
                         self.env.config.action_smoothness_weight = 0.005
                         logger.info("Applied default action smoothness weight for RecurrentPPO")
+                    if hasattr(self.env.config, 'transaction_entropy_gate_strength') and self.env.config.transaction_entropy_gate_strength == 0:
+                        self.env.config.transaction_entropy_gate_strength = 0.5
+                        logger.info("Enabled transaction entropy gate for RecurrentPPO")
 
                 rp_config = {
                     'n_envs': 4,
