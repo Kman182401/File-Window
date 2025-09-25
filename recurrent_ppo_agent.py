@@ -76,12 +76,19 @@ class TemporalTradingCallback(BaseCallback):
                 self.sequence_rewards.append(info["episode"]["r"])
                 if len(self.sequence_rewards) > 10:
                     self.logger.record("trading/seq_reward_mean", np.mean(self.sequence_rewards[-10:]))
+
+            metrics = info.get("metrics", {}) if isinstance(info, dict) else {}
+            if metrics:
+                if "action_delta_mean" in metrics:
+                    self.logger.record("trading/action_delta_mean", float(metrics["action_delta_mean"]))
+                if "turnover" in metrics:
+                    self.logger.record("trading/turnover", float(metrics["turnover"]))
         
         return True
 
 
 class EntropyControlCallback(BaseCallback):
-    """Bounds policy entropy to avoid degenerate exploration."""
+    """Bounds policy entropy using the policy distribution API."""
 
     def __init__(
         self,
@@ -98,14 +105,47 @@ class EntropyControlCallback(BaseCallback):
         self.adjustment_lr = adjustment_lr
         self.min_ent_coef = min_ent_coef
         self.max_ent_coef = max_ent_coef
+        self._last_observations: Optional[Any] = None
+        self._last_episode_starts: Optional[np.ndarray] = None
+        self._last_states: Optional[Any] = None
+
+    def _on_step(self) -> bool:
+        self._last_observations = self.locals.get("observations")
+        self._last_episode_starts = self.locals.get("episode_starts")
+        self._last_states = self.locals.get("states")
+        return True
 
     def _on_rollout_end(self) -> None:
         policy = getattr(self.model, "policy", None)
-        if policy is None or not hasattr(policy, "log_std"):
+        if policy is None or self._last_observations is None:
             return None
 
-        log_std = policy.log_std.detach().cpu().numpy()
-        current_entropy = float(np.mean(log_std + 0.5 * math.log(2 * math.pi * math.e)))
+        device = self.model.device
+
+        obs_t, _ = policy.obs_to_tensor(self._last_observations)
+        if isinstance(obs_t, dict):
+            sample_tensor = next(iter(obs_t.values()))
+        else:
+            sample_tensor = obs_t
+
+        episode_starts = self._last_episode_starts
+        if episode_starts is None:
+            episode_starts_t = torch.zeros(sample_tensor.shape[0], device=device, dtype=torch.bool)
+        else:
+            episode_starts_t = torch.as_tensor(episode_starts, device=device, dtype=torch.bool)
+
+        states = self._last_states
+        if states is not None:
+            if isinstance(states, tuple):
+                states_t = tuple(torch.as_tensor(s, device=device, dtype=torch.float32) for s in states)
+            else:
+                states_t = torch.as_tensor(states, device=device, dtype=torch.float32)
+        else:
+            states_t = None
+
+        with torch.no_grad():
+            dist = policy.get_distribution(obs_t, state=states_t, episode_starts=episode_starts_t)
+            current_entropy = float(dist.entropy().mean().cpu().item())
 
         current_ent_coef = float(getattr(self.model, "ent_coef", 0.0))
         updated_ent_coef = current_ent_coef
@@ -119,6 +159,9 @@ class EntropyControlCallback(BaseCallback):
             setattr(self.model, "ent_coef", updated_ent_coef)
             self.logger.record("entropy/ent_coef", updated_ent_coef)
         self.logger.record("entropy/estimated", current_entropy)
+        self._last_observations = None
+        self._last_episode_starts = None
+        self._last_states = None
         return None
 
 
@@ -204,7 +247,7 @@ class RecurrentPPOAgent:
             'gae_lambda': 0.95,
             'clip_range_start': 0.2,
             'clip_range_end': 0.1,
-            'clip_range_vf': None,
+            'clip_range_vf': 0.2,
             'normalize_advantage': True,
             'ent_coef': 0.02,
             'vf_coef': 0.5,
@@ -221,6 +264,10 @@ class RecurrentPPOAgent:
                 'gamma': 0.99,
             },
 
+            'optimizer_kwargs': {
+                'eps': 1e-5,
+            },
+
             # Entropy bounds
             'entropy_lower_bound': 0.2,
             'entropy_upper_bound': 1.5,
@@ -234,10 +281,6 @@ class RecurrentPPOAgent:
             'tensorboard_log': './tensorboard_logs/recurrent_ppo/',
             'memory_limit_mb': 800
         }
-
-        if is_dict_obs:
-            logger.warning("Dict observations detected – VecNormalize will be disabled for this run")
-            base_config['vecnormalize_kwargs']['norm_obs'] = False
 
         if preferred_device == "cuda":
             logger.info("CUDA available – configuring RecurrentPPO to run on GPU.")
@@ -279,23 +322,32 @@ class RecurrentPPOAgent:
         try:
             # Prepare environment and clip schedule
             self.training_env = self._build_vectorised_env(training=True)
+            if self.eval_env is None:
+                self.eval_env = self._build_vectorised_env(training=False)
+            self._sync_eval_env_stats()
+
             clip_schedule = self._create_clip_schedule(
-                self.config.pop('clip_range_start', 0.2),
-                self.config.pop('clip_range_end', 0.1)
+                self.config.get('clip_range_start', 0.2),
+                self.config.get('clip_range_end', 0.1)
             )
-            self.config['clip_range'] = clip_schedule
+
+            lr_config = self.config.get('learning_rate', 3e-4)
+            if callable(lr_config):
+                learning_rate = lr_config
+            else:
+                learning_rate = self._create_linear_schedule(float(lr_config))
 
             # Create model
             self.model = RecurrentPPO(
                 policy=self.config['policy'],
                 env=self.training_env,
-                learning_rate=self.config['learning_rate'],
+                learning_rate=learning_rate,
                 n_steps=self.config['n_steps'],
                 batch_size=self.config['batch_size'],
                 n_epochs=self.config['n_epochs'],
                 gamma=self.config['gamma'],
                 gae_lambda=self.config['gae_lambda'],
-                clip_range=self.config['clip_range'],
+                clip_range=clip_schedule,
                 clip_range_vf=self.config['clip_range_vf'],
                 normalize_advantage=self.config['normalize_advantage'],
                 ent_coef=self.config['ent_coef'],
@@ -305,7 +357,8 @@ class RecurrentPPOAgent:
                 verbose=self.config['verbose'],
                 tensorboard_log=self.config['tensorboard_log'],
                 device=self.config['device'],
-                target_kl=self.config.get('target_kl', None)
+                target_kl=self.config.get('target_kl', None),
+                optimizer_kwargs=self.config.get('optimizer_kwargs')
             )
 
             # Setup callbacks
@@ -332,6 +385,10 @@ class RecurrentPPOAgent:
             max_ent_coef=self.config.get('max_ent_coef', 0.2)
         )
 
+        if self.eval_env is None:
+            self.eval_env = self._build_vectorised_env(training=False)
+        self._sync_eval_env_stats()
+
         self.callbacks = [
             # Temporal pattern tracking
             TemporalTradingCallback(),
@@ -350,7 +407,7 @@ class RecurrentPPOAgent:
             
             # Evaluation
             EvalCallback(
-                self.env,
+                self.eval_env if self.eval_env is not None else self.env,
                 best_model_save_path='./models/recurrent_ppo/',
                 log_path='./logs/recurrent_ppo/',
                 eval_freq=500,
@@ -433,9 +490,7 @@ class RecurrentPPOAgent:
         if episode_start is None:
             episode_start = np.array([False])
         
-        obs_for_policy = observation
-        if isinstance(self.training_env, VecNormalize) and hasattr(self.training_env, 'obs_rms') and self.training_env.obs_rms.mean is not None:
-            obs_for_policy = self._normalize_observation(observation)
+        obs_for_policy = self._normalize_observation(observation)
 
         return self.model.predict(
             obs_for_policy,
@@ -481,6 +536,8 @@ class RecurrentPPOAgent:
             self.training_env.training = False
             self.training_env.norm_reward = False
             self.model = RecurrentPPO.load(path, env=self.training_env, device=self.config['device'])
+            self.eval_env = self._build_vectorised_env(training=False)
+            self._sync_eval_env_stats()
         else:
             self.model = RecurrentPPO.load(path, env=env, device=self.config['device'])
 
@@ -512,7 +569,13 @@ class RecurrentPPOAgent:
         if hasattr(self.model, 'rollout_buffer'):
             n_steps = self.config.get('n_steps', 128)
             obs_space = self.training_env.observation_space if self.training_env else self.env.observation_space
-            obs_size = np.prod(obs_space.shape) if hasattr(obs_space, 'shape') else 0
+            if isinstance(obs_space, spaces.Dict):
+                flat_space = spaces.flatten_space(obs_space)
+                obs_size = int(np.prod(flat_space.shape))
+            elif hasattr(obs_space, 'shape') and obs_space.shape is not None:
+                obs_size = int(np.prod(obs_space.shape))
+            else:
+                obs_size = 0
             memory_usage['rollout_buffer_mb'] = (n_steps * obs_size * 4) / (1024 * 1024)
 
         memory_usage['total_mb'] = sum(memory_usage.values())
@@ -555,7 +618,7 @@ class RecurrentPPOAgent:
 
     def _build_vectorised_env(self, training: bool):
         n_envs = max(1, int(self.config.get('n_envs', 1)))
-        vec_kwargs = self.config.get('vecnormalize_kwargs', {})
+        vec_kwargs = copy.deepcopy(self.config.get('vecnormalize_kwargs', {}))
 
         env_callables: List = []
         clone_failed = False
@@ -575,18 +638,26 @@ class RecurrentPPOAgent:
 
         vec_env = DummyVecEnv(env_callables)
 
-        if isinstance(vec_env.observation_space, gym.spaces.Dict):
-            logger.warning("VecNormalize not applied because observation space is Dict")
-            return vec_env
+        obs_space = vec_env.observation_space
+        if isinstance(obs_space, gym.spaces.Dict):
+            box_keys = [key for key, space in obs_space.spaces.items() if isinstance(space, gym.spaces.Box)]
+            if box_keys:
+                vec_kwargs.setdefault('norm_obs', True)
+                vec_kwargs.setdefault('norm_obs_keys', box_keys)
 
         try:
+            vec_norm = VecNormalize(vec_env, **vec_kwargs)
+        except TypeError:
+            vec_kwargs.pop('norm_obs_keys', None)
             vec_norm = VecNormalize(vec_env, **vec_kwargs)
         except Exception as exc:
             logger.warning(f"VecNormalize initialisation failed ({exc}); proceeding without normalisation")
             return vec_env
 
         vec_norm.training = training
-        vec_norm.norm_reward = training and vec_kwargs.get('norm_reward', True)
+        vec_norm.norm_reward = bool(training and vec_kwargs.get('norm_reward', True))
+        if not training:
+            vec_norm.norm_reward = False
         return vec_norm
 
     def _clone_environment(self, source_env: gym.Env) -> gym.Env:
@@ -621,16 +692,46 @@ class RecurrentPPOAgent:
 
         return schedule
 
+    def _create_linear_schedule(self, initial_value: float) -> Callable[[float], float]:
+        initial_value = float(initial_value)
+
+        def schedule(progress_remaining: float) -> float:
+            progress_remaining = float(np.clip(progress_remaining, 0.0, 1.0))
+            return initial_value * progress_remaining
+
+        return schedule
+
     def _normalize_observation(self, observation: np.ndarray) -> np.ndarray:
-        if not isinstance(self.training_env, VecNormalize):
+        vec_env = self.training_env
+        if vec_env is None and self.model is not None:
+            try:
+                vec_env = self.model.get_env()
+            except AttributeError:
+                vec_env = None
+
+        if not isinstance(vec_env, VecNormalize):
             return observation
-        obs_rms = getattr(self.training_env, 'obs_rms', None)
+
+        obs_rms = getattr(vec_env, 'obs_rms', None)
         if obs_rms is None or obs_rms.mean is None:
             return observation
 
-        obs = np.array(observation, dtype=np.float32, copy=True)
-        eps = getattr(self.training_env, 'epsilon', 1e-8)
-        return (obs - obs_rms.mean) / np.sqrt(obs_rms.var + eps)
+        expanded_obs = self._expand_obs_for_vecnorm(observation)
+        was_training = vec_env.training
+        vec_env.training = False
+        normalized = vec_env.normalize_obs(expanded_obs)
+        vec_env.training = was_training
+        return self._squeeze_obs_from_vecnorm(normalized)
+
+    def _expand_obs_for_vecnorm(self, observation: Any):
+        if isinstance(observation, dict):
+            return {k: np.asarray([v], dtype=np.float32) for k, v in observation.items()}
+        return np.asarray([observation], dtype=np.float32)
+
+    def _squeeze_obs_from_vecnorm(self, observation: Any):
+        if isinstance(observation, dict):
+            return {k: v[0] for k, v in observation.items()}
+        return observation[0]
 
     def _sync_eval_env_stats(self) -> None:
         if not (
@@ -663,16 +764,6 @@ def create_recurrent_ppo_agent(env: gym.Env,
         Configured RecurrentPPO agent
     """
     try:
-        if hasattr(env, 'config') and getattr(env.config, 'use_dict_obs', False):
-            try:
-                flat_config = copy.deepcopy(env.config)
-                flat_config.use_dict_obs = False
-                data = getattr(env, 'data', None)
-                env = env.__class__(data=data, config=flat_config)
-                logger.info("Recreated trading environment with flat observations for PPO training")
-            except Exception as rebuild_exc:
-                logger.warning(f"Could not rebuild flat-observation environment ({rebuild_exc}); proceeding with dict observations (VecNormalize disabled)")
-
         agent = RecurrentPPOAgent(env, config)
         agent.build_model()
         return agent

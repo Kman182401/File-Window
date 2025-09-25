@@ -399,7 +399,7 @@ class AlgorithmSelector:
 
                 rp_config = {
                     'n_envs': 4,
-                    'batch_size': max(32, get_optimal_batch_size('rl_training')),
+                    'batch_size': 64,
                 }
                 return create_recurrent_ppo_agent(self.env, rp_config)
             
