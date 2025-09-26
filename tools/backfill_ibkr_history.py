@@ -46,6 +46,7 @@ _SYMBOL_HISTORY: Dict[str, Deque[float]] = {}
 _LAST_IDENTICAL: Dict[Tuple[str, str, str], float] = {}
 _CONTRACT_CACHE: Dict[Tuple[str, datetime], Optional[Future]] = {}
 _CONTRACT_CHAINS: Dict[str, List[Future]] = {}
+_LAST_TRADE_CACHE: Dict[int, Optional[datetime]] = {}
 
 ALIAS_TO_ROOT = {
     "ES1!": "ES",
@@ -144,9 +145,12 @@ def _classify_error(exc: Exception) -> str:
 
 def _expiry_int(contract) -> int:
     exp = getattr(contract, "lastTradeDateOrContractMonth", "") or ""
-    if len(exp) == 6:
-        exp = exp + "01"
     try:
+        if len(exp) == 6:
+            year = int(exp[:4])
+            month = int(exp[4:6])
+            last_day = calendar.monthrange(year, month)[1]
+            exp = f"{year:04d}{month:02d}{last_day:02d}"
         return int(exp)
     except ValueError:
         return 99991231
@@ -254,49 +258,60 @@ def _last_close_from_hours(hours: str, tz_name: str, month_prefix: str) -> Optio
 
 
 def _parse_last_trade(contract, ib_ingestor: Optional[IBKRIngestor] = None) -> Optional[datetime]:
-    lt = getattr(contract, "lastTradeDateOrContractMonth", None)
-    if not lt:
-        return None
-    lt = lt.strip()
-    try:
+    con_id = getattr(contract, "conId", None)
+    if con_id is not None and con_id in _LAST_TRADE_CACHE:
+        return _LAST_TRADE_CACHE[con_id]
+
+    lt_raw = getattr(contract, "lastTradeDateOrContractMonth", None)
+    parsed: Optional[datetime] = None
+
+    if lt_raw:
+        lt = lt_raw.strip()
         if len(lt) == 8:
-            return datetime.strptime(lt, "%Y%m%d").replace(tzinfo=timezone.utc)
-    except ValueError:
-        return None
+            try:
+                parsed = datetime.strptime(lt, "%Y%m%d").replace(tzinfo=timezone.utc)
+            except ValueError:
+                parsed = None
+        elif len(lt) == 6:
+            if ib_ingestor is not None:
+                try:
+                    details = _req_cd_with_retry(ib_ingestor, contract)
+                except Exception:
+                    details = None
+                if details:
+                    target_id = getattr(contract, "conId", None)
+                    for cd in details:
+                        if getattr(cd.contract, "conId", None) != target_id:
+                            continue
+                        lt2 = (getattr(cd.contract, "lastTradeDateOrContractMonth", "") or "").strip()
+                        if lt2:
+                            try:
+                                if len(lt2) == 8:
+                                    parsed = datetime.strptime(lt2, "%Y%m%d").replace(tzinfo=timezone.utc)
+                                    break
+                            except ValueError:
+                                parsed = None
+                        if parsed is None:
+                            tz_name = getattr(cd, "timeZoneId", "UTC") or "UTC"
+                            last_close = _last_close_from_hours(getattr(cd, "tradingHours", ""), tz_name, lt)
+                            if last_close is None:
+                                last_close = _last_close_from_hours(getattr(cd, "liquidHours", ""), tz_name, lt)
+                            if last_close is not None:
+                                parsed = last_close
+                                break
+                    # end for
+            if parsed is None:
+                try:
+                    year = int(lt[:4])
+                    month = int(lt[4:6])
+                    last_day = calendar.monthrange(year, month)[1]
+                    parsed = datetime(year, month, last_day, 23, 59, 59, tzinfo=timezone.utc)
+                except ValueError:
+                    parsed = None
 
-    if len(lt) == 6 and ib_ingestor is not None:
-        try:
-            details = _req_cd_with_retry(ib_ingestor, contract)
-        except Exception:
-            details = None
-        if details:
-            target_id = getattr(contract, "conId", None)
-            for cd in details:
-                if getattr(cd.contract, "conId", None) != target_id:
-                    continue
-                lt2 = (getattr(cd.contract, "lastTradeDateOrContractMonth", "") or "").strip()
-                if lt2:
-                    try:
-                        if len(lt2) == 8:
-                            return datetime.strptime(lt2, "%Y%m%d").replace(tzinfo=timezone.utc)
-                    except ValueError:
-                        pass
-                tz_name = getattr(cd, "timeZoneId", "UTC") or "UTC"
-                last_close = _last_close_from_hours(getattr(cd, "tradingHours", ""), tz_name, lt)
-                if last_close is None:
-                    last_close = _last_close_from_hours(getattr(cd, "liquidHours", ""), tz_name, lt)
-                if last_close is not None:
-                    return last_close
-
-    if len(lt) == 6:
-        try:
-            year = int(lt[:4])
-            month = int(lt[4:6])
-            last_day = calendar.monthrange(year, month)[1]
-            return datetime(year, month, last_day, 23, 59, 59, tzinfo=timezone.utc)
-        except ValueError:
-            return None
-    return None
+    if con_id is not None:
+        _LAST_TRADE_CACHE[con_id] = parsed
+    return parsed
 
 
 def _maybe_roll_contract(ib_ingestor: IBKRIngestor, symbol: str, contract, asof: datetime):
@@ -427,25 +442,28 @@ def _backfill_symbol(ib: IBKRIngestor, symbol: str) -> None:
         while cur < now_utc:
             nxt = min(cur + timedelta(days=WINDOW_DAYS), now_utc)
 
-            contract = None
-            if os.getenv("USE_HEAD_TS", "1") == "1":
-                contract = _resolve_front_month_contract(ib, symbol, nxt)
-                if contract is not None:
-                    contract = _maybe_roll_contract(ib, symbol, contract, nxt)
-                    _ear = _probe_head_timestamp(ib, contract)
-                    if _ear is not None:
-                        earliest_dt = _ear.to_pydatetime()
-                        if earliest_dt > cur:
-                            cur = earliest_dt
-                            if cur >= nxt:
-                                continue
+            contract = _resolve_front_month_contract(ib, symbol, nxt)
+            if contract is not None:
+                contract = _maybe_roll_contract(ib, symbol, contract, nxt)
+
+            if os.getenv("USE_HEAD_TS", "1") == "1" and contract is not None:
+                _ear = _probe_head_timestamp(ib, contract)
+                if _ear is not None:
+                    earliest_dt = _ear.to_pydatetime()
+                    if earliest_dt > cur:
+                        cur = earliest_dt
+                        if cur >= nxt:
+                            continue
 
             # Compute effective end using bars-first clamp, then days cap, and clamp to contract life
             end_use = min(nxt, now_utc)
+            clamp_msgs: List[str] = []
+            original_end = end_use
             if contract is not None:
                 lt = _parse_last_trade(contract, ib)
                 if lt is not None and end_use > lt:
                     end_use = lt
+                    clamp_msgs.append(f"lastTradeDate->{lt.isoformat()}")
             if end_use <= cur:
                 cur = nxt
                 time.sleep(SLEEP_BETWEEN_REQ)
@@ -455,9 +473,17 @@ def _backfill_symbol(ib: IBKRIngestor, symbol: str) -> None:
             if minutes > MAX_BARS_PER_REQUEST:
                 end_use = cur + timedelta(minutes=MAX_BARS_PER_REQUEST)
                 minutes = MAX_BARS_PER_REQUEST
+                clamp_msgs.append(f"bar_limit_{MAX_BARS_PER_REQUEST}m")
             elif end_use - cur > timedelta(days=MAX_DAYS_PER_REQ):
                 end_use = cur + timedelta(days=MAX_DAYS_PER_REQ)
                 minutes = max(1, int((end_use - cur).total_seconds() / 60))
+                clamp_msgs.append(f"day_limit_{MAX_DAYS_PER_REQ}d")
+
+            if clamp_msgs and end_use != original_end:
+                cid = getattr(contract, "conId", None) if contract is not None else None
+                print(
+                    f"  [CLAMP] {symbol} conId={cid} forward end {original_end.isoformat()} -> {end_use.isoformat()} ({', '.join(clamp_msgs)})"
+                )
 
             duration_minutes = minutes
             duration_days = max(1, (end_use - cur).days or (duration_minutes + 1439) // 1440)
@@ -577,19 +603,31 @@ def _backfill_symbol(ib: IBKRIngestor, symbol: str) -> None:
 
             # Clamp the request end to the contract's lastTradeDate to ensure overlap
             end_use = nxt_end
+            original_end = end_use
+            original_start = start
+            clamp_msgs: List[str] = []
             if contract is not None:
                 lt = _parse_last_trade(contract, ib)
                 if lt is not None and end_use > lt:
                     end_use = lt
+                    clamp_msgs.append(f"lastTradeDate->{lt.isoformat()}")
 
             # Bars-first clamp, then days cap, using end_use
             minutes_total = max(1, int((end_use - start).total_seconds() / 60))
             if minutes_total > MAX_BARS_PER_REQUEST:
                 start = end_use - timedelta(minutes=MAX_BARS_PER_REQUEST)
                 minutes_total = MAX_BARS_PER_REQUEST
+                clamp_msgs.append(f"bar_limit_{MAX_BARS_PER_REQUEST}m")
             elif end_use - start > timedelta(days=MAX_DAYS_PER_REQ):
                 start = end_use - timedelta(days=MAX_DAYS_PER_REQ)
                 minutes_total = max(1, int((end_use - start).total_seconds() / 60))
+                clamp_msgs.append(f"day_limit_{MAX_DAYS_PER_REQ}d")
+
+            if clamp_msgs and (end_use != original_end or start != original_start):
+                cid = getattr(contract, "conId", None) if contract is not None else None
+                print(
+                    f"  [CLAMP] {symbol} conId={cid} backward start {original_start.isoformat()} -> {start.isoformat()} end {original_end.isoformat()} -> {end_use.isoformat()} ({', '.join(clamp_msgs)})"
+                )
 
             duration_days = max(1, (end_use - start).days or (minutes_total + 1439) // 1440)
             duration = f"{duration_days} D"
