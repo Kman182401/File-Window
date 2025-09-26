@@ -25,6 +25,7 @@ from ib_insync import Future
 
 from market_data_ibkr_adapter import IBKRIngestor
 from market_data_config import IBKR_SYMBOLS
+from utils.persist_market_data import persist_bars
 
 DATA_DIR = os.path.expanduser(os.getenv("DATA_DIR", "~/.local/share/m5_trader/data"))
 WINDOW_DAYS = int(os.getenv("BACKFILL_WINDOW_DAYS", "10"))
@@ -325,7 +326,7 @@ def _backfill_symbol(ib: IBKRIngestor, symbol: str) -> None:
         try:
             _enforce_pacing(symbol, duration, nxt)
             end_utc_str = nxt.strftime("%Y%m%d-%H:%M:%S")
-            ib.fetch_data(
+            df = ib.fetch_data(
                 symbol,
                 duration=duration,
                 barSize="1 min",
@@ -336,7 +337,11 @@ def _backfill_symbol(ib: IBKRIngestor, symbol: str) -> None:
                 asof=nxt,
             )
             _record_request(symbol, duration, nxt)
-            print(f"  [OK] {symbol} {cur} -> {nxt}")
+            if df is not None and not df.empty:
+                out_path = persist_bars(symbol, df)
+                print(f"  [OK] {symbol} {cur} -> {nxt} wrote={out_path}")
+            else:
+                print(f"  [OK] {symbol} {cur} -> {nxt} (no rows)")
         except Exception as exc:
             kind = _classify_error(exc)
             if kind == "retention":
@@ -397,7 +402,7 @@ def _backfill_symbol(ib: IBKRIngestor, symbol: str) -> None:
             try:
                 _enforce_pacing(symbol, duration, nxt_end)
                 end_utc_str = nxt_end.strftime("%Y%m%d-%H:%M:%S")
-                ib.fetch_data(
+                df = ib.fetch_data(
                     symbol,
                     duration=duration,
                     barSize="1 min",
@@ -408,7 +413,11 @@ def _backfill_symbol(ib: IBKRIngestor, symbol: str) -> None:
                     asof=nxt_end,
                 )
                 _record_request(symbol, duration, nxt_end)
-                print(f"  [OK] {symbol} backward {start} -> {nxt_end}")
+                if df is not None and not df.empty:
+                    out_path = persist_bars(symbol, df)
+                    print(f"  [OK] {symbol} backward {start} -> {nxt_end} wrote={out_path}")
+                else:
+                    print(f"  [OK] {symbol} backward {start} -> {nxt_end} (no rows)")
             except Exception as exc:
                 kind = _classify_error(exc)
                 if kind == "retention":

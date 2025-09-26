@@ -120,3 +120,32 @@ git pull --rebase origin main   # only if needed
 git push origin HEAD:main
 git status
 ```
+
+IBKR Connectivity Policy — Client IDs and Ports
+
+Purpose
+- Avoid accidental multi-socket conflicts and make long-running jobs reliable by standardizing client IDs per process type.
+
+Defaults
+- Gateway/host: `127.0.0.1`, Port: `4002` (IB Gateway / Live Trading). Override via `IBKR_HOST`, `IBKR_PORT`.
+- Client IDs (override with `IBKR_CLIENT_ID` when needed):
+  - 9001 — Monitoring/smoke probes (short-lived checks only).
+  - 9002 — Main trading/RL pipeline run (single long-lived socket per run).
+  - 9003 — Historical backfill and data maintenance jobs (may run concurrently with 9002).
+
+Rules
+- “One ClientID per process” applies to the main pipeline run, not globally. Using 9003 for backfill alongside a 9002 pipeline session is allowed and expected.
+- Monitoring (9001) must not be promoted to long-lived ingestion; keep probes short to avoid starving pipeline/backfill pacing windows.
+- If you change IDs, set them explicitly per process via env vars rather than changing source:
+  - `IBKR_CLIENT_ID=9003 python tools/backfill_ibkr_history.py`
+  - `IBKR_CLIENT_ID=9002 python src/rl_trading_pipeline.py`
+  - `IBKR_CLIENT_ID=9001 python monitoring/ingest_monitor.py`
+
+Code Alignment
+- Backfill (`tools/backfill_ibkr_history.py`) defaults to `IBKR_CLIENT_ID=9003`.
+- Pipeline (`src/rl_trading_pipeline.py` via `IBKRIngestor`) defaults to `IBKR_CLIENT_ID=9002`.
+- Monitors default to `IBKR_CLIENT_ID=9001`.
+
+Operational Tips
+- If you see “ConnectionRefusedError(111 … 4002)”, verify IB Gateway is running and API is enabled.
+- If you see historical “Error 162 … no data”, that is an HMDS floor/contract issue, not a socket/ID issue. Backfill logic handles month rolls; allow it to proceed.
