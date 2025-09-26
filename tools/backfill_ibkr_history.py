@@ -8,12 +8,18 @@ latest persisted timestamp if data already exists.
 """
 
 import os
+import sys
 import time
 from collections import deque
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Deque, Dict, Optional, Tuple
 
 import pandas as pd
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from ib_insync import Future
 
