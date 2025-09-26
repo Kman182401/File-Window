@@ -102,9 +102,16 @@ def persist_bars(symbol: str, df: pd.DataFrame) -> str:
         if p.exists():
             try:
                 df_old = pd.read_parquet(p)
+                before = len(df_old)
                 combined = pd.concat([df_old, df_new], ignore_index=True)
                 combined = combined.drop_duplicates(subset=["timestamp"]).sort_values("timestamp")
+                after = len(combined)
+                if after == before:
+                    # No new rows; avoid rewriting the file
+                    print(f"[persist] unchanged: {out_path} (no new bars)")
+                    return str(out_path)
                 combined.to_parquet(p, index=False)
+                print(f"[persist] appended {after - before} bars to {out_path}")
             except Exception:
                 # Fallback to simple write
                 write_parquet_any(df_new, out_path)
