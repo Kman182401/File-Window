@@ -13,7 +13,7 @@ import time
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Deque, Dict, Optional, Tuple
+from typing import Deque, Dict, List, Optional, Tuple
 
 import pandas as pd
 
@@ -373,8 +373,7 @@ def _backfill_symbol(ib: IBKRIngestor, symbol: str) -> None:
                     earliest_available = _probe_head_timestamp(ib, contract)
                     if earliest_available is not None and earliest_available.to_pydatetime() > start:
                         ea_dt = earliest_available.to_pydatetime()
-                        start = ea_dt
-                        if nxt_end - start <= timedelta(minutes=1):
+                        if nxt_end - ea_dt <= timedelta(minutes=1):
                             candidate_end = ea_dt - timedelta(minutes=1)
                             if candidate_end <= target_start:
                                 print(
@@ -384,6 +383,7 @@ def _backfill_symbol(ib: IBKRIngestor, symbol: str) -> None:
                             end_point = candidate_end
                             prev_end_point = nxt_end
                             continue
+                        start = max(start, ea_dt)
 
             if prev_end_point is not None and start >= prev_end_point - timedelta(minutes=1):
                 print(
