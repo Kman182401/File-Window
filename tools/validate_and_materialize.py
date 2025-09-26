@@ -43,13 +43,28 @@ def _is_cme_maintenance(ts: pd.Timestamp) -> bool:
     return time(17, 0) <= et_time < time(18, 0)
 
 
+def _is_cme_weekend_window(ts_et: pd.Timestamp) -> bool:
+    """Return True if timestamp falls inside the CME weekend closure."""
+
+    weekday = ts_et.weekday()  # Monday=0 ... Sunday=6
+    t = ts_et.time()
+    if weekday == 4 and t >= time(17, 0):
+        return True  # Friday after 5pm ET
+    if weekday == 5:
+        return True  # Saturday
+    if weekday == 6 and t < time(18, 0):
+        return True  # Sunday before 6pm ET
+    return False
+
+
 def _detect_gaps(
     df: pd.DataFrame,
-) -> Tuple[List[Tuple[pd.Timestamp, pd.Timestamp, float]], int, int]:
+) -> Tuple[List[Tuple[pd.Timestamp, pd.Timestamp, float]], int, int, int]:
     if df.empty:
-        return [], 0, 0
+        return [], 0, 0, 0
     gaps: List[Tuple[pd.Timestamp, pd.Timestamp, float]] = []
-    inside = 0
+    maintenance_skips = 0
+    weekend_skips = 0
     outside = 0
     timestamps = df["timestamp"].array
     for i in range(1, len(timestamps)):
@@ -58,14 +73,23 @@ def _detect_gaps(
         delta_minutes = (cur - prev).total_seconds() / 60.0
         if delta_minutes <= 1.01:
             continue
-        in_prev = _is_cme_maintenance(prev)
-        in_cur = _is_cme_maintenance(cur)
-        if in_prev and in_cur:
-            inside += 1
+        in_prev_maint = _is_cme_maintenance(prev)
+        in_cur_maint = _is_cme_maintenance(cur)
+
+        prev_et = prev.tz_convert("America/New_York")
+        cur_et = cur.tz_convert("America/New_York")
+        in_prev_weekend = _is_cme_weekend_window(prev_et)
+        in_cur_weekend = _is_cme_weekend_window(cur_et)
+
+        if in_prev_maint and in_cur_maint:
+            maintenance_skips += 1
+            continue
+        if in_prev_weekend and in_cur_weekend:
+            weekend_skips += 1
             continue
         outside += 1
         gaps.append((prev, cur, delta_minutes))
-    return gaps, inside, outside
+    return gaps, maintenance_skips, weekend_skips, outside
 
 
 def main() -> None:
@@ -79,7 +103,7 @@ def main() -> None:
 
     for symbol in sys.argv[1:]:
         df = _load_symbol(symbol)
-        gaps, maintenance_skips, outside_gaps = _detect_gaps(df)
+        gaps, maintenance_skips, weekend_skips, outside_gaps = _detect_gaps(df)
         if df.empty:
             print(f"[{symbol}] no data found under {DATA_DIR}")
             continue
@@ -88,7 +112,7 @@ def main() -> None:
         last = df["timestamp"].max()
         print(
             f"[{symbol}] rows={len(df)} first={first} last={last} gaps_outside={outside_gaps}"
-            f" gaps_inside_maintenance={maintenance_skips}"
+            f" gaps_inside_maintenance={maintenance_skips} gaps_inside_weekend={weekend_skips}"
         )
         for prev, cur, mins in gaps[:20]:
             print(f"  GAP {mins:.1f} min: {prev} -> {cur}")

@@ -15,6 +15,8 @@ from typing import Deque, Dict, Optional, Tuple
 
 import pandas as pd
 
+from ib_insync import Future
+
 from market_data_ibkr_adapter import IBKRIngestor
 from market_data_config import IBKR_SYMBOLS
 
@@ -27,6 +29,24 @@ MAX_BARS_PER_REQUEST = int(os.getenv("BACKFILL_MAX_BARS", "5000"))
 _REQUEST_HISTORY: Deque[float] = deque()
 _SYMBOL_HISTORY: Dict[str, Deque[float]] = {}
 _LAST_IDENTICAL: Dict[Tuple[str, str, str], float] = {}
+
+ALIAS_TO_ROOT = {
+    "ES1!": "ES",
+    "NQ1!": "NQ",
+    "XAUUSD": "GC",
+    "EURUSD": "6E",
+    "GBPUSD": "6B",
+    "AUDUSD": "6A",
+}
+
+ROOT_TO_EXCH = {
+    "ES": "CME",
+    "NQ": "CME",
+    "6E": "CME",
+    "6B": "CME",
+    "6A": "CME",
+    "GC": "COMEX",
+}
 
 
 def _enforce_pacing(symbol: str, duration: str, end_dt: datetime) -> None:
@@ -70,6 +90,41 @@ def _record_request(symbol: str, duration: str, end_dt: datetime) -> None:
     _LAST_IDENTICAL[key] = now
 
 
+def _resolve_front_month_contract(ib_ingestor: IBKRIngestor, symbol: str, asof: datetime):
+    """Resolve the front-month futures contract for a symbol as of *asof*."""
+
+    root = ALIAS_TO_ROOT.get(symbol, symbol)
+    exch = ROOT_TO_EXCH.get(root)
+    if exch is None:
+        return None
+
+    details = ib_ingestor.ib.reqContractDetails(Future(symbol=root, exchange=exch))
+    if not details:
+        return None
+
+    yyyymmdd = asof.strftime("%Y%m%d")
+
+    def _expiry_key(cd):
+        month = cd.contract.lastTradeDateOrContractMonth or "99999999"
+        return month
+
+    candidates = [cd for cd in details if (cd.contract.lastTradeDateOrContractMonth or "00000000") >= yyyymmdd]
+    picked = sorted(candidates, key=_expiry_key)[0] if candidates else sorted(details, key=_expiry_key)[-1]
+    return picked.contract
+
+
+def _probe_head_timestamp(ib_ingestor: IBKRIngestor, contract) -> Optional[pd.Timestamp]:
+    """Return earliest available timestamp for the contract via reqHeadTimeStamp."""
+
+    try:
+        head = ib_ingestor.ib.reqHeadTimeStamp(contract, whatToShow="TRADES", useRTH=False, formatDate=1)
+    except Exception:
+        return None
+
+    ts = pd.to_datetime(str(head), utc=True, errors="coerce")
+    return ts if pd.notna(ts) else None
+
+
 def _latest_timestamp(symbol: str) -> Optional[pd.Timestamp]:
     base = os.path.join(DATA_DIR, f"symbol={symbol}")
     if not os.path.isdir(base):
@@ -111,6 +166,17 @@ def _backfill_symbol(ib: IBKRIngestor, symbol: str) -> None:
 
     while cur < now_utc:
         nxt = min(cur + timedelta(days=WINDOW_DAYS), now_utc)
+
+        if os.getenv("USE_HEAD_TS", "1") == "1":
+            contract = _resolve_front_month_contract(ib, symbol, nxt)
+            if contract is not None:
+                earliest = _probe_head_timestamp(ib, contract)
+                if earliest is not None:
+                    earliest_dt = earliest.to_pydatetime()
+                    if earliest_dt > cur:
+                        cur = earliest_dt
+                        if cur >= nxt:
+                            continue
 
         minutes = max(1, int((nxt - cur).total_seconds() / 60))
         if minutes > MAX_BARS_PER_REQUEST:
