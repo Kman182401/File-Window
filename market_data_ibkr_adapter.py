@@ -340,7 +340,8 @@ class IBKRIngestor:
         useRTH=False,
         formatDate=1,
         endDateTime="",
-        asof: Optional[datetime] = None
+        asof: Optional[datetime] = None,
+        contract_override: Optional[Contract] = None,
     ):
         """
         Fetch historical bars for the mapped futures contract.
@@ -365,9 +366,20 @@ class IBKRIngestor:
             raise RuntimeError(f"IBKR not connected. Cannot fetch data for {ticker}.")
 
         canonical_ticker = self._canonical_symbol(ticker)
-        contract = self._get_contract(canonical_ticker, asof=asof)
+        contract = contract_override or self._get_contract(canonical_ticker, asof=asof)
         if contract is None:
             raise RuntimeError(f"No contract available for {ticker}.")
+
+        try:
+            contract.includeExpired = True
+        except Exception:
+            pass
+
+        if contract_override is not None:
+            try:
+                self.ib.qualifyContracts(contract)
+            except Exception:
+                pass
 
         print(f"Requesting contract: {contract}")  # debug log
 
