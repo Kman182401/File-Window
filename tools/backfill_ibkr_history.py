@@ -35,6 +35,7 @@ MAX_BARS_PER_REQUEST = int(os.getenv("BACKFILL_MAX_BARS", "5000"))
 _REQUEST_HISTORY: Deque[float] = deque()
 _SYMBOL_HISTORY: Dict[str, Deque[float]] = {}
 _LAST_IDENTICAL: Dict[Tuple[str, str, str], float] = {}
+_CONTRACT_CACHE: Dict[Tuple[str, datetime], Optional[Future]] = {}
 
 ALIAS_TO_ROOT = {
     "ES1!": "ES",
@@ -102,6 +103,16 @@ def _record_request(symbol: str, duration: str, end_dt: datetime) -> None:
     _LAST_IDENTICAL[key] = now
 
 
+def _req_cd_with_retry(ib_ingestor: IBKRIngestor, contract: Future, tries: int = 4):
+    for attempt in range(tries):
+        try:
+            return ib_ingestor.ib.reqContractDetails(contract)
+        except Exception as exc:
+            if attempt == tries - 1:
+                raise
+            time.sleep(1.5 * (attempt + 1))
+
+
 def _classify_error(exc: Exception) -> str:
     text = str(exc).lower()
     if "error 166" in text:
@@ -114,6 +125,10 @@ def _classify_error(exc: Exception) -> str:
 def _resolve_front_month_contract(ib_ingestor: IBKRIngestor, symbol: str, asof: datetime):
     """Resolve the front-month futures contract for a symbol as of *asof*."""
 
+    cache_key = (symbol, asof.replace(minute=0, second=0, microsecond=0))
+    if cache_key in _CONTRACT_CACHE:
+        return _CONTRACT_CACHE[cache_key]
+
     root = ALIAS_TO_ROOT.get(symbol, symbol)
     exch = ROOT_TO_EXCH.get(root)
     if exch is None:
@@ -125,8 +140,9 @@ def _resolve_front_month_contract(ib_ingestor: IBKRIngestor, symbol: str, asof: 
         exchange=exch,
         tradingClass=root,
     )
-    details = ib_ingestor.ib.reqContractDetails(future_contract)
+    details = _req_cd_with_retry(ib_ingestor, future_contract)
     if not details:
+        _CONTRACT_CACHE[cache_key] = None
         return None
 
     yyyymmdd = asof.strftime("%Y%m%d")
@@ -137,6 +153,7 @@ def _resolve_front_month_contract(ib_ingestor: IBKRIngestor, symbol: str, asof: 
 
     candidates = [cd for cd in details if (cd.contract.lastTradeDateOrContractMonth or "00000000") >= yyyymmdd]
     picked = sorted(candidates, key=_expiry_key)[0] if candidates else sorted(details, key=_expiry_key)[-1]
+    _CONTRACT_CACHE[cache_key] = picked.contract
     return picked.contract
 
 
@@ -324,6 +341,12 @@ def main() -> None:
         port=int(os.getenv("IBKR_PORT", "4002")),
         clientId=int(os.getenv("IBKR_CLIENT_ID", "9003")),
     )
+
+    try:
+        ib_request_timeout = int(os.getenv("IBKR_REQUEST_TIMEOUT", "120"))
+    except ValueError:
+        ib_request_timeout = 120
+    ib.ib.RequestTimeout = ib_request_timeout
 
     for symbol in IBKR_SYMBOLS:
         _backfill_symbol(ib, symbol)
