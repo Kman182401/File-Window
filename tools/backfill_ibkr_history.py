@@ -31,6 +31,10 @@ DATA_DIR = os.path.expanduser(os.getenv("DATA_DIR", "~/.local/share/m5_trader/da
 WINDOW_DAYS = int(os.getenv("BACKFILL_WINDOW_DAYS", "10"))
 LOOKBACK_DAYS = int(os.getenv("LOOKBACK_DAYS", "730"))
 BACKFILL_MODE = os.getenv("BACKFILL_MODE", os.getenv("BACKFILL_ORDER", "forward_first")).lower()
+# Max number of whole days to include per request slice (bars-first guard still applies)
+MAX_DAYS_PER_REQ = int(os.getenv("BACKFILL_MAX_DAYS_PER_REQ", "3"))
+# Optional boundary padding in days applied at the backward target (floored to UTC midnight first)
+BOUNDARY_PAD_DAYS = int(os.getenv("BACKFILL_BOUNDARY_PAD_DAYS", "0"))
 SLEEP_BETWEEN_REQ = float(os.getenv("BACKFILL_SLEEP_SECS", "0.6"))
 MAX_BARS_PER_REQUEST = int(os.getenv("BACKFILL_MAX_BARS", "5000"))
 
@@ -324,7 +328,11 @@ def _earliest_timestamp(symbol: str) -> Optional[pd.Timestamp]:
 
 def _backfill_symbol(ib: IBKRIngestor, symbol: str) -> None:
     now_utc = datetime.now(timezone.utc)
-    start_utc = now_utc - timedelta(days=LOOKBACK_DAYS)
+    # Compute a midnight-aligned boundary target with optional pad for backward phase
+    base = now_utc - timedelta(days=LOOKBACK_DAYS)
+    boundary_midnight = base.replace(hour=0, minute=0, second=0, microsecond=0)
+    boundary_with_pad = boundary_midnight - timedelta(days=BOUNDARY_PAD_DAYS)
+    start_utc = base  # forward phase still resumes from latest below; backward uses boundary_with_pad
 
     latest = _latest_timestamp(symbol)
     if latest is not None:
@@ -357,11 +365,12 @@ def _backfill_symbol(ib: IBKRIngestor, symbol: str) -> None:
                             if cur >= nxt:
                                 continue
 
+            # Bars-first guard, then days cap
             minutes = max(1, int((nxt - cur).total_seconds() / 60))
             if minutes > MAX_BARS_PER_REQUEST:
                 nxt = cur + timedelta(minutes=MAX_BARS_PER_REQUEST)
-            if nxt - cur > timedelta(days=1):
-                nxt = cur + timedelta(days=1)
+            elif nxt - cur > timedelta(days=MAX_DAYS_PER_REQ):
+                nxt = cur + timedelta(days=MAX_DAYS_PER_REQ)
             if nxt > now_utc:
                 nxt = now_utc
 
@@ -436,11 +445,16 @@ def _backfill_symbol(ib: IBKRIngestor, symbol: str) -> None:
         contract_override = None
         while end_point - target_start > timedelta(minutes=1):
             nxt_end = end_point
-            start = max(target_start, nxt_end - timedelta(days=1))
+            # Start with a generous window, then clamp by bars then by days
+            start = max(target_start, nxt_end - timedelta(days=MAX_DAYS_PER_REQ))
             minutes = max(1, int((nxt_end - start).total_seconds() / 60))
             if minutes > MAX_BARS_PER_REQUEST:
                 start = nxt_end - timedelta(minutes=MAX_BARS_PER_REQUEST)
-            duration_minutes = max(1, int((nxt_end - start).total_seconds() / 60))
+                minutes = max(1, int((nxt_end - start).total_seconds() / 60))
+            elif nxt_end - start > timedelta(days=MAX_DAYS_PER_REQ):
+                start = nxt_end - timedelta(days=MAX_DAYS_PER_REQ)
+                minutes = max(1, int((nxt_end - start).total_seconds() / 60))
+            duration_minutes = minutes
             duration_days = max(1, (nxt_end - start).days or (duration_minutes + 1439) // 1440)
             duration = f"{duration_days} D"
 
@@ -549,7 +563,7 @@ def _backfill_symbol(ib: IBKRIngestor, symbol: str) -> None:
         if earliest is None:
             earliest = _earliest_timestamp(symbol)
         if earliest is not None:
-            backward_fill(start_utc)
+            backward_fill(boundary_with_pad)
         forward_fill(max(_latest_timestamp(symbol) or start_utc, start_utc))
     else:
         # Forward to now, then backward fill leftovers
