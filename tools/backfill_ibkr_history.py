@@ -7,6 +7,7 @@ stay centralized. The script is idempotent; it resumes from the
 latest persisted timestamp if data already exists.
 """
 
+import calendar
 import os
 import sys
 import time
@@ -14,6 +15,8 @@ from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Deque, Dict, List, Optional, Tuple
+
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -209,7 +212,48 @@ def _resolve_front_month_contract(ib_ingestor: IBKRIngestor, symbol: str, asof: 
     return selected
 
 
-def _parse_last_trade(contract) -> Optional[datetime]:
+def _last_close_from_hours(hours: str, tz_name: str, month_prefix: str) -> Optional[datetime]:
+    """Parse trading/liquid hours to find the last close within the contract month."""
+
+    if not hours:
+        return None
+
+    try:
+        tz = ZoneInfo(tz_name)
+    except Exception:
+        tz = timezone.utc
+
+    latest_close = None
+    segments = [seg.strip() for seg in hours.split(";") if seg.strip()]
+    for seg in segments:
+        if seg.endswith("CLOSED"):
+            continue
+        parts = seg.split(":", 1)
+        if len(parts) != 2:
+            continue
+        date_part, window = parts
+        if not date_part.startswith(month_prefix):
+            continue
+        try:
+            start_str, end_str = window.split("-")
+        except ValueError:
+            continue
+        if start_str.upper() == "CLOSED" or end_str.upper() == "CLOSED":
+            continue
+        try:
+            start_dt = datetime.strptime(f"{date_part}{start_str}", "%Y%m%d%H%M").replace(tzinfo=tz)
+            end_dt = datetime.strptime(f"{date_part}{end_str}", "%Y%m%d%H%M").replace(tzinfo=tz)
+        except ValueError:
+            continue
+        if end_dt <= start_dt:
+            end_dt += timedelta(days=1)
+        end_utc = end_dt.astimezone(timezone.utc)
+        if latest_close is None or end_utc > latest_close:
+            latest_close = end_utc
+    return latest_close
+
+
+def _parse_last_trade(contract, ib_ingestor: Optional[IBKRIngestor] = None) -> Optional[datetime]:
     lt = getattr(contract, "lastTradeDateOrContractMonth", None)
     if not lt:
         return None
@@ -217,15 +261,46 @@ def _parse_last_trade(contract) -> Optional[datetime]:
     try:
         if len(lt) == 8:
             return datetime.strptime(lt, "%Y%m%d").replace(tzinfo=timezone.utc)
-        if len(lt) == 6:
-            return datetime.strptime(lt + "01", "%Y%m%d").replace(tzinfo=timezone.utc)
     except ValueError:
         return None
+
+    if len(lt) == 6 and ib_ingestor is not None:
+        try:
+            details = _req_cd_with_retry(ib_ingestor, contract)
+        except Exception:
+            details = None
+        if details:
+            target_id = getattr(contract, "conId", None)
+            for cd in details:
+                if getattr(cd.contract, "conId", None) != target_id:
+                    continue
+                lt2 = (getattr(cd.contract, "lastTradeDateOrContractMonth", "") or "").strip()
+                if lt2:
+                    try:
+                        if len(lt2) == 8:
+                            return datetime.strptime(lt2, "%Y%m%d").replace(tzinfo=timezone.utc)
+                    except ValueError:
+                        pass
+                tz_name = getattr(cd, "timeZoneId", "UTC") or "UTC"
+                last_close = _last_close_from_hours(getattr(cd, "tradingHours", ""), tz_name, lt)
+                if last_close is None:
+                    last_close = _last_close_from_hours(getattr(cd, "liquidHours", ""), tz_name, lt)
+                if last_close is not None:
+                    return last_close
+
+    if len(lt) == 6:
+        try:
+            year = int(lt[:4])
+            month = int(lt[4:6])
+            last_day = calendar.monthrange(year, month)[1]
+            return datetime(year, month, last_day, 23, 59, 59, tzinfo=timezone.utc)
+        except ValueError:
+            return None
     return None
 
 
 def _maybe_roll_contract(ib_ingestor: IBKRIngestor, symbol: str, contract, asof: datetime):
-    last_trade = _parse_last_trade(contract)
+    last_trade = _parse_last_trade(contract, ib_ingestor)
     if not last_trade:
         return contract
     if asof.replace(tzinfo=timezone.utc) >= last_trade - timedelta(days=ROLLOVER_BUFFER_DAYS):
@@ -368,7 +443,7 @@ def _backfill_symbol(ib: IBKRIngestor, symbol: str) -> None:
             # Compute effective end using bars-first clamp, then days cap, and clamp to contract life
             end_use = min(nxt, now_utc)
             if contract is not None:
-                lt = _parse_last_trade(contract)
+                lt = _parse_last_trade(contract, ib)
                 if lt is not None and end_use > lt:
                     end_use = lt
             if end_use <= cur:
@@ -503,7 +578,7 @@ def _backfill_symbol(ib: IBKRIngestor, symbol: str) -> None:
             # Clamp the request end to the contract's lastTradeDate to ensure overlap
             end_use = nxt_end
             if contract is not None:
-                lt = _parse_last_trade(contract)
+                lt = _parse_last_trade(contract, ib)
                 if lt is not None and end_use > lt:
                     end_use = lt
 
