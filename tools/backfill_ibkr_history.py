@@ -371,19 +371,22 @@ def _backfill_symbol(ib: IBKRIngestor, symbol: str) -> None:
                 if contract is not None:
                     contract = _maybe_roll_contract(ib, symbol, contract, nxt_end)
                     earliest_available = _probe_head_timestamp(ib, contract)
-                    if earliest_available is not None and earliest_available.to_pydatetime() > start:
+                    if earliest_available is not None:
                         ea_dt = earliest_available.to_pydatetime()
-                        if nxt_end - ea_dt <= timedelta(minutes=1):
-                            candidate_end = ea_dt - timedelta(minutes=1)
-                            if candidate_end <= target_start:
-                                print(
-                                    f"  [STOP] {symbol} reached contract head-ts floor at {ea_dt}; ending backward fill."
-                                )
-                                break
-                            end_point = candidate_end
-                            prev_end_point = nxt_end
-                            continue
-                        start = max(start, ea_dt)
+                        if ea_dt > start:
+                            if nxt_end - ea_dt <= timedelta(minutes=1):
+                                candidate_end = ea_dt - timedelta(days=1, minutes=1)
+                                if candidate_end <= target_start:
+                                    print(
+                                        f"  [STOP] {symbol} reached HMDS floor at {ea_dt}; ending backward fill."
+                                    )
+                                    break
+                                if prev_end_point is not None and candidate_end >= nxt_end - timedelta(minutes=1):
+                                    candidate_end = nxt_end - timedelta(days=1)
+                                end_point = candidate_end
+                                prev_end_point = nxt_end
+                                continue
+                            start = max(start, ea_dt)
 
             if prev_end_point is not None and start >= prev_end_point - timedelta(minutes=1):
                 print(
