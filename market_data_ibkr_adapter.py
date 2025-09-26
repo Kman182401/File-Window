@@ -159,26 +159,35 @@ class IBKRIngestor:
             self.external_ib = True
             print(f"[IBKRIngestor] Using external IB connection (connected={self.connected})")
         else:
+            # Prefer single-socket only for the primary pipeline clientId (default 9002),
+            # and only when explicitly allowed by env. Backfill/monitor runs (9003/9001)
+            # connect directly to avoid SingleConnectionError with the pipeline.
             try:
                 from ib_single_socket import init_ib, SingleConnectionError
-            except ImportError:
-                self.ib = IB()
-                self.connected = False
-                self.external_ib = False
-            else:
+                single_id = int(os.getenv("IBKR_SINGLE_CLIENT_ID", "9002"))
+                allow_single = os.getenv("IBKR_USE_SINGLE_SOCKET", "1").lower() in ("1","true","yes")
+                use_single = allow_single and int(self.clientId) == single_id
+            except Exception:
+                use_single = False
+
+            if use_single:
                 try:
                     shared_ib = init_ib(host=self.host, port=self.port, client_id=self.clientId)
                 except SingleConnectionError:
                     # Bubble up so callers understand another process owns the session
                     raise
-                except Exception as exc:
-                    # Connection-level failures should surface; avoid spawning duplicate sessions
+                except Exception:
                     raise
                 else:
                     self.ib = shared_ib
                     self.connected = shared_ib.isConnected()
                     self.external_ib = True
                     print(f"[IBKRIngestor] Reusing shared IB connection (clientId={self.ib.client.clientId})")
+            else:
+                # Direct connection for parallel clients (e.g., 9003 backfill)
+                self.ib = IB()
+                self.connected = False
+                self.external_ib = False
         self.auto_reconnect = True
         self.reconnect_attempts = 0
         self.max_reconnect_attempts = config_get("ibkr.retry_attempts", 10)

@@ -111,6 +111,12 @@ def _record_request(symbol: str, duration: str, end_dt: datetime) -> None:
 def _req_cd_with_retry(ib_ingestor: IBKRIngestor, contract: Future, tries: int = 4):
     for attempt in range(tries):
         try:
+            # Ensure connection is alive before making contract calls
+            try:
+                ib_ingestor.ensure_connected()
+            except Exception:
+                time.sleep(1.5 * (attempt + 1))
+                continue
             return ib_ingestor.ib.reqContractDetails(contract)
         except Exception as exc:
             if attempt == tries - 1:
@@ -262,6 +268,10 @@ def _probe_head_timestamp(ib_ingestor: IBKRIngestor, contract) -> Optional[pd.Ti
     """Return earliest available timestamp for the contract via reqHeadTimeStamp."""
 
     try:
+        try:
+            ib_ingestor.ensure_connected()
+        except Exception:
+            return None
         head = ib_ingestor.ib.reqHeadTimeStamp(contract, whatToShow="TRADES", useRTH=False, formatDate=1)
     except Exception:
         return None
