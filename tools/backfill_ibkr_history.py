@@ -464,37 +464,31 @@ def _backfill_symbol(ib: IBKRIngestor, symbol: str) -> None:
         contract_override = None
         while end_point - target_start > timedelta(minutes=1):
             nxt_end = end_point
-            # Start with a generous window, then clamp by bars then by days
+            # Start with a generous window, initial start bound by days cap
             start = max(target_start, nxt_end - timedelta(days=MAX_DAYS_PER_REQ))
-            minutes = max(1, int((nxt_end - start).total_seconds() / 60))
-            if minutes > MAX_BARS_PER_REQUEST:
-                start = nxt_end - timedelta(minutes=MAX_BARS_PER_REQUEST)
-                minutes = max(1, int((nxt_end - start).total_seconds() / 60))
-            elif nxt_end - start > timedelta(days=MAX_DAYS_PER_REQ):
-                start = nxt_end - timedelta(days=MAX_DAYS_PER_REQ)
-                minutes = max(1, int((nxt_end - start).total_seconds() / 60))
-            duration_minutes = minutes
-            duration_days = max(1, (nxt_end - start).days or (duration_minutes + 1439) // 1440)
-            duration = f"{duration_days} D"
 
+            # Resolve contract for this end point (as-of) and apply roll policy
             contract = contract_override
             if contract is None:
                 contract = _resolve_front_month_contract(ib, symbol, nxt_end)
                 if contract is not None:
                     contract = _maybe_roll_contract(ib, symbol, contract, nxt_end)
 
+            # Probe HMDS earliest timestamp for this contract and adjust
             earliest_available = None
             if os.getenv("USE_HEAD_TS", "1") == "1" and contract is not None:
                 earliest_available = _probe_head_timestamp(ib, contract)
                 if earliest_available is not None:
                     ea_dt = earliest_available.to_pydatetime()
                     if ea_dt > start:
+                        # If the window would be empty for this contract, step to previous contract
                         if nxt_end - ea_dt <= timedelta(minutes=1):
                             previous = _previous_contract(ib, symbol, contract)
                             if previous is not None:
                                 contract_override = previous
                                 prev_end_point = nxt_end
                                 continue
+                            # Otherwise jump back a day so the resolver picks prior month
                             candidate_end = ea_dt - timedelta(days=1, minutes=1)
                             if candidate_end <= target_start:
                                 print(f"  [STOP] {symbol} reached HMDS floor at {ea_dt}; ending backward fill.")
@@ -506,17 +500,36 @@ def _backfill_symbol(ib: IBKRIngestor, symbol: str) -> None:
                             continue
                         start = max(start, ea_dt)
 
+            # Clamp the request end to the contract's lastTradeDate to ensure overlap
+            end_use = nxt_end
+            if contract is not None:
+                lt = _parse_last_trade(contract)
+                if lt is not None and end_use > lt:
+                    end_use = lt
+
+            # Bars-first clamp, then days cap, using end_use
+            minutes_total = max(1, int((end_use - start).total_seconds() / 60))
+            if minutes_total > MAX_BARS_PER_REQUEST:
+                start = end_use - timedelta(minutes=MAX_BARS_PER_REQUEST)
+                minutes_total = MAX_BARS_PER_REQUEST
+            elif end_use - start > timedelta(days=MAX_DAYS_PER_REQ):
+                start = end_use - timedelta(days=MAX_DAYS_PER_REQ)
+                minutes_total = max(1, int((end_use - start).total_seconds() / 60))
+
+            duration_days = max(1, (end_use - start).days or (minutes_total + 1439) // 1440)
+            duration = f"{duration_days} D"
+
             if prev_end_point is not None and start >= prev_end_point - timedelta(minutes=1):
                 print(f"  [STOP] {symbol} backward fill detected no progress (start {start}); ending backward fill.")
                 break
 
             if contract is None:
-                print(f"  [WARN] {symbol} backward {start} -> {nxt_end}: unable to resolve contract")
+                print(f"  [WARN] {symbol} backward {start} -> {end_use}: unable to resolve contract")
                 break
 
             try:
-                _enforce_pacing(symbol, duration, nxt_end)
-                end_utc_str = nxt_end.strftime("%Y%m%d-%H:%M:%S")
+                _enforce_pacing(symbol, duration, end_use)
+                end_utc_str = end_use.strftime("%Y%m%d-%H:%M:%S")
                 df = ib.fetch_data(
                     symbol,
                     duration=duration,
@@ -525,23 +538,23 @@ def _backfill_symbol(ib: IBKRIngestor, symbol: str) -> None:
                     useRTH=False,
                     formatDate=1,
                     endDateTime=end_utc_str,
-                    asof=nxt_end,
+                    asof=end_use,
                     contract_override=contract,
                 )
-                _record_request(symbol, duration, nxt_end)
+                _record_request(symbol, duration, end_use)
                 if df is not None and not df.empty:
                     out_path = persist_bars(symbol, df)
-                    print(f"  [OK] {symbol} backward {start} -> {nxt_end} wrote={out_path}")
+                    print(f"  [OK] {symbol} backward {start} -> {end_use} wrote={out_path}")
                 else:
-                    print(f"  [OK] {symbol} backward {start} -> {nxt_end} (no rows)")
+                    print(f"  [OK] {symbol} backward {start} -> {end_use} (no rows)")
             except Exception as exc:
                 kind = _classify_error(exc)
                 if kind == "retention":
-                    print(f"  [STOP] {symbol} backward {start} -> {nxt_end}: IBKR retention limit reached ({exc}); stopping backward fill.")
+                    print(f"  [STOP] {symbol} backward {start} -> {end_use}: IBKR retention limit reached ({exc}); stopping backward fill.")
                     break
                 if kind == "secdef":
                     try:
-                        alt_asof = nxt_end - timedelta(days=1)
+                        alt_asof = end_use - timedelta(days=1)
                         df = ib.fetch_data(
                             symbol,
                             duration=duration,
@@ -552,10 +565,10 @@ def _backfill_symbol(ib: IBKRIngestor, symbol: str) -> None:
                             endDateTime=end_utc_str,
                             asof=alt_asof,
                         )
-                        _record_request(symbol, duration, nxt_end)
+                        _record_request(symbol, duration, end_use)
                         if df is not None and not df.empty:
                             out_path = persist_bars(symbol, df)
-                            print(f"  [OK] {symbol} backward {start} -> {nxt_end} (retry after error 200; asof={alt_asof:%Y-%m-%d}) wrote={out_path}")
+                            print(f"  [OK] {symbol} backward {start} -> {end_use} (retry after error 200; asof={alt_asof:%Y-%m-%d}) wrote={out_path}")
                             prev_end_point = end_point
                             end_point = start
                             contract_override = contract
@@ -568,9 +581,9 @@ def _backfill_symbol(ib: IBKRIngestor, symbol: str) -> None:
                     if previous is not None:
                         contract_override = previous
                         print(f"  [INFO] {symbol} switching to prior contract conId={previous.conId} after {kind}")
-                        prev_end_point = nxt_end
+                        prev_end_point = end_use
                         continue
-                print(f"  [WARN] {symbol} backward {start} -> {nxt_end}: {exc}")
+                print(f"  [WARN] {symbol} backward {start} -> {end_use}: {exc}")
             prev_end_point = end_point
             end_point = start
             contract_override = contract
@@ -589,134 +602,7 @@ def _backfill_symbol(ib: IBKRIngestor, symbol: str) -> None:
         forward_fill(start_utc)
         backward_fill(start_utc)
 
-    target_start = now_utc - timedelta(days=LOOKBACK_DAYS)
-    if earliest is None:
-        earliest = _earliest_timestamp(symbol)
-
-    if earliest is not None and earliest - target_start > timedelta(minutes=1):
-        print(f"[{symbol}] backward fill target={target_start.isoformat()} current_earliest={earliest.isoformat()}")
-        end_point = earliest
-        prev_end_point = None
-        contract_override = None
-        while end_point - target_start > timedelta(minutes=1):
-            nxt_end = end_point
-            start = max(target_start, nxt_end - timedelta(days=1))
-            minutes = max(1, int((nxt_end - start).total_seconds() / 60))
-            if minutes > MAX_BARS_PER_REQUEST:
-                start = nxt_end - timedelta(minutes=MAX_BARS_PER_REQUEST)
-            duration_minutes = max(1, int((nxt_end - start).total_seconds() / 60))
-            duration_days = max(1, (nxt_end - start).days or (duration_minutes + 1439) // 1440)
-            duration = f"{duration_days} D"
-
-            contract = contract_override
-            if contract is None:
-                contract = _resolve_front_month_contract(ib, symbol, nxt_end)
-                if contract is not None:
-                    contract = _maybe_roll_contract(ib, symbol, contract, nxt_end)
-
-            earliest_available = None
-            if os.getenv("USE_HEAD_TS", "1") == "1" and contract is not None:
-                earliest_available = _probe_head_timestamp(ib, contract)
-                if earliest_available is not None:
-                    ea_dt = earliest_available.to_pydatetime()
-                    if ea_dt > start:
-                        if nxt_end - ea_dt <= timedelta(minutes=1):
-                            previous = _previous_contract(ib, symbol, contract)
-                            if previous is not None:
-                                contract_override = previous
-                                prev_end_point = nxt_end
-                                continue
-                            candidate_end = ea_dt - timedelta(days=1, minutes=1)
-                            if candidate_end <= target_start:
-                                print(
-                                    f"  [STOP] {symbol} reached HMDS floor at {ea_dt}; ending backward fill."
-                                )
-                                break
-                            if prev_end_point is not None and candidate_end >= nxt_end - timedelta(minutes=1):
-                                candidate_end = nxt_end - timedelta(days=1)
-                            end_point = candidate_end
-                            prev_end_point = nxt_end
-                            continue
-                        start = max(start, ea_dt)
-
-            if prev_end_point is not None and start >= prev_end_point - timedelta(minutes=1):
-                print(
-                    f"  [STOP] {symbol} backward fill detected no progress (start {start}); ending backward fill."
-                )
-                break
-
-            if contract is None:
-                print(f"  [WARN] {symbol} backward {start} -> {nxt_end}: unable to resolve contract")
-                break
-
-            try:
-                _enforce_pacing(symbol, duration, nxt_end)
-                end_utc_str = nxt_end.strftime("%Y%m%d-%H:%M:%S")
-                df = ib.fetch_data(
-                    symbol,
-                    duration=duration,
-                    barSize="1 min",
-                    whatToShow="TRADES",
-                    useRTH=False,
-                    formatDate=1,
-                    endDateTime=end_utc_str,
-                    asof=nxt_end,
-                    contract_override=contract,
-                )
-                _record_request(symbol, duration, nxt_end)
-                if df is not None and not df.empty:
-                    out_path = persist_bars(symbol, df)
-                    print(f"  [OK] {symbol} backward {start} -> {nxt_end} wrote={out_path}")
-                else:
-                    print(f"  [OK] {symbol} backward {start} -> {nxt_end} (no rows)")
-            except Exception as exc:
-                kind = _classify_error(exc)
-                if kind == "retention":
-                    print(
-                        f"  [STOP] {symbol} backward {start} -> {nxt_end}: IBKR retention limit reached ({exc}); stopping backward fill."
-                    )
-                    break
-                if kind == "secdef":
-                    # Re-resolve with a slightly earlier as-of to avoid ambiguous/underspecified contracts
-                    try:
-                        alt_asof = nxt_end - timedelta(days=1)
-                        df = ib.fetch_data(
-                            symbol,
-                            duration=duration,
-                            barSize="1 min",
-                            whatToShow="TRADES",
-                            useRTH=False,
-                            formatDate=1,
-                            endDateTime=end_utc_str,
-                            asof=alt_asof,
-                        )
-                        _record_request(symbol, duration, nxt_end)
-                        if df is not None and not df.empty:
-                            out_path = persist_bars(symbol, df)
-                            print(
-                                f"  [OK] {symbol} backward {start} -> {nxt_end} (retry after error 200; asof={alt_asof:%Y-%m-%d}) wrote={out_path}"
-                            )
-                            prev_end_point = end_point
-                            end_point = start
-                            contract_override = contract
-                            time.sleep(SLEEP_BETWEEN_REQ)
-                            continue
-                    except Exception as exc2:
-                        print(f"  [WARN] {symbol} backward secdef-retry failed: {exc2}")
-                if kind in {"nodata", "secdef"}:
-                    previous = _previous_contract(ib, symbol, contract)
-                    if previous is not None:
-                        contract_override = previous
-                        print(
-                            f"  [INFO] {symbol} switching to prior contract conId={previous.conId} after {kind}"
-                        )
-                        prev_end_point = nxt_end
-                        continue
-                print(f"  [WARN] {symbol} backward {start} -> {nxt_end}: {exc}")
-            prev_end_point = end_point
-            end_point = start
-            contract_override = contract
-            time.sleep(SLEEP_BETWEEN_REQ)
+    # (removed legacy duplicate backward loop)
 
 
 def main() -> None:
