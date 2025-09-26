@@ -54,6 +54,12 @@ ROOT_TO_EXCH = {
     "GC": "COMEX",
 }
 
+ROOT_TO_SYMBOL_OVERRIDE = {
+    "6E": "EUR",
+    "6B": "GBP",
+    "6A": "AUD",
+}
+
 
 def _enforce_pacing(symbol: str, duration: str, end_dt: datetime) -> None:
     """Block until IB's historical pacing thresholds are satisfied."""
@@ -96,6 +102,15 @@ def _record_request(symbol: str, duration: str, end_dt: datetime) -> None:
     _LAST_IDENTICAL[key] = now
 
 
+def _classify_error(exc: Exception) -> str:
+    text = str(exc).lower()
+    if "error 166" in text:
+        return "retention"
+    if "error 162" in text or "error 165" in text or "no data returned" in text:
+        return "nodata"
+    return "other"
+
+
 def _resolve_front_month_contract(ib_ingestor: IBKRIngestor, symbol: str, asof: datetime):
     """Resolve the front-month futures contract for a symbol as of *asof*."""
 
@@ -104,7 +119,13 @@ def _resolve_front_month_contract(ib_ingestor: IBKRIngestor, symbol: str, asof: 
     if exch is None:
         return None
 
-    details = ib_ingestor.ib.reqContractDetails(Future(symbol=root, exchange=exch))
+    symbol_override = ROOT_TO_SYMBOL_OVERRIDE.get(root, root)
+    future_contract = Future(
+        symbol=symbol_override,
+        exchange=exch,
+        tradingClass=root,
+    )
+    details = ib_ingestor.ib.reqContractDetails(future_contract)
     if not details:
         return None
 
@@ -152,6 +173,27 @@ def _latest_timestamp(symbol: str) -> Optional[pd.Timestamp]:
     return None
 
 
+def _earliest_timestamp(symbol: str) -> Optional[pd.Timestamp]:
+    base = os.path.join(DATA_DIR, f"symbol={symbol}")
+    if not os.path.isdir(base):
+        return None
+    for date_dir in sorted((d for d in os.listdir(base) if d.startswith("date="))):
+        parquet_path = os.path.join(base, date_dir, "bars.parquet")
+        if not os.path.exists(parquet_path):
+            continue
+        try:
+            df = pd.read_parquet(parquet_path, columns=["timestamp"])
+        except Exception:
+            continue
+        if df.empty:
+            continue
+        ts = pd.to_datetime(df["timestamp"], utc=True, errors="coerce").dropna()
+        if ts.empty:
+            continue
+        return ts.min()
+    return None
+
+
 def _backfill_symbol(ib: IBKRIngestor, symbol: str) -> None:
     now_utc = datetime.now(timezone.utc)
     start_utc = now_utc - timedelta(days=LOOKBACK_DAYS)
@@ -160,6 +202,7 @@ def _backfill_symbol(ib: IBKRIngestor, symbol: str) -> None:
     if latest is not None:
         start_utc = max(start_utc, (latest + pd.Timedelta(minutes=1)).to_pydatetime())
 
+    earliest = _earliest_timestamp(symbol)
     provider_limit = now_utc - timedelta(days=730)
     if start_utc < provider_limit:
         print(
@@ -197,6 +240,7 @@ def _backfill_symbol(ib: IBKRIngestor, symbol: str) -> None:
         duration = f"{duration_days} D"
         try:
             _enforce_pacing(symbol, duration, nxt)
+            end_utc_str = nxt.strftime("%Y%m%d-%H:%M:%S")
             ib.fetch_data(
                 symbol,
                 duration=duration,
@@ -204,15 +248,74 @@ def _backfill_symbol(ib: IBKRIngestor, symbol: str) -> None:
                 whatToShow="TRADES",
                 useRTH=False,
                 formatDate=1,
-                endDateTime=nxt.strftime("%Y%m%d %H:%M:%S"),
+                endDateTime=end_utc_str,
                 asof=nxt,
             )
             _record_request(symbol, duration, nxt)
             print(f"  [OK] {symbol} {cur} -> {nxt}")
         except Exception as exc:
+            kind = _classify_error(exc)
+            if kind == "retention":
+                print(
+                    f"  [STOP] {symbol} {cur} -> {nxt}: IBKR retention limit reached ({exc}); stopping forward fill."
+                )
+                break
             print(f"  [WARN] {symbol} {cur} -> {nxt}: {exc}")
         cur = nxt
         time.sleep(SLEEP_BETWEEN_REQ)
+
+    target_start = now_utc - timedelta(days=LOOKBACK_DAYS)
+    if earliest is None:
+        earliest = _earliest_timestamp(symbol)
+
+    if earliest is not None and earliest - target_start > timedelta(minutes=1):
+        print(f"[{symbol}] backward fill target={target_start.isoformat()} current_earliest={earliest.isoformat()}")
+        end_point = earliest
+        while end_point - target_start > timedelta(minutes=1):
+            nxt_end = end_point
+            start = max(target_start, nxt_end - timedelta(days=1))
+            minutes = max(1, int((nxt_end - start).total_seconds() / 60))
+            if minutes > MAX_BARS_PER_REQUEST:
+                start = nxt_end - timedelta(minutes=MAX_BARS_PER_REQUEST)
+            duration_minutes = max(1, int((nxt_end - start).total_seconds() / 60))
+            duration_days = max(1, (nxt_end - start).days or (duration_minutes + 1439) // 1440)
+            duration = f"{duration_days} D"
+
+            if os.getenv("USE_HEAD_TS", "1") == "1":
+                contract = _resolve_front_month_contract(ib, symbol, nxt_end)
+                if contract is not None:
+                    earliest_available = _probe_head_timestamp(ib, contract)
+                    if earliest_available is not None and earliest_available.to_pydatetime() > start:
+                        start = earliest_available.to_pydatetime()
+                        if nxt_end - start <= timedelta(minutes=1):
+                            end_point = start
+                            continue
+
+            try:
+                _enforce_pacing(symbol, duration, nxt_end)
+                end_utc_str = nxt_end.strftime("%Y%m%d-%H:%M:%S")
+                ib.fetch_data(
+                    symbol,
+                    duration=duration,
+                    barSize="1 min",
+                    whatToShow="TRADES",
+                    useRTH=False,
+                    formatDate=1,
+                    endDateTime=end_utc_str,
+                    asof=nxt_end,
+                )
+                _record_request(symbol, duration, nxt_end)
+                print(f"  [OK] {symbol} backward {start} -> {nxt_end}")
+            except Exception as exc:
+                kind = _classify_error(exc)
+                if kind == "retention":
+                    print(
+                        f"  [STOP] {symbol} backward {start} -> {nxt_end}: IBKR retention limit reached ({exc}); stopping backward fill."
+                    )
+                    break
+                print(f"  [WARN] {symbol} backward {start} -> {nxt_end}: {exc}")
+            end_point = start
+            time.sleep(SLEEP_BETWEEN_REQ)
 
 
 def main() -> None:
