@@ -61,6 +61,8 @@ ROOT_TO_SYMBOL_OVERRIDE = {
     "6A": "AUD",
 }
 
+ROLLOVER_BUFFER_DAYS = int(os.getenv("IBKR_ROLLOVER_BUFFER_DAYS", "2"))
+
 
 def _enforce_pacing(symbol: str, duration: str, end_dt: datetime) -> None:
     """Block until IB's historical pacing thresholds are satisfied."""
@@ -155,6 +157,33 @@ def _resolve_front_month_contract(ib_ingestor: IBKRIngestor, symbol: str, asof: 
     picked = sorted(candidates, key=_expiry_key)[0] if candidates else sorted(details, key=_expiry_key)[-1]
     _CONTRACT_CACHE[cache_key] = picked.contract
     return picked.contract
+
+
+def _parse_last_trade(contract) -> Optional[datetime]:
+    lt = getattr(contract, "lastTradeDateOrContractMonth", None)
+    if not lt:
+        return None
+    lt = lt.strip()
+    try:
+        if len(lt) == 8:
+            return datetime.strptime(lt, "%Y%m%d").replace(tzinfo=timezone.utc)
+        if len(lt) == 6:
+            return datetime.strptime(lt + "01", "%Y%m%d").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    return None
+
+
+def _maybe_roll_contract(ib_ingestor: IBKRIngestor, symbol: str, contract, asof: datetime):
+    last_trade = _parse_last_trade(contract)
+    if not last_trade:
+        return contract
+    if asof.replace(tzinfo=timezone.utc) >= last_trade - timedelta(days=ROLLOVER_BUFFER_DAYS):
+        alt_asof = asof - timedelta(days=30)
+        alt_contract = _resolve_front_month_contract(ib_ingestor, symbol, alt_asof)
+        if alt_contract and alt_contract.conId != getattr(contract, "conId", None):
+            return alt_contract
+    return contract
 
 
 def _probe_head_timestamp(ib_ingestor: IBKRIngestor, contract) -> Optional[pd.Timestamp]:
