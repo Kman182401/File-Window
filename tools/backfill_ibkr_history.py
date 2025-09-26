@@ -36,6 +36,7 @@ _REQUEST_HISTORY: Deque[float] = deque()
 _SYMBOL_HISTORY: Dict[str, Deque[float]] = {}
 _LAST_IDENTICAL: Dict[Tuple[str, str, str], float] = {}
 _CONTRACT_CACHE: Dict[Tuple[str, datetime], Optional[Future]] = {}
+_CONTRACT_CHAINS: Dict[str, List[Future]] = {}
 
 ALIAS_TO_ROOT = {
     "ES1!": "ES",
@@ -124,6 +125,37 @@ def _classify_error(exc: Exception) -> str:
     return "other"
 
 
+def _expiry_int(contract) -> int:
+    exp = getattr(contract, "lastTradeDateOrContractMonth", "") or ""
+    if len(exp) == 6:
+        exp = exp + "01"
+    try:
+        return int(exp)
+    except ValueError:
+        return 99991231
+
+
+def _load_contract_chain(ib_ingestor: IBKRIngestor, root: str, exch: str) -> List[Future]:
+    chain = _CONTRACT_CHAINS.get(root)
+    if chain is not None:
+        return chain
+
+    symbol_override = ROOT_TO_SYMBOL_OVERRIDE.get(root, root)
+    base_contract = Future(
+        symbol=symbol_override,
+        exchange=exch,
+        tradingClass=root,
+    )
+    details = _req_cd_with_retry(ib_ingestor, base_contract)
+    if not details:
+        _CONTRACT_CHAINS[root] = []
+        return []
+
+    chain = sorted((cd.contract for cd in details), key=_expiry_int)
+    _CONTRACT_CHAINS[root] = chain
+    return chain
+
+
 def _resolve_front_month_contract(ib_ingestor: IBKRIngestor, symbol: str, asof: datetime):
     """Resolve the front-month futures contract for a symbol as of *asof*."""
 
@@ -136,27 +168,22 @@ def _resolve_front_month_contract(ib_ingestor: IBKRIngestor, symbol: str, asof: 
     if exch is None:
         return None
 
-    symbol_override = ROOT_TO_SYMBOL_OVERRIDE.get(root, root)
-    future_contract = Future(
-        symbol=symbol_override,
-        exchange=exch,
-        tradingClass=root,
-    )
-    details = _req_cd_with_retry(ib_ingestor, future_contract)
-    if not details:
+    chain = _load_contract_chain(ib_ingestor, root, exch)
+    if not chain:
         _CONTRACT_CACHE[cache_key] = None
         return None
 
-    yyyymmdd = asof.strftime("%Y%m%d")
+    asof_key = int(asof.strftime("%Y%m%d"))
+    selected = None
+    for contract in chain:
+        if _expiry_int(contract) >= asof_key:
+            selected = contract
+            break
+    if selected is None:
+        selected = chain[-1]
 
-    def _expiry_key(cd):
-        month = cd.contract.lastTradeDateOrContractMonth or "99999999"
-        return month
-
-    candidates = [cd for cd in details if (cd.contract.lastTradeDateOrContractMonth or "00000000") >= yyyymmdd]
-    picked = sorted(candidates, key=_expiry_key)[0] if candidates else sorted(details, key=_expiry_key)[-1]
-    _CONTRACT_CACHE[cache_key] = picked.contract
-    return picked.contract
+    _CONTRACT_CACHE[cache_key] = selected
+    return selected
 
 
 def _parse_last_trade(contract) -> Optional[datetime]:
@@ -179,6 +206,16 @@ def _maybe_roll_contract(ib_ingestor: IBKRIngestor, symbol: str, contract, asof:
     if not last_trade:
         return contract
     if asof.replace(tzinfo=timezone.utc) >= last_trade - timedelta(days=ROLLOVER_BUFFER_DAYS):
+        root = ALIAS_TO_ROOT.get(symbol, symbol)
+        exch = ROOT_TO_EXCH.get(root)
+        chain = _load_contract_chain(ib_ingestor, root, exch)
+        if chain:
+            current_id = getattr(contract, "conId", None)
+            for idx, c in enumerate(chain):
+                if getattr(c, "conId", None) == current_id:
+                    if idx > 0:
+                        return chain[idx - 1]
+                    break
         alt_asof = asof - timedelta(days=30)
         alt_contract = _resolve_front_month_contract(ib_ingestor, symbol, alt_asof)
         if alt_contract and alt_contract.conId != getattr(contract, "conId", None):
@@ -265,6 +302,7 @@ def _backfill_symbol(ib: IBKRIngestor, symbol: str) -> None:
         if os.getenv("USE_HEAD_TS", "1") == "1":
             contract = _resolve_front_month_contract(ib, symbol, nxt)
             if contract is not None:
+                contract = _maybe_roll_contract(ib, symbol, contract, nxt)
                 earliest = _probe_head_timestamp(ib, contract)
                 if earliest is not None:
                     earliest_dt = earliest.to_pydatetime()
@@ -317,6 +355,7 @@ def _backfill_symbol(ib: IBKRIngestor, symbol: str) -> None:
     if earliest is not None and earliest - target_start > timedelta(minutes=1):
         print(f"[{symbol}] backward fill target={target_start.isoformat()} current_earliest={earliest.isoformat()}")
         end_point = earliest
+        prev_end_point = None
         while end_point - target_start > timedelta(minutes=1):
             nxt_end = end_point
             start = max(target_start, nxt_end - timedelta(days=1))
@@ -330,12 +369,27 @@ def _backfill_symbol(ib: IBKRIngestor, symbol: str) -> None:
             if os.getenv("USE_HEAD_TS", "1") == "1":
                 contract = _resolve_front_month_contract(ib, symbol, nxt_end)
                 if contract is not None:
+                    contract = _maybe_roll_contract(ib, symbol, contract, nxt_end)
                     earliest_available = _probe_head_timestamp(ib, contract)
                     if earliest_available is not None and earliest_available.to_pydatetime() > start:
-                        start = earliest_available.to_pydatetime()
+                        ea_dt = earliest_available.to_pydatetime()
+                        start = ea_dt
                         if nxt_end - start <= timedelta(minutes=1):
-                            end_point = start
+                            candidate_end = ea_dt - timedelta(minutes=1)
+                            if candidate_end <= target_start:
+                                print(
+                                    f"  [STOP] {symbol} reached contract head-ts floor at {ea_dt}; ending backward fill."
+                                )
+                                break
+                            end_point = candidate_end
+                            prev_end_point = nxt_end
                             continue
+
+            if prev_end_point is not None and start >= prev_end_point - timedelta(minutes=1):
+                print(
+                    f"  [STOP] {symbol} backward fill detected no progress (start {start}); ending backward fill."
+                )
+                break
 
             try:
                 _enforce_pacing(symbol, duration, nxt_end)
@@ -360,6 +414,7 @@ def _backfill_symbol(ib: IBKRIngestor, symbol: str) -> None:
                     )
                     break
                 print(f"  [WARN] {symbol} backward {start} -> {nxt_end}: {exc}")
+            prev_end_point = end_point
             end_point = start
             time.sleep(SLEEP_BETWEEN_REQ)
 
