@@ -149,3 +149,4 @@ Code Alignment
 Operational Tips
 - If you see “ConnectionRefusedError(111 … 4002)”, verify IB Gateway is running and API is enabled.
 - If you see historical “Error 162 … no data”, that is an HMDS floor/contract issue, not a socket/ID issue. Backfill logic handles month rolls; allow it to proceed.
+- Transient farm hiccups: a 2103 “market data farm connection is broken” followed by 2104 “OK” is a normal transient. No action needed; the run should continue on its own.

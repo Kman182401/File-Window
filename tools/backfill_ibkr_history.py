@@ -121,6 +121,8 @@ def _classify_error(exc: Exception) -> str:
     text = str(exc).lower()
     if "error 166" in text:
         return "retention"
+    if "error 200" in text or "no security definition" in text:
+        return "secdef"
     if "error 162" in text or "error 165" in text or "no data returned" in text:
         return "nodata"
     return "other"
@@ -349,6 +351,31 @@ def _backfill_symbol(ib: IBKRIngestor, symbol: str) -> None:
                     f"  [STOP] {symbol} {cur} -> {nxt}: IBKR retention limit reached ({exc}); stopping forward fill."
                 )
                 break
+            if kind == "secdef":
+                # Re-resolve with a slightly earlier as-of to avoid ambiguous/underspecified contracts
+                try:
+                    alt_asof = nxt - timedelta(days=1)
+                    df = ib.fetch_data(
+                        symbol,
+                        duration=duration,
+                        barSize="1 min",
+                        whatToShow="TRADES",
+                        useRTH=False,
+                        formatDate=1,
+                        endDateTime=end_utc_str,
+                        asof=alt_asof,
+                    )
+                    _record_request(symbol, duration, nxt)
+                    if df is not None and not df.empty:
+                        out_path = persist_bars(symbol, df)
+                        print(
+                            f"  [OK] {symbol} {cur} -> {nxt} (retry after error 200; asof={alt_asof:%Y-%m-%d}) wrote={out_path}"
+                        )
+                        cur = nxt
+                        time.sleep(SLEEP_BETWEEN_REQ)
+                        continue
+                except Exception as exc2:
+                    print(f"  [WARN] {symbol} secdef-retry failed: {exc2}")
             print(f"  [WARN] {symbol} {cur} -> {nxt}: {exc}")
         cur = nxt
         time.sleep(SLEEP_BETWEEN_REQ)
@@ -425,6 +452,32 @@ def _backfill_symbol(ib: IBKRIngestor, symbol: str) -> None:
                         f"  [STOP] {symbol} backward {start} -> {nxt_end}: IBKR retention limit reached ({exc}); stopping backward fill."
                     )
                     break
+                if kind == "secdef":
+                    # Re-resolve with a slightly earlier as-of to avoid ambiguous/underspecified contracts
+                    try:
+                        alt_asof = nxt_end - timedelta(days=1)
+                        df = ib.fetch_data(
+                            symbol,
+                            duration=duration,
+                            barSize="1 min",
+                            whatToShow="TRADES",
+                            useRTH=False,
+                            formatDate=1,
+                            endDateTime=end_utc_str,
+                            asof=alt_asof,
+                        )
+                        _record_request(symbol, duration, nxt_end)
+                        if df is not None and not df.empty:
+                            out_path = persist_bars(symbol, df)
+                            print(
+                                f"  [OK] {symbol} backward {start} -> {nxt_end} (retry after error 200; asof={alt_asof:%Y-%m-%d}) wrote={out_path}"
+                            )
+                            prev_end_point = end_point
+                            end_point = start
+                            time.sleep(SLEEP_BETWEEN_REQ)
+                            continue
+                    except Exception as exc2:
+                        print(f"  [WARN] {symbol} backward secdef-retry failed: {exc2}")
                 print(f"  [WARN] {symbol} backward {start} -> {nxt_end}: {exc}")
             prev_end_point = end_point
             end_point = start
