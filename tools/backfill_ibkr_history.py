@@ -365,21 +365,31 @@ def _backfill_symbol(ib: IBKRIngestor, symbol: str) -> None:
                             if cur >= nxt:
                                 continue
 
-            # Bars-first guard, then days cap
-            minutes = max(1, int((nxt - cur).total_seconds() / 60))
-            if minutes > MAX_BARS_PER_REQUEST:
-                nxt = cur + timedelta(minutes=MAX_BARS_PER_REQUEST)
-            elif nxt - cur > timedelta(days=MAX_DAYS_PER_REQ):
-                nxt = cur + timedelta(days=MAX_DAYS_PER_REQ)
-            if nxt > now_utc:
-                nxt = now_utc
+            # Compute effective end using bars-first clamp, then days cap, and clamp to contract life
+            end_use = min(nxt, now_utc)
+            if contract is not None:
+                lt = _parse_last_trade(contract)
+                if lt is not None and end_use > lt:
+                    end_use = lt
+            if end_use <= cur:
+                cur = nxt
+                time.sleep(SLEEP_BETWEEN_REQ)
+                continue
 
-            duration_minutes = max(1, int((nxt - cur).total_seconds() / 60))
-            duration_days = max(1, (nxt - cur).days or (duration_minutes + 1439) // 1440)
+            minutes = max(1, int((end_use - cur).total_seconds() / 60))
+            if minutes > MAX_BARS_PER_REQUEST:
+                end_use = cur + timedelta(minutes=MAX_BARS_PER_REQUEST)
+                minutes = MAX_BARS_PER_REQUEST
+            elif end_use - cur > timedelta(days=MAX_DAYS_PER_REQ):
+                end_use = cur + timedelta(days=MAX_DAYS_PER_REQ)
+                minutes = max(1, int((end_use - cur).total_seconds() / 60))
+
+            duration_minutes = minutes
+            duration_days = max(1, (end_use - cur).days or (duration_minutes + 1439) // 1440)
             duration = f"{duration_days} D"
             try:
-                _enforce_pacing(symbol, duration, nxt)
-                end_utc_str = nxt.strftime("%Y%m%d-%H:%M:%S")
+                _enforce_pacing(symbol, duration, end_use)
+                end_utc_str = end_use.strftime("%Y%m%d-%H:%M:%S")
                 df = ib.fetch_data(
                     symbol,
                     duration=duration,
@@ -388,15 +398,15 @@ def _backfill_symbol(ib: IBKRIngestor, symbol: str) -> None:
                     useRTH=False,
                     formatDate=1,
                     endDateTime=end_utc_str,
-                    asof=nxt,
+                    asof=end_use,
                     contract_override=contract,
                 )
-                _record_request(symbol, duration, nxt)
+                _record_request(symbol, duration, end_use)
                 if df is not None and not df.empty:
                     out_path = persist_bars(symbol, df)
-                    print(f"  [OK] {symbol} {cur} -> {nxt} wrote={out_path}")
+                    print(f"  [OK] {symbol} {cur} -> {end_use} wrote={out_path}")
                 else:
-                    print(f"  [OK] {symbol} {cur} -> {nxt} (no rows)")
+                    print(f"  [OK] {symbol} {cur} -> {end_use} (no rows)")
             except Exception as exc:
                 kind = _classify_error(exc)
                 if kind == "retention":
@@ -428,6 +438,15 @@ def _backfill_symbol(ib: IBKRIngestor, symbol: str) -> None:
                             continue
                     except Exception as exc2:
                         print(f"  [WARN] {symbol} secdef-retry failed: {exc2}")
+                # If HMDS reports no data, step to prior contract deterministically
+                if kind in {"nodata", "secdef"}:
+                    prev = _previous_contract(ib, symbol, contract)
+                    if prev is not None:
+                        print(f"  [INFO] {symbol} forward stepping to prior contract conId={prev.conId} after {kind}")
+                        contract = prev
+                        # Try again immediately with the same time window on the prior contract
+                        time.sleep(SLEEP_BETWEEN_REQ)
+                        continue
                 print(f"  [WARN] {symbol} {cur} -> {nxt}: {exc}")
             cur = nxt
             time.sleep(SLEEP_BETWEEN_REQ)
