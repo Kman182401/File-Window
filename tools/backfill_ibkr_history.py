@@ -148,13 +148,22 @@ def _load_contract_chain(ib_ingestor: IBKRIngestor, root: str, exch: str) -> Lis
         symbol=symbol_override,
         exchange=exch,
         tradingClass=root,
+        includeExpired=True,
     )
     details = _req_cd_with_retry(ib_ingestor, base_contract)
     if not details:
         _CONTRACT_CHAINS[root] = []
         return []
 
-    chain = sorted((cd.contract for cd in details), key=_expiry_int)
+    chain = []
+    for cd in details:
+        contract = cd.contract
+        try:
+            contract.includeExpired = True
+        except Exception:
+            pass
+        chain.append(contract)
+    chain.sort(key=_expiry_int)
     _CONTRACT_CHAINS[root] = chain
     return chain
 
@@ -224,6 +233,28 @@ def _maybe_roll_contract(ib_ingestor: IBKRIngestor, symbol: str, contract, asof:
         if alt_contract and alt_contract.conId != getattr(contract, "conId", None):
             return alt_contract
     return contract
+
+
+def _previous_contract(ib_ingestor: IBKRIngestor, symbol: str, contract) -> Optional[Future]:
+    if contract is None:
+        return None
+    root = ALIAS_TO_ROOT.get(symbol, symbol)
+    exch = ROOT_TO_EXCH.get(root)
+    chain = _load_contract_chain(ib_ingestor, root, exch)
+    if not chain:
+        return None
+    current_id = getattr(contract, "conId", None)
+    for idx, c in enumerate(chain):
+        if getattr(c, "conId", None) == current_id:
+            if idx > 0:
+                prev = chain[idx - 1]
+                try:
+                    prev.includeExpired = True
+                except Exception:
+                    pass
+                return prev
+            break
+    return None
 
 
 def _probe_head_timestamp(ib_ingestor: IBKRIngestor, contract) -> Optional[pd.Timestamp]:
@@ -302,6 +333,7 @@ def _backfill_symbol(ib: IBKRIngestor, symbol: str) -> None:
     while cur < now_utc:
         nxt = min(cur + timedelta(days=WINDOW_DAYS), now_utc)
 
+        contract = None
         if os.getenv("USE_HEAD_TS", "1") == "1":
             contract = _resolve_front_month_contract(ib, symbol, nxt)
             if contract is not None:
@@ -337,6 +369,7 @@ def _backfill_symbol(ib: IBKRIngestor, symbol: str) -> None:
                 formatDate=1,
                 endDateTime=end_utc_str,
                 asof=nxt,
+                contract_override=contract,
             )
             _record_request(symbol, duration, nxt)
             if df is not None and not df.empty:
@@ -388,6 +421,7 @@ def _backfill_symbol(ib: IBKRIngestor, symbol: str) -> None:
         print(f"[{symbol}] backward fill target={target_start.isoformat()} current_earliest={earliest.isoformat()}")
         end_point = earliest
         prev_end_point = None
+        contract_override = None
         while end_point - target_start > timedelta(minutes=1):
             nxt_end = end_point
             start = max(target_start, nxt_end - timedelta(days=1))
@@ -398,32 +432,45 @@ def _backfill_symbol(ib: IBKRIngestor, symbol: str) -> None:
             duration_days = max(1, (nxt_end - start).days or (duration_minutes + 1439) // 1440)
             duration = f"{duration_days} D"
 
-            if os.getenv("USE_HEAD_TS", "1") == "1":
+            contract = contract_override
+            if contract is None:
                 contract = _resolve_front_month_contract(ib, symbol, nxt_end)
                 if contract is not None:
                     contract = _maybe_roll_contract(ib, symbol, contract, nxt_end)
-                    earliest_available = _probe_head_timestamp(ib, contract)
-                    if earliest_available is not None:
-                        ea_dt = earliest_available.to_pydatetime()
-                        if ea_dt > start:
-                            if nxt_end - ea_dt <= timedelta(minutes=1):
-                                candidate_end = ea_dt - timedelta(days=1, minutes=1)
-                                if candidate_end <= target_start:
-                                    print(
-                                        f"  [STOP] {symbol} reached HMDS floor at {ea_dt}; ending backward fill."
-                                    )
-                                    break
-                                if prev_end_point is not None and candidate_end >= nxt_end - timedelta(minutes=1):
-                                    candidate_end = nxt_end - timedelta(days=1)
-                                end_point = candidate_end
+
+            earliest_available = None
+            if os.getenv("USE_HEAD_TS", "1") == "1" and contract is not None:
+                earliest_available = _probe_head_timestamp(ib, contract)
+                if earliest_available is not None:
+                    ea_dt = earliest_available.to_pydatetime()
+                    if ea_dt > start:
+                        if nxt_end - ea_dt <= timedelta(minutes=1):
+                            previous = _previous_contract(ib, symbol, contract)
+                            if previous is not None:
+                                contract_override = previous
                                 prev_end_point = nxt_end
                                 continue
-                            start = max(start, ea_dt)
+                            candidate_end = ea_dt - timedelta(days=1, minutes=1)
+                            if candidate_end <= target_start:
+                                print(
+                                    f"  [STOP] {symbol} reached HMDS floor at {ea_dt}; ending backward fill."
+                                )
+                                break
+                            if prev_end_point is not None and candidate_end >= nxt_end - timedelta(minutes=1):
+                                candidate_end = nxt_end - timedelta(days=1)
+                            end_point = candidate_end
+                            prev_end_point = nxt_end
+                            continue
+                        start = max(start, ea_dt)
 
             if prev_end_point is not None and start >= prev_end_point - timedelta(minutes=1):
                 print(
                     f"  [STOP] {symbol} backward fill detected no progress (start {start}); ending backward fill."
                 )
+                break
+
+            if contract is None:
+                print(f"  [WARN] {symbol} backward {start} -> {nxt_end}: unable to resolve contract")
                 break
 
             try:
@@ -438,6 +485,7 @@ def _backfill_symbol(ib: IBKRIngestor, symbol: str) -> None:
                     formatDate=1,
                     endDateTime=end_utc_str,
                     asof=nxt_end,
+                    contract_override=contract,
                 )
                 _record_request(symbol, duration, nxt_end)
                 if df is not None and not df.empty:
@@ -474,13 +522,24 @@ def _backfill_symbol(ib: IBKRIngestor, symbol: str) -> None:
                             )
                             prev_end_point = end_point
                             end_point = start
+                            contract_override = contract
                             time.sleep(SLEEP_BETWEEN_REQ)
                             continue
                     except Exception as exc2:
                         print(f"  [WARN] {symbol} backward secdef-retry failed: {exc2}")
+                if kind in {"nodata", "secdef"}:
+                    previous = _previous_contract(ib, symbol, contract)
+                    if previous is not None:
+                        contract_override = previous
+                        print(
+                            f"  [INFO] {symbol} switching to prior contract conId={previous.conId} after {kind}"
+                        )
+                        prev_end_point = nxt_end
+                        continue
                 print(f"  [WARN] {symbol} backward {start} -> {nxt_end}: {exc}")
             prev_end_point = end_point
             end_point = start
+            contract_override = contract
             time.sleep(SLEEP_BETWEEN_REQ)
 
 

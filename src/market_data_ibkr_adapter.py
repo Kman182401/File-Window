@@ -80,12 +80,24 @@ class IBKRIngestor:
         self.connected = True
 
     def fetch_data(self, ticker, duration='1 D', barSize='1 min', whatToShow='TRADES',
-                   useRTH=False, formatDate=1, endDateTime='', asof: Optional[datetime] = None):
+                   useRTH=False, formatDate=1, endDateTime='', asof: Optional[datetime] = None,
+                   contract_override: Optional[Contract] = None):
         if not self.connected:
             raise RuntimeError(f"IBKR not connected. Cannot fetch data for {ticker}.")
-        contract = self._get_contract(ticker, asof=asof)
+        contract = contract_override or self._get_contract(ticker, asof=asof)
         if contract is None:
             raise RuntimeError(f"No contract available for {ticker}.")
+        # Ensure historical queries against expired contracts succeed
+        try:
+            contract.includeExpired = True
+        except Exception:
+            pass
+        # Qualify the contract if we constructed/overrode it manually
+        try:
+            if contract_override is not None:
+                self.ib.qualifyContracts(contract)
+        except Exception:
+            pass
         print(f"Requesting contract: {contract}")  # Debug log
         try:
             # pacing gate
