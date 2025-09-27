@@ -26,6 +26,7 @@ except Exception:  # pragma: no cover - fallback for CPU-only envs
 from wfo.cpcv import CPCVConfig, CombinatorialPurgedCV
 from wfo.metrics import deflated_sharpe_ratio, sharpe_ratio
 from wfo.purging import PurgeConfig, apply_purge_embargo
+from wfo.labeling import ensure_forward_label
 from wfo_rl import RLAdapter, RLSpec, make_env_from_df, logistic_positions
 
 logger = logging.getLogger(__name__)
@@ -651,6 +652,8 @@ def select_strategies_with_cpcv(
     symbol = cpcv_config.get("symbol")
     default_minutes = int(cpcv_config.get("minutes_per_trading_day", 390))
     minutes_per_day = int(session_minutes.get(symbol, session_minutes.get("default", default_minutes)))
+
+    ensure_forward_label(base_df, horizon=max(1, label_lookahead))
     embargo_bars = int(round(embargo_days * minutes_per_day))
 
     cpcv_cfg = CPCVConfig(
@@ -689,6 +692,8 @@ def select_strategies_with_cpcv(
                 continue
             is_df = base_df.iloc[train_idx].reset_index(drop=True)
             oos_df = base_df.iloc[test_idx].reset_index(drop=True)
+            ensure_forward_label(is_df, horizon=max(1, label_lookahead))
+            ensure_forward_label(oos_df, horizon=max(1, label_lookahead))
 
             if strat_type == "rl_policy":
                 rl_cfg = dict(strat.get("rl") or {})

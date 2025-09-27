@@ -29,6 +29,7 @@ from .metrics import (
 from .reporting import summarise_cycles, write_reports
 from .reality_checks import white_reality_check, hansen_spa
 from .rl_adapter import RLAdapter, RLSpec, SB3_AVAILABLE
+from .labeling import ensure_forward_label
 from .supervised_baselines import logistic_positions
 
 
@@ -223,6 +224,10 @@ def run_wfo(
             if is_df.empty or oos_df.empty:
                 print(f"[WFO] Skipping cycle {cycle_idx} for {symbol}: empty window after gap enforcement")
                 continue
+
+            lookahead = max(1, config.label_lookahead_bars)
+            ensure_forward_label(is_df, horizon=lookahead)
+            ensure_forward_label(oos_df, horizon=lookahead)
 
             non_rl = [s for s in strategy_objs if s.type not in {"rl_policy", "supervised"}]
             selection: List[Dict[str, Any]] = []
