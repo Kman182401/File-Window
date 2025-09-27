@@ -69,9 +69,19 @@ def build_contract_windows(ingestor: IBKRIngestor, symbol_alias: str) -> pd.Data
             lt_raw = expiry_dt.strftime("%Y%m%d")
 
         head_ts = _probe_head_timestamp(ingestor, contract)
-        start_ts = head_ts.to_pydatetime() if head_ts is not None else None
-        start_ts = pd.Timestamp(start_ts, tz="UTC") if start_ts else UTC
-        end_ts = pd.Timestamp(expiry_dt, tz="UTC")
+        if head_ts is not None:
+            start_ts = pd.Timestamp(head_ts)
+            if start_ts.tzinfo is None:
+                start_ts = start_ts.tz_localize("UTC")
+            else:
+                start_ts = start_ts.tz_convert("UTC")
+        else:
+            start_ts = UTC
+        end_ts = pd.Timestamp(expiry_dt)
+        if end_ts.tzinfo is None:
+            end_ts = end_ts.tz_localize("UTC")
+        else:
+            end_ts = end_ts.tz_convert("UTC")
 
         windows.append(
             ContractWindow(
@@ -98,7 +108,7 @@ def attach_metadata(df: pd.DataFrame, windows_df: pd.DataFrame) -> pd.DataFrame:
             {
                 "symbol_root": pd.Series([pd.NA] * len(df), index=df.index, dtype="string"),
                 "exchange": pd.Series([pd.NA] * len(df), index=df.index, dtype="string"),
-                "conId": pd.Series([pd.NA] * len(df), index=df.index, dtype="float64"),
+                "conId": pd.Series([pd.NA] * len(df), index=df.index, dtype="Int64"),
                 "expiry": pd.Series([pd.NA] * len(df), index=df.index, dtype="string"),
             }
         )
@@ -119,7 +129,8 @@ def attach_metadata(df: pd.DataFrame, windows_df: pd.DataFrame) -> pd.DataFrame:
 
     # Mask out timestamps falling after the contract’s last trade
     valid = merged["end_ts"].notna() & (df["timestamp"] <= merged["end_ts"])
-    merged.loc[~valid, ["symbol_root", "exchange", "conId", "expiry"]] = pd.NA
+    merged.loc[~valid, ["symbol_root", "exchange", "expiry"]] = pd.NA
+    merged.loc[~valid, "conId"] = pd.NA
 
     meta = merged[["symbol_root", "exchange", "conId", "expiry"]].copy()
     meta["conId"] = meta["conId"].astype("Int64")
