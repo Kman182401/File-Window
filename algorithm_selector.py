@@ -28,7 +28,7 @@ from wfo.metrics import deflated_sharpe_ratio, sharpe_ratio
 from wfo.purging import PurgeConfig, apply_purge_embargo
 from wfo.labeling import ensure_forward_label
 from wfo_rl import RLAdapter, RLSpec, make_env_from_df, logistic_positions
-from wfo.utils import enable_determinism
+from wfo.utils import enable_determinism, resolve_session_minutes
 
 logger = logging.getLogger(__name__)
 
@@ -661,10 +661,16 @@ def select_strategies_with_cpcv(
 
     label_lookahead = int(cpcv_config.get("label_lookahead_bars", 0))
     embargo_days = float(cpcv_config.get("embargo_days", 0))
-    session_minutes = cpcv_config.get("session_minutes") or {}
-    symbol = cpcv_config.get("symbol")
+    session_minutes = {k.upper(): v for k, v in (cpcv_config.get("session_minutes") or {}).items()}
+    symbol = (cpcv_config.get("symbol") or "").upper()
     default_minutes = int(cpcv_config.get("minutes_per_trading_day", 390))
-    minutes_per_day = int(session_minutes.get(symbol, session_minutes.get("default", default_minutes)))
+    minutes_per_day = session_minutes.get(symbol)
+    if minutes_per_day is None:
+        minutes_per_day = resolve_session_minutes(symbol, default_minutes)
+    if minutes_per_day is None:
+        minutes_per_day = default_minutes
+    else:
+        minutes_per_day = int(minutes_per_day)
 
     if cpcv_config.get("deterministic_debug"):
         logger.info("CPCV deterministic debug enabled (training may slow down)")

@@ -2,9 +2,12 @@ trading_days_per_year: 252
 minutes_per_trading_day: 390
 session_minutes:
   default: 390
-  ES: 390
-  NQ: 390
-  GC: 360
+  ES: 1365
+  NQ: 1365
+  GC: 1365
+  6E: 1365
+  6B: 1365
+  6A: 1365
 deterministic_debug: false
 deterministic_seed: 42
 label_lookahead_bars: 1
@@ -101,3 +104,5 @@ strategies:
     params:
       target_col: label
       C: 0.5
+      calibration: sigmoid
+      calibration_cv: 3

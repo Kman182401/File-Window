@@ -18,9 +18,12 @@ deterministic_seed: 42
 
 session_minutes:
   default: 390
-  ES: 390
-  NQ: 390
-  GC: 360
+  ES: 1365
+  NQ: 1365
+  GC: 1365
+  6E: 1365
+  6B: 1365
+  6A: 1365
 
 strategies:
   - name: ES_PPO_LSTM
@@ -92,6 +95,8 @@ strategies:
     params:
       target_col: label
       C: 0.5
+      calibration: sigmoid
+      calibration_cv: 3
       calibration: sigmoid
       calibration_cv: 3
 

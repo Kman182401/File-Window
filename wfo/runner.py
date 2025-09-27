@@ -32,7 +32,7 @@ from .reality_checks import white_reality_check, hansen_spa
 from .rl_adapter import RLAdapter, RLSpec, SB3_AVAILABLE
 from .labeling import ensure_forward_label
 from .supervised_baselines import logistic_positions
-from .utils import enable_determinism
+from .utils import enable_determinism, resolve_session_minutes
 
 
 @dataclass
@@ -207,10 +207,18 @@ def run_wfo(
     selected_returns: List[np.ndarray] = []
     data_hashes: Dict[str, str] = {}
     rl_vecnorm_paths: Dict[str, List[str]] = defaultdict(list)
+    resolved_minutes: Dict[str, int] = {}
 
     for symbol in symbols:
-        minutes_lookup = config.session_minutes or {}
-        symbol_minutes = int(minutes_lookup.get(symbol, minutes_lookup.get("default", config.minutes_per_trading_day)))
+        minutes_lookup = {k.upper(): v for k, v in (config.session_minutes or {}).items()}
+        symbol_minutes = minutes_lookup.get(symbol.upper())
+        if symbol_minutes is None:
+            symbol_minutes = resolve_session_minutes(symbol, config.minutes_per_trading_day)
+        if symbol_minutes is None:
+            symbol_minutes = config.minutes_per_trading_day
+        else:
+            symbol_minutes = int(symbol_minutes)
+        resolved_minutes[symbol] = symbol_minutes
         bars = data_access.get_bars(symbol, start_lookup, now)
         if bars.empty:
             print(f"[WFO] No data found for {symbol}, skipping")
@@ -425,6 +433,7 @@ def run_wfo(
             for strat in strategy_objs
         },
         "vecnormalize_stats": {k: v for k, v in rl_vecnorm_paths.items()},
+        "session_minutes_used": resolved_minutes,
     }
     extras["run_metadata"] = metadata_payload
 

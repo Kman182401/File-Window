@@ -42,16 +42,24 @@ def logistic_positions(
     X = is_df[feature_cols].to_numpy()
     y = is_df[target_col].to_numpy()
 
+    classes = np.unique(y)
+    if classes.size < 2:
+        return np.zeros(len(oos_df), dtype=float)
+
     missing = [col for col in feature_cols if col not in oos_df.columns]
     if missing:
         raise ValueError(f"OOS data missing feature columns: {missing}")
 
     base_model = LogisticRegression(max_iter=200, **kwargs)
     calibrator = CalibratedClassifierCV(base_model, method=calibration, cv=calibration_cv)
-    calibrator.fit(X, y)
-
-    X_oos = oos_df[feature_cols].to_numpy()
-    proba = calibrator.predict_proba(X_oos)[:, 1]
+    try:
+        calibrator.fit(X, y)
+        X_oos = oos_df[feature_cols].to_numpy()
+        proba = calibrator.predict_proba(X_oos)[:, 1]
+    except ValueError:
+        base_model.fit(X, y)
+        X_oos = oos_df[feature_cols].to_numpy()
+        proba = base_model.predict_proba(X_oos)[:, 1]
     return (proba * 2.0 - 1.0).astype(float)
 
 
