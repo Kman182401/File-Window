@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import os
 import json
-from dataclasses import dataclass
+import hashlib
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from importlib import metadata
 from pathlib import Path
 from typing import Any, Dict, List, Sequence
 
@@ -47,6 +49,7 @@ class RunnerConfig:
     strategies: List[StrategyConfig]
     trading_days_per_year: int = 252
     minutes_per_trading_day: int = 390
+    session_minutes: Dict[str, int] = field(default_factory=dict)
     label_lookahead_bars: int = 1
     embargo_days: int = 1
     cpcv_groups: int = 12
@@ -73,6 +76,7 @@ def load_config(path: Path | str | None) -> RunnerConfig:
         strategies=strategies,
         trading_days_per_year=defaults.get("trading_days_per_year", 252),
         minutes_per_trading_day=defaults.get("minutes_per_trading_day", 390),
+        session_minutes=defaults.get("session_minutes", {}),
         label_lookahead_bars=defaults.get("label_lookahead_bars", 1),
         embargo_days=defaults.get("embargo_days", 1),
         cpcv_groups=defaults.get("cpcv", {}).get("n_groups", 12),
@@ -98,6 +102,9 @@ def _default_yaml() -> Dict[str, Any]:
         ],
         "trading_days_per_year": 252,
         "minutes_per_trading_day": 390,
+        "session_minutes": {
+            "default": 390,
+        },
         "label_lookahead_bars": 1,
         "embargo_days": 1,
         "cpcv": {
@@ -159,6 +166,17 @@ def run_wfo(
     if costs_bps is not None:
         config.trading_costs_bps = costs_bps
 
+    if config.rc_bootstrap < 1000:
+        print(
+            "[WFO] Increasing n_bootstrap to 1000 to stabilise RC/SPA p-values."
+        )
+        config.rc_bootstrap = 1000
+    if config.rc_block_len < 60:
+        print(
+            "[WFO] Increasing block_len_bars to 60 to respect SPA/RC dependence assumptions."
+        )
+        config.rc_block_len = 60
+
     data_access = MarketDataAccess()
     now = datetime.utcnow()
     start_lookup = now - timedelta(days=max(is_days, 180) * 2)
@@ -172,12 +190,16 @@ def run_wfo(
     per_cycle_records: List[Dict[str, Any]] = []
     per_config_returns: Dict[str, List[np.ndarray]] = {s.name: [] for s in strategy_objs}
     selected_returns: List[np.ndarray] = []
+    data_hashes: Dict[str, str] = {}
 
     for symbol in symbols:
+        minutes_lookup = config.session_minutes or {}
+        symbol_minutes = int(minutes_lookup.get(symbol, minutes_lookup.get("default", config.minutes_per_trading_day)))
         bars = data_access.get_bars(symbol, start_lookup, now)
         if bars.empty:
             print(f"[WFO] No data found for {symbol}, skipping")
             continue
+        data_hashes[symbol] = _hash_dataframe(bars)
 
         cycles = _build_cycles(bars, is_days, oos_days, step_days)
         if len(cycles) < cycles_min:
@@ -187,7 +209,7 @@ def run_wfo(
         for cycle_idx, (is_df, oos_df) in enumerate(cycles, start=1):
             is_df = is_df.copy()
             oos_df = oos_df.copy()
-            embargo_bars = int(config.embargo_days * config.minutes_per_trading_day)
+            embargo_bars = int(config.embargo_days * symbol_minutes)
             if config.label_lookahead_bars > 0:
                 if len(is_df) <= config.label_lookahead_bars:
                     print(f"[WFO] Skipping cycle {cycle_idx} for {symbol}: IS window too short after label purge")
@@ -362,6 +384,25 @@ def run_wfo(
         "white_rc": {"p_value": white.p_value, "survivors": white.survivors, "strategies": names_order},
         "spa": {"p_value": spa.p_value, "survivors": spa.survivors, "strategies": names_order},
     }
+    metadata_payload = {
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "config": {
+            "trading_days_per_year": config.trading_days_per_year,
+            "minutes_per_trading_day": config.minutes_per_trading_day,
+            "session_minutes": config.session_minutes,
+            "embargo_days": config.embargo_days,
+            "label_lookahead_bars": config.label_lookahead_bars,
+            "rl_fast_smoke": config.rl_fast_smoke,
+        },
+        "library_versions": _collect_versions(),
+        "data_hashes": data_hashes,
+        "strategy_seeds": {
+            strat.name: (strat.rl.get("seed") if strat.rl else None)
+            for strat in strategy_objs
+        },
+    }
+    extras["run_metadata"] = metadata_payload
+
 
     write_reports(output_dir, per_cycle_records, summary, extras)
 
@@ -536,3 +577,24 @@ def _build_cycle_record(
 
 
 __all__ = ["run_wfo", "load_config"]
+def _hash_dataframe(df: pd.DataFrame) -> str:
+    hashed = pd.util.hash_pandas_object(df, index=True).values
+    return hashlib.sha256(hashed.tobytes()).hexdigest()
+
+
+def _collect_versions() -> Dict[str, str]:
+    libs = [
+        "stable-baselines3",
+        "sb3-contrib",
+        "gymnasium",
+        "torch",
+        "numpy",
+        "pandas",
+    ]
+    versions: Dict[str, str] = {}
+    for lib in libs:
+        try:
+            versions[lib] = metadata.version(lib)
+        except metadata.PackageNotFoundError:  # pragma: no cover - optional deps
+            versions[lib] = "not installed"
+    return versions

@@ -13,6 +13,12 @@ datasets:
   minute_bars_path: data/minute_bars
   lookback_days: 30
 
+session_minutes:
+  default: 390
+  ES: 390
+  NQ: 390
+  GC: 360
+
 strategies:
   - name: ES_PPO_LSTM
     type: rl_policy

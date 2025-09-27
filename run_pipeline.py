@@ -187,6 +187,8 @@ def cmd_select_with_cpcv(args: argparse.Namespace) -> None:
     cpcv_cfg = config.get("cpcv", {})
     cpcv_cfg.setdefault("log_dir", "artifacts/cpcv_selection")
     cpcv_cfg.setdefault("dsr_threshold", 0.05)
+    cpcv_cfg.setdefault("session_minutes", config.get("session_minutes", {}))
+    cpcv_cfg.setdefault("symbol", args.symbol)
     shortlist = select_strategies_with_cpcv(df, config.get("strategies", []), cpcv_cfg)
 
     output_path = Path(args.output or Path(cpcv_cfg["log_dir"]) / "shortlist.json")

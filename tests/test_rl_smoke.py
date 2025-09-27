@@ -48,6 +48,16 @@ def test_rl_smoke(tmp_path):
     train_env = make_env_from_df(train_df, costs_bps=0.2, reward_kwargs=reward_kwargs, eval_mode=False)
     oos_env = make_env_from_df(test_df, costs_bps=0.2, reward_kwargs=reward_kwargs, eval_mode=True)
 
+    train_instance = train_env()
+    eval_instance = oos_env()
+
+    assert not train_instance.eval_mode
+    assert eval_instance.eval_mode
+    assert not eval_instance.use_hindsight_in_training
+
+    train_instance.close()
+    eval_instance.close()
+
     model, vecnorm_path = adapter.fit_on_is(train_env, str(tmp_path))
     returns = adapter.score_on_oos(model, oos_env, vecnorm_path)
 

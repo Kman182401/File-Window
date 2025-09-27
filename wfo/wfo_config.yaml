@@ -1,5 +1,10 @@
 trading_days_per_year: 252
 minutes_per_trading_day: 390
+session_minutes:
+  default: 390
+  ES: 390
+  NQ: 390
+  GC: 360
 label_lookahead_bars: 1
 embargo_days: 1
 cpcv:
@@ -13,8 +18,8 @@ go_no_go:
   dsr_p_max: 0.05
   slippage_budget_max: 0.8
 reality_checks:
-  n_bootstrap: 1000
-  block_len_bars: 78
+  n_bootstrap: 1000  # keep >= 1000 for stable SPA/RC inference
+  block_len_bars: 78  # ~78 minutes (~1.3h) bootstrap block
 trading_costs_bps: 0.0
 rl_fast_smoke: false
 rl_fast_overrides:

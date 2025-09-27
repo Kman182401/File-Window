@@ -647,7 +647,10 @@ def select_strategies_with_cpcv(
 
     label_lookahead = int(cpcv_config.get("label_lookahead_bars", 0))
     embargo_days = float(cpcv_config.get("embargo_days", 0))
-    minutes_per_day = int(cpcv_config.get("minutes_per_trading_day", 390))
+    session_minutes = cpcv_config.get("session_minutes") or {}
+    symbol = cpcv_config.get("symbol")
+    default_minutes = int(cpcv_config.get("minutes_per_trading_day", 390))
+    minutes_per_day = int(session_minutes.get(symbol, session_minutes.get("default", default_minutes)))
     embargo_bars = int(round(embargo_days * minutes_per_day))
 
     cpcv_cfg = CPCVConfig(
