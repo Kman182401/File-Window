@@ -82,11 +82,18 @@ def build_contract_windows(
 
     windows: List[ContractWindow] = []
     prev_end: Optional[pd.Timestamp] = None
+    found_post = False
     for contract, con_id, expiry_dt in contract_entries:
         if target_min is not None and expiry_dt < target_min - pad:
             continue
+
+        within_range = True
         if target_max is not None and expiry_dt > target_max + pad:
-            continue
+            within_range = False
+
+        if not within_range:
+            if target_max is None or found_post or expiry_dt < target_max:
+                continue
 
         lt_raw = (getattr(contract, "lastTradeDateOrContractMonth", "") or "").strip()
         if len(lt_raw) == 6:
@@ -117,6 +124,8 @@ def build_contract_windows(
             )
         )
         prev_end = expiry_dt
+        if not within_range and target_max is not None and expiry_dt >= target_max:
+            found_post = True
 
     if not windows:
         return pd.DataFrame(columns=["symbol_root", "exchange", "conId", "expiry", "start_ts", "end_ts"])
