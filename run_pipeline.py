@@ -44,6 +44,7 @@ os.environ.setdefault("ALLOW_ORDERS", "0")
 
 from wfo.runner import run_wfo  # noqa: E402
 from wfo.utils import enable_determinism  # noqa: E402
+from wfo.labeling import ensure_forward_label  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -196,6 +197,8 @@ def cmd_select_with_cpcv(args: argparse.Namespace) -> None:
     cpcv_cfg.setdefault("symbol", args.symbol)
     cpcv_cfg.setdefault("deterministic_debug", config.get("deterministic_debug", False))
     cpcv_cfg.setdefault("deterministic_seed", config.get("deterministic_seed", 42))
+    horizon = int(cpcv_cfg.get("label_lookahead_bars", config.get("label_lookahead_bars", 1) or 1))
+    ensure_forward_label(df, horizon=horizon)
     shortlist = select_strategies_with_cpcv(df, config.get("strategies", []), cpcv_cfg)
 
     output_path = Path(args.output or Path(cpcv_cfg["log_dir"]) / "shortlist.json")
@@ -280,6 +283,17 @@ def cmd_paper_and_shadow(args: argparse.Namespace) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Codex pipeline orchestrator")
+    parser.add_argument(
+        "--deterministic",
+        action="store_true",
+        help="Force deterministic seeds for debugging (slower; disables fast CUDA kernels)",
+    )
+    parser.add_argument(
+        "--deterministic-seed",
+        type=int,
+        default=42,
+        help="Seed applied when --deterministic is set",
+    )
     sub = parser.add_subparsers(dest="command")
 
     train = sub.add_parser("train_offline", help="Train RL policies offline with VecNormalize")
@@ -329,6 +343,12 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[Iterable[str]] = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    if getattr(args, "deterministic", False):
+        logger.info(
+            "Deterministic mode enabled via CLI; expect slower training because PyTorch switches to deterministic algorithms."
+        )
+        enable_determinism(int(args.deterministic_seed))
 
     if not getattr(args, "command", None):
         logger.info("No subcommand specified; delegating to legacy rl_trading_pipeline.main()")

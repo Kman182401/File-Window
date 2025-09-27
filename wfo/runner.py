@@ -353,6 +353,8 @@ def run_wfo(
             for sup_strat in sup_strats:
                 params = sup_strat.params or {}
                 target_col = params.get("target_col", "label")
+                ensure_forward_label(is_df, horizon=lookahead)
+                ensure_forward_label(oos_df, horizon=lookahead)
                 if target_col not in is_df.columns:
                     print(f"[WFO] Logistic baseline skipped (missing target '{target_col}' in IS data)")
                     continue

@@ -97,8 +97,6 @@ strategies:
       C: 0.5
       calibration: sigmoid
       calibration_cv: 3
-      calibration: sigmoid
-      calibration_cv: 3
 
 cpcv:
   groups: 12

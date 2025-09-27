@@ -794,8 +794,13 @@ def select_strategies_with_cpcv(
         return []
 
     if aggregated_matrix_inputs:
-        matrix = np.column_stack(list(aggregated_matrix_inputs.values()))
-        trials_effective = _effective_trials(matrix)
+        series_list = list(aggregated_matrix_inputs.values())
+        min_len = min((len(series) for series in series_list), default=0)
+        if min_len > 0:
+            matrix = np.column_stack([series[:min_len] for series in series_list])
+            trials_effective = _effective_trials(matrix)
+        else:
+            trials_effective = 1.0
     else:
         trials_effective = 1.0
 
