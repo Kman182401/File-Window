@@ -48,6 +48,8 @@ class RunnerConfig:
     cpcv_random_state: int | None = 7
     dsr_threshold: float = 0.05
     go_no_go: Dict[str, Any] | None = None
+    rc_bootstrap: int = 1000
+    rc_block_len: int = 78
 
 
 def load_config(path: Path | str | None) -> RunnerConfig:
@@ -69,6 +71,8 @@ def load_config(path: Path | str | None) -> RunnerConfig:
         cpcv_random_state=defaults.get("cpcv", {}).get("random_state"),
         dsr_threshold=defaults.get("dsr_threshold", 0.05),
         go_no_go=defaults.get("go_no_go"),
+        rc_bootstrap=defaults.get("reality_checks", {}).get("n_bootstrap", 1000),
+        rc_block_len=defaults.get("reality_checks", {}).get("block_len_bars", 78),
     )
 
 
@@ -94,6 +98,10 @@ def _default_yaml() -> Dict[str, Any]:
             "sharpe_min": 0.8,
             "dsr_p_max": 0.05,
             "slippage_budget_max": 0.8,
+        },
+        "reality_checks": {
+            "n_bootstrap": 1000,
+            "block_len_bars": 78,
         },
     }
 
@@ -137,6 +145,20 @@ def run_wfo(
         for cycle_idx, (is_df, oos_df) in enumerate(cycles, start=1):
             is_df = is_df.copy()
             oos_df = oos_df.copy()
+            embargo_bars = int(config.embargo_days * config.minutes_per_trading_day)
+            if config.label_lookahead_bars > 0:
+                if len(is_df) <= config.label_lookahead_bars:
+                    print(f"[WFO] Skipping cycle {cycle_idx} for {symbol}: IS window too short after label purge")
+                    continue
+                is_df = is_df.iloc[:-config.label_lookahead_bars]
+            if embargo_bars > 0:
+                if len(oos_df) <= embargo_bars:
+                    print(f"[WFO] Skipping cycle {cycle_idx} for {symbol}: OOS window too short after embargo")
+                    continue
+                oos_df = oos_df.iloc[embargo_bars:]
+            if is_df.empty or oos_df.empty:
+                print(f"[WFO] Skipping cycle {cycle_idx} for {symbol}: empty window after gap enforcement")
+                continue
             selection = _run_cpcv_selection(
                 is_df,
                 config,
@@ -174,7 +196,6 @@ def run_wfo(
     summary = summarise_cycles(per_cycle_records)
 
     aggregated_selected = np.concatenate(selected_returns) if selected_returns else np.zeros(1)
-    dsr = deflated_sharpe_ratio(aggregated_selected, trials_effective=len(config.strategies))
 
     matrix_columns = []
     names_order = []
@@ -187,8 +208,10 @@ def run_wfo(
         matrix_columns.append(aggregated_selected)
         names_order.append("selected")
     oos_matrix = np.column_stack(matrix_columns)
-    white = white_reality_check(oos_matrix, n_bootstrap=200)
-    spa = hansen_spa(oos_matrix, n_bootstrap=200)
+    m_eff = _effective_trials(oos_matrix)
+    dsr = deflated_sharpe_ratio(aggregated_selected, trials_effective=m_eff)
+    white = white_reality_check(oos_matrix, n_bootstrap=config.rc_bootstrap, block_len=config.rc_block_len)
+    spa = hansen_spa(oos_matrix, n_bootstrap=config.rc_bootstrap, block_len=config.rc_block_len)
 
     extras = {
         "dsr": {"z_score": dsr.z_score, "p_value": dsr.p_value},
@@ -246,10 +269,11 @@ def _run_cpcv_selection(
     timestamps = base_df["timestamp"].iloc[1:].reset_index(drop=True)
 
     groups = min(config.cpcv_groups, len(returns))
+    embargo_bars = int(config.embargo_days * config.minutes_per_trading_day)
     cpcv_cfg = CPCVConfig(
         n_groups=groups,
         test_group_size=min(config.cpcv_test_groups, max(1, groups - 1)),
-        embargo=int(label_lookahead),
+        embargo=embargo_bars,
         label_lookahead=int(label_lookahead),
         max_splits=cpcv_folds,
         random_state=config.cpcv_random_state,
