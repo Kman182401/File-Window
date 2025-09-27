@@ -1,0 +1,12 @@
+{
+  "cycles": 1,
+  "sharpe_mean": 0.023024650644480036,
+  "sharpe_median": 0.023024650644480036,
+  "sharpe_iqr": 0.0,
+  "sortino_mean": 0.016511206898071205,
+  "calmar_mean": 3.4917591171857842,
+  "max_drawdown_min": -0.010611651117340274,
+  "turnover_mean": 511.0,
+  "expectancy_mean": 4.24268302584557e-06,
+  "slippage_budget_used": 0.0
+}

@@ -192,6 +192,9 @@ def run_wfo(
             per_cycle_records.append(record)
             selected_returns.append(returns.values)
 
+            if dry_run and cycle_idx >= cycles_min:
+                break
+
     if not per_cycle_records:
         raise RuntimeError("No WFO cycles were executed")
 
@@ -349,7 +352,8 @@ def _effective_trials(matrix: np.ndarray) -> float:
         return 1.0
     if matrix.shape[1] == 1:
         return 1.0
-    c = np.corrcoef(matrix.T)
+    c = np.nan_to_num(np.corrcoef(matrix.T), nan=0.0, posinf=0.0, neginf=0.0)
+    np.fill_diagonal(c, 1.0)
     eig = np.linalg.eigvalsh(c)
     denom = np.sum(eig ** 2) + 1e-12
     return float(max(1.0, (eig.sum() ** 2) / denom))
