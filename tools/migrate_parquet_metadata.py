@@ -57,28 +57,36 @@ def build_contract_windows(
     """Return contract metadata windows for a symbol alias as a DataFrame."""
     root = ALIAS_TO_ROOT.get(symbol_alias, symbol_alias)
     exch = ROOT_TO_EXCH[root]
-    chain = _load_contract_chain(ingestor, root, exch)
+    chain_raw = _load_contract_chain(ingestor, root, exch)
 
-    windows: List[ContractWindow] = []
-    for contract in chain:
+    def _to_utc(ts: pd.Timestamp | str) -> pd.Timestamp:
+        ts = pd.Timestamp(ts)
+        if ts.tzinfo is None:
+            return ts.tz_localize("UTC")
+        return ts.tz_convert("UTC")
+
+    contract_entries: List[tuple] = []
+    for contract in chain_raw:
         con_id = getattr(contract, "conId", None)
         if con_id is None:
             continue
 
-        expiry_dt = _parse_last_trade(contract, ingestor)
-        if expiry_dt is None:
+        expiry_val = _parse_last_trade(contract, ingestor)
+        if expiry_val is None:
             continue
 
-        expiry_dt = pd.Timestamp(expiry_dt)
-        if expiry_dt.tzinfo is None:
-            expiry_dt = expiry_dt.tz_localize("UTC")
-        else:
-            expiry_dt = expiry_dt.tz_convert("UTC")
+        expiry_dt = _to_utc(expiry_val)
+        contract_entries.append((contract, con_id, expiry_dt))
 
+    contract_entries.sort(key=lambda entry: entry[2])
+
+    windows: List[ContractWindow] = []
+    prev_end: Optional[pd.Timestamp] = None
+    for contract, con_id, expiry_dt in contract_entries:
         if target_min is not None and expiry_dt < target_min - pad:
             continue
         if target_max is not None and expiry_dt > target_max + pad:
-            break
+            continue
 
         lt_raw = (getattr(contract, "lastTradeDateOrContractMonth", "") or "").strip()
         if len(lt_raw) == 6:
@@ -87,15 +95,14 @@ def build_contract_windows(
             lt_raw = expiry_dt.strftime("%Y%m%d")
 
         if headts_mode == "off":
-            start_ts = (target_min - pad) if target_min is not None else UTC
+            if prev_end is not None:
+                start_ts = prev_end + pd.Timedelta(minutes=1)
+            else:
+                start_ts = (target_min - pad) if target_min is not None else UTC
         else:
             head_ts = _probe_head_timestamp(ingestor, contract)
             if head_ts is not None:
-                start_ts = pd.Timestamp(head_ts)
-                if start_ts.tzinfo is None:
-                    start_ts = start_ts.tz_localize("UTC")
-                else:
-                    start_ts = start_ts.tz_convert("UTC")
+                start_ts = _to_utc(head_ts)
             else:
                 start_ts = (target_min - pad) if target_min is not None else UTC
 
@@ -109,6 +116,7 @@ def build_contract_windows(
                 end_ts=expiry_dt,
             )
         )
+        prev_end = expiry_dt
 
     if not windows:
         return pd.DataFrame(columns=["symbol_root", "exchange", "conId", "expiry", "start_ts", "end_ts"])
@@ -196,16 +204,30 @@ def migrate_symbol(
         return
 
     prefetched: Dict[Path, pd.DataFrame] = {}
-    first_df = read_legacy_file(files[0])
-    prefetched[files[0]] = first_df
-    legacy_min = first_df["timestamp"].min()
+    ts_min_values: List[pd.Timestamp] = []
+    ts_max_values: List[pd.Timestamp] = []
 
-    if files[-1] != files[0]:
-        last_df = read_legacy_file(files[-1])
-        prefetched[files[-1]] = last_df
-        legacy_max = last_df["timestamp"].max()
-    else:
-        legacy_max = first_df["timestamp"].max()
+    for idx, path in enumerate(files):
+        if path.suffix.lower() == ".parquet":
+            ts_col = pd.read_parquet(path, columns=["timestamp"])  # type: ignore[arg-type]
+        else:
+            ts_col = pd.read_csv(path, usecols=["timestamp"])
+
+        ts_series = pd.to_datetime(ts_col["timestamp"], utc=True)
+        if not ts_series.empty:
+            ts_min_values.append(ts_series.min())
+            ts_max_values.append(ts_series.max())
+
+        if idx == 0 or idx == len(files) - 1:
+            df_full = read_legacy_file(path)
+            prefetched[path] = df_full
+
+    if not ts_min_values or not ts_max_values:
+        print(f"[WARN] {symbol}: unable to derive legacy time bounds")
+        return
+
+    legacy_min = min(ts_min_values)
+    legacy_max = max(ts_max_values)
 
     windows_df = build_contract_windows(
         ingestor,
