@@ -3,7 +3,7 @@
 # PLUG-AND-PLAY CONFIGURATION (no edits needed)
 LAMBDA_NAME="OmegaSingularityInference"
 AWS_REGION="us-east-2"
-ACCOUNT_ID="970982543175"
+ACCOUNT_ID="REDACTED_AWS_ACCOUNT_ID"
 ECR_REPO="omega-singularity-lambda"
 IMAGE_TAG="latest"
 IMAGE_URI="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:${IMAGE_TAG}"

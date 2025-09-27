@@ -219,6 +219,8 @@ def run_wfo(
     white = white_reality_check(oos_matrix, n_bootstrap=config.rc_bootstrap, block_len=config.rc_block_len)
     spa = hansen_spa(oos_matrix, n_bootstrap=config.rc_bootstrap, block_len=config.rc_block_len)
 
+    summary["effective_trials"] = m_eff
+
     extras = {
         "dsr": {"z_score": dsr.z_score, "p_value": dsr.p_value, "effective_trials": m_eff},
         "white_rc": {"p_value": white.p_value, "survivors": white.survivors, "strategies": names_order},

@@ -100,3 +100,4 @@ def test_wfo_smoke(tmp_path, monkeypatch):
     assert (artifacts_path / "dsr.json").exists()
     assert selection_capture.get("is_len") == expected_is_len
     assert selection_capture.get("oos_len") == expected_oos_len
+    assert result["summary"].get("effective_trials") == result["dsr"]["effective_trials"]

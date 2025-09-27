@@ -1,7 +1,7 @@
 import requests
 import pandas as pd
 
-API_KEY = "R6gHRWFkPCg34CavO7S9gp1Jjdw5O0lk78XBxN7D"
+API_KEY = "REDACTED_MARKETAUX_API_KEY"
 BASE_URL = "https://api.marketaux.com/v1/news/all"
 
 def fetch_marketaux_news(
