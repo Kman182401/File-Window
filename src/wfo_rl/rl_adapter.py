@@ -159,16 +159,38 @@ class RLAdapter:
     # Internal helpers
     # ------------------------------------------------------------------
     def _build_vec_env(self, make_env_fn: Callable[[], Any], n_envs: int, *, training: bool) -> Any:
-        if DummyVecEnv is None or VecNormalize is None:
+        if DummyVecEnv is None:
             raise RuntimeError("Vectorised environment wrappers unavailable")
         venv = DummyVecEnv([make_env_fn for _ in range(n_envs)])
-        venv = VecNormalize(
-            venv,
+        if not SB3_AVAILABLE or VecNormalize is None:
+            return venv
+
+        norm_kwargs = dict(
             training=training,
             norm_obs=self.spec.vecnormalize_obs,
             norm_reward=self.spec.vecnormalize_reward if training else False,
         )
-        return venv
+        if self.spec.vecnormalize_obs:
+            try:
+                import gymnasium as gym  # delay for optional dependency
+
+                obs_space = venv.observation_space
+                if isinstance(obs_space, gym.spaces.Dict):
+                    box_keys = [key for key, space in obs_space.spaces.items() if isinstance(space, gym.spaces.Box)]
+                    norm_kwargs["norm_obs_keys"] = box_keys
+            except Exception:
+                pass
+
+        try:
+            return VecNormalize(venv, **norm_kwargs)
+        except Exception:
+            # Fallback: attempt VecNormalize without key filtering to avoid silently disabling normalization
+            return VecNormalize(
+                venv,
+                training=training,
+                norm_obs=self.spec.vecnormalize_obs,
+                norm_reward=self.spec.vecnormalize_reward if training else False,
+            )
 
     def _resolve_algo(self):
         mapping = {

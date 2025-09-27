@@ -5,7 +5,8 @@ rl_defaults: &rl_defaults
   vecnormalize_obs: true
   vecnormalize_reward: true
   policy_kwargs: {}
-  algo_kwargs: {}
+  algo_kwargs:
+    device: "cuda"
   use_imitation_warmstart: false
   warmstart_epochs: 3
 
@@ -50,6 +51,7 @@ strategies:
       seed: 123
       algo_kwargs:
         # Stable defaults (SB3 SAC): auto temperature, large buffer, tau=0.005
+        device: "cuda"
         learning_rate: 0.0003
         buffer_size: 1000000
         learning_starts: 100
@@ -72,6 +74,7 @@ strategies:
       <<: *rl_defaults
       algo_kwargs:
         # SB3 TD3 knobs: twin critics + delayed policy update with target smoothing
+        device: "cuda"
         learning_rate: 0.0003  # actor & critic lr
         buffer_size: 1000000
         learning_starts: 100
