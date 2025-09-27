@@ -31,12 +31,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=str, default=str(Path("wfo/wfo_config.yaml")), help="Path to YAML config")
     parser.add_argument("--dry_run", type=int, default=1, help="Set 1 to enforce DRY_RUN/ALLOW_ORDERS guards")
     parser.add_argument("--output", type=str, default=str(Path("artifacts/wfo")), help="Output directory root")
+    parser.add_argument("--rl_fast_smoke", type=int, default=None, help="Override rl_fast_smoke (1/0)")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     symbols = [sym.strip() for sym in args.symbols.split(",") if sym.strip()]
+    rl_fast_smoke = None if args.rl_fast_smoke is None else bool(args.rl_fast_smoke)
     result = run_wfo(
         symbols=symbols,
         is_days=args.is_days,
@@ -49,6 +51,7 @@ def main() -> None:
         config_path=args.config,
         dry_run=bool(args.dry_run),
         output_root=Path(args.output),
+        rl_fast_smoke=rl_fast_smoke,
     )
     print("\nWFO completed: ")
     print(result)

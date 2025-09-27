@@ -24,6 +24,9 @@ def logistic_positions(is_df, oos_df, target_col: str = "label", **kwargs: Any) 
         raise ValueError(f"Target column '{target_col}' missing from IS data")
     X = is_df[feature_cols].to_numpy()
     y = is_df[target_col].to_numpy()
+    missing = [col for col in feature_cols if col not in oos_df.columns]
+    if missing:
+        raise ValueError(f"OOS data missing feature columns: {missing}")
     model = LogisticRegression(max_iter=200, **kwargs)
     model.fit(X, y)
     X_oos = oos_df[feature_cols].to_numpy()

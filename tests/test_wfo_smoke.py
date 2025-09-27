@@ -62,9 +62,9 @@ def test_wfo_smoke(tmp_path, monkeypatch):
     selection_capture = {}
     original_selection = wfo_runner._run_cpcv_selection
 
-    def patched_selection(is_df, *args, **kwargs):
+    def patched_selection(is_df, config, strategies, *args, **kwargs):
         selection_capture.setdefault("is_len", len(is_df))
-        return original_selection(is_df, *args, **kwargs)
+        return original_selection(is_df, config, strategies, *args, **kwargs)
 
     monkeypatch.setattr("wfo.runner._run_cpcv_selection", patched_selection)
 
@@ -92,6 +92,9 @@ def test_wfo_smoke(tmp_path, monkeypatch):
         config_path=Path("wfo/wfo_config.yaml"),
         dry_run=True,
         output_root=out_dir,
+        strategies=[
+            {"name": "ma_fast", "type": "moving_average", "params": {"fast": 10, "slow": 40}}
+        ],
     )
 
     artifacts_path = Path(result["output_dir"])

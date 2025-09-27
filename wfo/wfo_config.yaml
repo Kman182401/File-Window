@@ -8,6 +8,25 @@ cpcv:
   random_state: 7
   max_splits: 20
 dsr_threshold: 0.05
+go_no_go:
+  sharpe_min: 0.8
+  dsr_p_max: 0.05
+  slippage_budget_max: 0.8
+reality_checks:
+  n_bootstrap: 1000
+  block_len_bars: 78
+trading_costs_bps: 0.0
+rl_fast_smoke: false
+rl_fast_overrides:
+  train_timesteps: 2000
+rl_defaults: &rl_defaults
+  train_timesteps: 50000
+  n_envs: 1
+  seed: 42
+  vecnormalize_obs: true
+  vecnormalize_reward: true
+  policy_kwargs: {}
+  algo_kwargs: {}
 strategies:
   - name: ma_fast
     type: moving_average
@@ -24,10 +43,29 @@ strategies:
     params:
       fast: 40
       slow: 120
-go_no_go:
-  sharpe_min: 0.8
-  dsr_p_max: 0.05
-  slippage_budget_max: 0.8
-reality_checks:
-  n_bootstrap: 1000
-  block_len_bars: 78
+  - name: ES_PPO_LSTM
+    type: rl_policy
+    algo: RecurrentPPO
+    policy: MlpLstmPolicy
+    rl:
+      <<: *rl_defaults
+  - name: NQ_SAC
+    type: rl_policy
+    algo: SAC
+    policy: MlpPolicy
+    rl:
+      <<: *rl_defaults
+      train_timesteps: 30000
+      seed: 123
+  - name: GC_TD3
+    type: rl_policy
+    algo: TD3
+    policy: MlpPolicy
+    rl:
+      <<: *rl_defaults
+  - name: ES_LogReg
+    type: supervised
+    model: logistic
+    params:
+      target_col: label
+      C: 0.5

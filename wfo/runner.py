@@ -143,17 +143,33 @@ def run_wfo(
     config_path: Path | str | None,
     dry_run: bool = True,
     output_root: Path | str = Path("artifacts/wfo"),
+    strategies: Optional[Sequence[Any]] = None,
+    rl_fast_smoke: Optional[bool] = None,
+    rl_fast_overrides: Optional[Dict[str, Any]] = None,
+    costs_bps: Optional[float] = None,
 ) -> Dict[str, Any]:
     config = load_config(config_path)
     config.label_lookahead_bars = label_lookahead_bars or config.label_lookahead_bars
     config.embargo_days = embargo_days or config.embargo_days
+    if rl_fast_smoke is not None:
+        config.rl_fast_smoke = bool(rl_fast_smoke)
+    if rl_fast_overrides is not None:
+        config.rl_fast_overrides = rl_fast_overrides
+    if costs_bps is not None:
+        config.trading_costs_bps = costs_bps
 
     data_access = MarketDataAccess()
     now = datetime.utcnow()
     start_lookup = now - timedelta(days=max(is_days, 180) * 2)
 
+    strategy_entries = strategies if strategies is not None else config.strategies
+    strategy_objs: List[StrategyConfig] = [
+        s if isinstance(s, StrategyConfig) else _build_strategy(s)
+        for s in strategy_entries
+    ]
+
     per_cycle_records: List[Dict[str, Any]] = []
-    per_config_returns: Dict[str, List[np.ndarray]] = {s.name: [] for s in config.strategies}
+    per_config_returns: Dict[str, List[np.ndarray]] = {s.name: [] for s in strategy_objs}
     selected_returns: List[np.ndarray] = []
 
     for symbol in symbols:
@@ -184,38 +200,103 @@ def run_wfo(
             if is_df.empty or oos_df.empty:
                 print(f"[WFO] Skipping cycle {cycle_idx} for {symbol}: empty window after gap enforcement")
                 continue
-            selection = _run_cpcv_selection(
-                is_df,
-                config,
-                cpcv_folds=cpcv_folds,
-                label_lookahead=config.label_lookahead_bars,
-                minutes_per_day=config.minutes_per_trading_day,
-            )
-            if not selection:
-                print(f"[WFO] Skipping cycle {cycle_idx} for {symbol}: no strategies passed CPCV selection")
-                continue
-            best = selection[0]
-            for candidate in selection:
-                strat_returns = _strategy_returns(oos_df, candidate["strategy"])
-                per_config_returns.setdefault(candidate["strategy"].name, []).append(strat_returns.values)
 
-            equity = _strategy_equity(oos_df, best["strategy"])
-            returns = _strategy_returns(oos_df, best["strategy"])
+            non_rl = [s for s in strategy_objs if s.type not in {"rl_policy", "supervised"}]
+            selection: List[Dict[str, Any]] = []
+            if non_rl:
+                selection = _run_cpcv_selection(
+                    is_df,
+                    config,
+                    non_rl,
+                    cpcv_folds=cpcv_folds,
+                    label_lookahead=config.label_lookahead_bars,
+                )
+                if selection:
+                    best = selection[0]
+                    for candidate in selection:
+                        candidate_returns = _strategy_returns(oos_df, candidate["strategy"])
+                        per_config_returns.setdefault(candidate["strategy"].name, []).append(candidate_returns.values)
+                        if candidate["strategy"].name == best["strategy"].name:
+                            record = _build_cycle_record(
+                                cycle_idx,
+                                symbol,
+                                candidate["strategy"].name,
+                                candidate_returns.values,
+                                _strategy_signals(oos_df, candidate["strategy"]).values,
+                            )
+                            per_cycle_records.append(record)
+                            selected_returns.append(candidate_returns.values)
+                else:
+                    print(f"[WFO] CPCV produced no results for cycle {cycle_idx} {symbol}")
 
-            record = {
-                "cycle": cycle_idx,
-                "symbol": symbol,
-                "config": best["strategy"].name,
-                "sharpe": sharpe_ratio(returns.values),
-                "sortino": sortino_ratio(returns.values),
-                "max_drawdown": max_drawdown(equity.values),
-                "calmar": calmar_ratio(returns.values, equity.values),
-                "turnover": turnover(_strategy_signals(oos_df, best["strategy"]).values),
-                "expectancy": expectancy(returns.values),
-                "slippage_usage": 0.0,
-            }
-            per_cycle_records.append(record)
-            selected_returns.append(returns.values)
+            rl_strats = [s for s in strategy_objs if s.type == "rl_policy"]
+            for rl_strat in rl_strats:
+                rl_cfg = dict(rl_strat.rl or {})
+                if config.rl_fast_smoke and config.rl_fast_overrides:
+                    rl_cfg.update(config.rl_fast_overrides)
+                spec = RLSpec(
+                    algo=rl_strat.algo or "RecurrentPPO",
+                    policy=rl_strat.policy or ("MlpLstmPolicy" if (rl_strat.algo or "").lower().startswith("recurrent") else "MlpPolicy"),
+                    train_timesteps=int(rl_cfg.get("train_timesteps", 50_000)),
+                    n_envs=int(rl_cfg.get("n_envs", 1)),
+                    seed=int(rl_cfg.get("seed", 42)),
+                    vecnormalize_obs=bool(rl_cfg.get("vecnormalize_obs", True)),
+                    vecnormalize_reward=bool(rl_cfg.get("vecnormalize_reward", True)),
+                    policy_kwargs=rl_cfg.get("policy_kwargs") or {},
+                    algo_kwargs=rl_cfg.get("algo_kwargs") or {},
+                )
+                adapter = RLAdapter(spec, fast_smoke=config.rl_fast_smoke)
+                is_env_fn = make_env_from_df(is_df, costs_bps=config.trading_costs_bps)
+                oos_env_fn = make_env_from_df(oos_df, costs_bps=config.trading_costs_bps)
+                setattr(is_env_fn, "_len", len(is_df))
+                setattr(oos_env_fn, "_len", len(oos_df))
+                try:
+                    model, vecnorm = adapter.fit_on_is(is_env_fn, str(output_root))
+                    rl_returns = adapter.score_on_oos(model, oos_env_fn, vecnorm)
+                except RuntimeError as exc:  # pragma: no cover - dependency guard
+                    print(f"[WFO] Skipping RL strategy {rl_strat.name}: {exc}")
+                    continue
+                per_config_returns.setdefault(rl_strat.name, []).append(rl_returns)
+                per_cycle_records.append(
+                    _build_cycle_record(
+                        cycle_idx,
+                        symbol,
+                        rl_strat.name,
+                        rl_returns,
+                        None,
+                    )
+                )
+                if not selection:
+                    selected_returns.append(rl_returns)
+
+            sup_strats = [s for s in strategy_objs if s.type == "supervised" and s.model == "logistic"]
+            for sup_strat in sup_strats:
+                params = sup_strat.params or {}
+                target_col = params.get("target_col", "label")
+                if target_col not in is_df.columns:
+                    print(f"[WFO] Logistic baseline skipped (missing target '{target_col}' in IS data)")
+                    continue
+                try:
+                    positions = logistic_positions(is_df, oos_df, **params)
+                except Exception as exc:  # pragma: no cover - guard path
+                    print(f"[WFO] Logistic baseline failed: {exc}")
+                    continue
+                returns_series = oos_df.get("returns")
+                if returns_series is None:
+                    returns_series = oos_df["close"].pct_change().fillna(0.0)
+                logistic_returns = positions * returns_series.to_numpy(dtype=float)
+                per_config_returns.setdefault(sup_strat.name, []).append(logistic_returns)
+                per_cycle_records.append(
+                    _build_cycle_record(
+                        cycle_idx,
+                        symbol,
+                        sup_strat.name,
+                        logistic_returns,
+                        positions,
+                    )
+                )
+                if not selection and not rl_strats:
+                    selected_returns.append(logistic_returns)
 
             if dry_run and cycle_idx >= cycles_min:
                 break
@@ -226,7 +307,11 @@ def run_wfo(
     output_dir = Path(output_root) / datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     summary = summarise_cycles(per_cycle_records)
 
-    aggregated_selected = np.concatenate(selected_returns) if selected_returns else np.zeros(1)
+    if selected_returns:
+        aggregated_selected = np.concatenate(selected_returns)
+    else:
+        first_non_empty = next((vals for vals in per_config_returns.values() if vals), [np.zeros(1)])
+        aggregated_selected = np.concatenate(first_non_empty) if first_non_empty else np.zeros(1)
 
     matrix_columns = []
     names_order = []
@@ -329,7 +414,7 @@ def _run_cpcv_selection(
         if not oos_returns:
             continue
         stacked = np.concatenate(oos_returns)
-        dsr = deflated_sharpe_ratio(stacked, trials_effective=len(config.strategies))
+        dsr = deflated_sharpe_ratio(stacked, trials_effective=len(strategies))
         results.append(
             {
                 "strategy": strat,
@@ -345,8 +430,9 @@ def _run_cpcv_selection(
 
 def _strategy_returns(df: pd.DataFrame, strategy: StrategyConfig) -> pd.Series:
     if strategy.type == "moving_average":
-        fast = strategy.params.get("fast", 10)
-        slow = strategy.params.get("slow", 40)
+        params = strategy.params or {}
+        fast = params.get("fast", 10)
+        slow = params.get("slow", 40)
         tmp = df[["timestamp", "close"]].copy()
         tmp["fast"] = tmp["close"].rolling(fast, min_periods=fast).mean()
         tmp["slow"] = tmp["close"].rolling(slow, min_periods=slow).mean()
@@ -366,8 +452,9 @@ def _strategy_equity(df: pd.DataFrame, strategy: StrategyConfig) -> pd.Series:
 
 def _strategy_signals(df: pd.DataFrame, strategy: StrategyConfig) -> pd.Series:
     if strategy.type == "moving_average":
-        fast = strategy.params.get("fast", 10)
-        slow = strategy.params.get("slow", 40)
+        params = strategy.params or {}
+        fast = params.get("fast", 10)
+        slow = params.get("slow", 40)
         tmp = df[["close"]].copy()
         tmp["fast"] = tmp["close"].rolling(fast, min_periods=fast).mean()
         tmp["slow"] = tmp["close"].rolling(slow, min_periods=slow).mean()
@@ -396,6 +483,30 @@ def _evaluate_go_no_go(summary: Dict[str, Any], dsr, thresholds: Dict[str, Any])
     dsr_ok = dsr_p_max is None or dsr.p_value <= dsr_p_max
     slippage_ok = slippage_max is None or summary.get("slippage_budget_used", 0) <= slippage_max
     return bool(sharpe_ok and dsr_ok and slippage_ok)
+
+
+def _build_cycle_record(
+    cycle_idx: int,
+    symbol: str,
+    strategy_name: str,
+    returns: np.ndarray,
+    signals: Optional[np.ndarray],
+) -> Dict[str, Any]:
+    returns = np.asarray(returns, dtype=float)
+    equity = np.cumprod(1 + returns)
+    turnover_val = turnover(np.asarray(signals, dtype=float)) if signals is not None else 0.0
+    return {
+        "cycle": cycle_idx,
+        "symbol": symbol,
+        "config": strategy_name,
+        "sharpe": sharpe_ratio(returns),
+        "sortino": sortino_ratio(returns),
+        "max_drawdown": max_drawdown(equity),
+        "calmar": calmar_ratio(returns, equity),
+        "turnover": turnover_val,
+        "expectancy": expectancy(returns),
+        "slippage_usage": 0.0,
+    }
 
 
 __all__ = ["run_wfo", "load_config"]
