@@ -6,6 +6,8 @@ from typing import Any, Callable, Dict, Optional
 
 import numpy as np
 import pandas as pd
+import gymnasium as gym
+from gymnasium.wrappers import FlattenObservation
 
 from enhanced_trading_environment import EnhancedTradingEnvironment, EnhancedTradingConfig
 
@@ -53,6 +55,9 @@ def make_env_from_df(
             use_hindsight_in_training=bool(reward_kwargs.get("use_hindsight_in_training", False) and not eval_mode),
             eval_mode=eval_mode,
         )
+        # Flatten dict observations so SB3 policies and VecNormalize see a single Box space.
+        if isinstance(env.observation_space, gym.spaces.Dict):
+            env = FlattenObservation(env)
         if eval_mode:
             env.set_eval_mode(True)
         else:
