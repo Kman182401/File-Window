@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from importlib import metadata
 from pathlib import Path
+from collections import defaultdict
 from typing import Any, Dict, List, Sequence
 
 import numpy as np
@@ -31,6 +32,7 @@ from .reality_checks import white_reality_check, hansen_spa
 from .rl_adapter import RLAdapter, RLSpec, SB3_AVAILABLE
 from .labeling import ensure_forward_label
 from .supervised_baselines import logistic_positions
+from .utils import enable_determinism
 
 
 @dataclass
@@ -64,6 +66,8 @@ class RunnerConfig:
     rl_fast_smoke: bool = False
     rl_fast_overrides: Optional[Dict[str, Any]] = None
     trading_costs_bps: float = 0.0
+    deterministic_debug: bool = False
+    deterministic_seed: int = 42
 
 
 def load_config(path: Path | str | None) -> RunnerConfig:
@@ -91,6 +95,8 @@ def load_config(path: Path | str | None) -> RunnerConfig:
         rl_fast_smoke=bool(defaults.get("rl_fast_smoke", False)),
         rl_fast_overrides=defaults.get("rl_fast_overrides"),
         trading_costs_bps=float(defaults.get("trading_costs_bps", 0.0)),
+        deterministic_debug=bool(defaults.get("deterministic_debug", False)),
+        deterministic_seed=int(defaults.get("deterministic_seed", 42)),
     )
 
 
@@ -124,6 +130,8 @@ def _default_yaml() -> Dict[str, Any]:
             "n_bootstrap": 1000,
             "block_len_bars": 78,
         },
+        "deterministic_debug": False,
+        "deterministic_seed": 42,
     }
 
 
@@ -178,6 +186,12 @@ def run_wfo(
         )
         config.rc_block_len = 60
 
+    if config.deterministic_debug:
+        print(
+            "[WFO] Deterministic debug mode enabled (may reduce performance)."
+        )
+        enable_determinism(config.deterministic_seed)
+
     data_access = MarketDataAccess()
     now = datetime.utcnow()
     start_lookup = now - timedelta(days=max(is_days, 180) * 2)
@@ -192,6 +206,7 @@ def run_wfo(
     per_config_returns: Dict[str, List[np.ndarray]] = {s.name: [] for s in strategy_objs}
     selected_returns: List[np.ndarray] = []
     data_hashes: Dict[str, str] = {}
+    rl_vecnorm_paths: Dict[str, List[str]] = defaultdict(list)
 
     for symbol in symbols:
         minutes_lookup = config.session_minutes or {}
@@ -303,8 +318,10 @@ def run_wfo(
                 )
                 setattr(is_env_fn, "_len", len(is_df))
                 setattr(oos_env_fn, "_len", len(oos_df))
+                strategy_dir = Path(output_root) / symbol / rl_strat.name / f"cycle_{cycle_idx}"
+                strategy_dir.mkdir(parents=True, exist_ok=True)
                 try:
-                    model, vecnorm_path = adapter.fit_on_is(is_env_fn, str(output_root))
+                    model, vecnorm_path = adapter.fit_on_is(is_env_fn, str(strategy_dir))
                     rl_returns = adapter.score_on_oos(model, oos_env_fn, vecnorm_path)
                 except RuntimeError as exc:  # pragma: no cover - dependency guard
                     print(f"[WFO] Skipping RL strategy {rl_strat.name}: {exc}")
@@ -321,6 +338,8 @@ def run_wfo(
                 )
                 if not selection:
                     selected_returns.append(rl_returns)
+                if vecnorm_path:
+                    rl_vecnorm_paths[rl_strat.name].append(str(Path(vecnorm_path)))
 
             sup_strats = [s for s in strategy_objs if s.type == "supervised" and s.model == "logistic"]
             for sup_strat in sup_strats:
@@ -405,6 +424,7 @@ def run_wfo(
             strat.name: (strat.rl.get("seed") if strat.rl else None)
             for strat in strategy_objs
         },
+        "vecnormalize_stats": {k: v for k, v in rl_vecnorm_paths.items()},
     }
     extras["run_metadata"] = metadata_payload
 

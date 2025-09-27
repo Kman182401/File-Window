@@ -28,6 +28,7 @@ from wfo.metrics import deflated_sharpe_ratio, sharpe_ratio
 from wfo.purging import PurgeConfig, apply_purge_embargo
 from wfo.labeling import ensure_forward_label
 from wfo_rl import RLAdapter, RLSpec, make_env_from_df, logistic_positions
+from wfo.utils import enable_determinism
 
 logger = logging.getLogger(__name__)
 
@@ -626,6 +627,18 @@ def _coerce_strategy_entry(entry: Any) -> Dict[str, Any]:
     raise TypeError(f"Unsupported strategy entry type: {type(entry)!r}")
 
 
+def _effective_trials(matrix: np.ndarray) -> float:
+    if matrix.ndim != 2 or matrix.shape[1] == 0:
+        return 1.0
+    if matrix.shape[1] == 1:
+        return 1.0
+    corr = np.nan_to_num(np.corrcoef(matrix.T), nan=0.0, posinf=0.0, neginf=0.0)
+    np.fill_diagonal(corr, 1.0)
+    eigvals = np.linalg.eigvalsh(corr)
+    denom = np.sum(eigvals ** 2) + 1e-12
+    return float(max(1.0, (eigvals.sum() ** 2) / denom))
+
+
 def select_strategies_with_cpcv(
     dataset: pd.DataFrame,
     strategies: Iterable[Any],
@@ -653,6 +666,10 @@ def select_strategies_with_cpcv(
     default_minutes = int(cpcv_config.get("minutes_per_trading_day", 390))
     minutes_per_day = int(session_minutes.get(symbol, session_minutes.get("default", default_minutes)))
 
+    if cpcv_config.get("deterministic_debug"):
+        logger.info("CPCV deterministic debug enabled (training may slow down)")
+        enable_determinism(int(cpcv_config.get("deterministic_seed", 42)))
+
     ensure_forward_label(base_df, horizon=max(1, label_lookahead))
     embargo_bars = int(round(embargo_days * minutes_per_day))
 
@@ -675,7 +692,8 @@ def select_strategies_with_cpcv(
     costs_bps = float(cpcv_config.get("costs_bps", 0.0))
 
     idx = np.arange(len(base_df))
-    shortlist: list[Dict[str, Any]] = []
+    evaluated: list[Dict[str, Any]] = []
+    aggregated_matrix_inputs: Dict[str, np.ndarray] = {}
 
     for entry in strategies:
         strat = _coerce_strategy_entry(entry)
@@ -716,8 +734,10 @@ def select_strategies_with_cpcv(
                 adapter = RLAdapter(spec, fast_smoke=rl_fast_smoke)
                 is_env_fn = make_env_from_df(is_df, costs_bps=costs_bps, reward_kwargs=reward_kwargs, eval_mode=False)
                 oos_env_fn = make_env_from_df(oos_df, costs_bps=costs_bps, reward_kwargs=reward_kwargs, eval_mode=True)
+                fold_idx = len(fold_returns) + 1
+                fold_dir = log_root / name / f"fold_{fold_idx}"
                 try:
-                    model, vecnorm_path = adapter.fit_on_is(is_env_fn, str(log_root / name))
+                    model, vecnorm_path = adapter.fit_on_is(is_env_fn, str(fold_dir))
                     returns = adapter.score_on_oos(model, oos_env_fn, vecnorm_path)
                 except RuntimeError as exc:
                     logger.warning(
@@ -753,18 +773,39 @@ def select_strategies_with_cpcv(
             continue
 
         aggregated = np.concatenate(fold_returns)
-        dsr = deflated_sharpe_ratio(aggregated, trials_effective=len(strategies))
-        if dsr.p_value >= dsr_threshold:
-            logger.info("[CPCV] Strategy %s filtered by DSR (p=%.4f)", name, dsr.p_value)
-            continue
-
-        shortlist.append(
+        aggregated_matrix_inputs[name] = aggregated
+        evaluated.append(
             {
                 "name": name,
                 "strategy": entry,
                 "median_sharpe": float(np.median(fold_sharpes)),
-                "sharpe_scores": [float(s) for s in fold_sharpes],
-                "dsr": {"z_score": dsr.z_score, "p_value": dsr.p_value},
+                "fold_sharpes": fold_sharpes,
+                "aggregated": aggregated,
+            }
+        )
+
+    if not evaluated:
+        return []
+
+    if aggregated_matrix_inputs:
+        matrix = np.column_stack(list(aggregated_matrix_inputs.values()))
+        trials_effective = _effective_trials(matrix)
+    else:
+        trials_effective = 1.0
+
+    shortlist: list[Dict[str, Any]] = []
+    for record in evaluated:
+        dsr = deflated_sharpe_ratio(record["aggregated"], trials_effective=trials_effective)
+        if dsr.p_value >= dsr_threshold:
+            logger.info("[CPCV] Strategy %s filtered by DSR (p=%.4f)", record["name"], dsr.p_value)
+            continue
+        shortlist.append(
+            {
+                "name": record["name"],
+                "strategy": record["strategy"],
+                "median_sharpe": record["median_sharpe"],
+                "sharpe_scores": [float(s) for s in record["fold_sharpes"]],
+                "dsr": {"z_score": dsr.z_score, "p_value": dsr.p_value, "effective_trials": trials_effective},
             }
         )
 

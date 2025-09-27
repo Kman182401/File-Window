@@ -5,6 +5,8 @@ session_minutes:
   ES: 390
   NQ: 390
   GC: 360
+deterministic_debug: false
+deterministic_seed: 42
 label_lookahead_bars: 1
 embargo_days: 1
 cpcv:
@@ -63,6 +65,7 @@ strategies:
       train_timesteps: 30000
       seed: 123
       algo_kwargs:
+        # Stable SB3 SAC defaults: auto entropy, large buffer, tau=0.005
         learning_rate: 0.0003
         buffer_size: 1000000
         learning_starts: 100
@@ -79,6 +82,7 @@ strategies:
     rl:
       <<: *rl_defaults
       algo_kwargs:
+        # SB3 TD3 knobs: twin critics, delayed policy, target smoothing
         learning_rate: 0.0003
         buffer_size: 1000000
         learning_starts: 100

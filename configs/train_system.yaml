@@ -13,6 +13,9 @@ datasets:
   minute_bars_path: data/minute_bars
   lookback_days: 30
 
+deterministic_debug: false
+deterministic_seed: 42
+
 session_minutes:
   default: 390
   ES: 390
@@ -43,6 +46,7 @@ strategies:
       train_timesteps: 30000
       seed: 123
       algo_kwargs:
+        # Stable defaults (SB3 SAC): auto temperature, large buffer, tau=0.005
         learning_rate: 0.0003
         buffer_size: 1000000
         learning_starts: 100
@@ -64,6 +68,7 @@ strategies:
     rl:
       <<: *rl_defaults
       algo_kwargs:
+        # SB3 TD3 knobs: twin critics + delayed policy update with target smoothing
         learning_rate: 0.0003  # actor & critic lr
         buffer_size: 1000000
         learning_starts: 100

@@ -43,6 +43,7 @@ os.environ.setdefault("DRY_RUN", "1")
 os.environ.setdefault("ALLOW_ORDERS", "0")
 
 from wfo.runner import run_wfo  # noqa: E402
+from wfo.utils import enable_determinism  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -124,6 +125,10 @@ def cmd_train_offline(args: argparse.Namespace) -> None:
     minute_path = Path(data_cfg.get("minute_bars_path", "data/minute_bars"))
     df = ensure_returns(load_minute_data(minute_path, args.symbol, data_cfg.get("lookback_days", 5)))
 
+    if config.get("deterministic_debug"):
+        logger.info("Deterministic debug enabled (training may slow down)")
+        enable_determinism(int(config.get("deterministic_seed", 42)))
+
     rl_defaults = config.get("rl_defaults", {})
     output_root = Path(args.output_dir or "artifacts/offline_train") / datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     output_root.mkdir(parents=True, exist_ok=True)
@@ -189,6 +194,8 @@ def cmd_select_with_cpcv(args: argparse.Namespace) -> None:
     cpcv_cfg.setdefault("dsr_threshold", 0.05)
     cpcv_cfg.setdefault("session_minutes", config.get("session_minutes", {}))
     cpcv_cfg.setdefault("symbol", args.symbol)
+    cpcv_cfg.setdefault("deterministic_debug", config.get("deterministic_debug", False))
+    cpcv_cfg.setdefault("deterministic_seed", config.get("deterministic_seed", 42))
     shortlist = select_strategies_with_cpcv(df, config.get("strategies", []), cpcv_cfg)
 
     output_path = Path(args.output or Path(cpcv_cfg["log_dir"]) / "shortlist.json")
@@ -198,6 +205,11 @@ def cmd_select_with_cpcv(args: argparse.Namespace) -> None:
 
 
 def cmd_validate_wfo(args: argparse.Namespace) -> None:
+    config_preview = load_yaml(args.config) if args.config else {}
+    if config_preview.get("deterministic_debug"):
+        logger.info("Deterministic debug enabled (training may slow down)")
+        enable_determinism(int(config_preview.get("deterministic_seed", 42)))
+
     config_path = Path(args.config) if args.config else None
     symbols = args.symbols.split(",") if isinstance(args.symbols, str) else args.symbols
     result = run_wfo(
@@ -219,6 +231,9 @@ def cmd_validate_wfo(args: argparse.Namespace) -> None:
 
 def cmd_paper_and_shadow(args: argparse.Namespace) -> None:
     config = load_yaml(args.config)
+    if config.get("deterministic_debug"):
+        logger.info("Deterministic debug enabled (training may slow down)")
+        enable_determinism(int(config.get("deterministic_seed", 42)))
     data_cfg = config.get("datasets", {})
     minute_path = Path(data_cfg.get("minute_bars_path", "data/minute_bars"))
     df = ensure_returns(load_minute_data(minute_path, args.symbol, data_cfg.get("lookback_days", 5)))
