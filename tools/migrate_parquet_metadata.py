@@ -46,7 +46,14 @@ class ContractWindow:
     end_ts: pd.Timestamp
 
 
-def build_contract_windows(ingestor: IBKRIngestor, symbol_alias: str) -> pd.DataFrame:
+def build_contract_windows(
+    ingestor: IBKRIngestor,
+    symbol_alias: str,
+    headts_mode: str = "auto",
+    target_min: Optional[pd.Timestamp] = None,
+    target_max: Optional[pd.Timestamp] = None,
+    pad: pd.Timedelta = pd.Timedelta(days=7),
+) -> pd.DataFrame:
     """Return contract metadata windows for a symbol alias as a DataFrame."""
     root = ALIAS_TO_ROOT.get(symbol_alias, symbol_alias)
     exch = ROOT_TO_EXCH[root]
@@ -62,26 +69,35 @@ def build_contract_windows(ingestor: IBKRIngestor, symbol_alias: str) -> pd.Data
         if expiry_dt is None:
             continue
 
+        expiry_dt = pd.Timestamp(expiry_dt)
+        if expiry_dt.tzinfo is None:
+            expiry_dt = expiry_dt.tz_localize("UTC")
+        else:
+            expiry_dt = expiry_dt.tz_convert("UTC")
+
+        if target_min is not None and expiry_dt < target_min - pad:
+            continue
+        if target_max is not None and expiry_dt > target_max + pad:
+            break
+
         lt_raw = (getattr(contract, "lastTradeDateOrContractMonth", "") or "").strip()
         if len(lt_raw) == 6:
             lt_raw = f"{lt_raw}01"
         if len(lt_raw) != 8:
             lt_raw = expiry_dt.strftime("%Y%m%d")
 
-        head_ts = _probe_head_timestamp(ingestor, contract)
-        if head_ts is not None:
-            start_ts = pd.Timestamp(head_ts)
-            if start_ts.tzinfo is None:
-                start_ts = start_ts.tz_localize("UTC")
+        if headts_mode == "off":
+            start_ts = (target_min - pad) if target_min is not None else UTC
+        else:
+            head_ts = _probe_head_timestamp(ingestor, contract)
+            if head_ts is not None:
+                start_ts = pd.Timestamp(head_ts)
+                if start_ts.tzinfo is None:
+                    start_ts = start_ts.tz_localize("UTC")
+                else:
+                    start_ts = start_ts.tz_convert("UTC")
             else:
-                start_ts = start_ts.tz_convert("UTC")
-        else:
-            start_ts = UTC
-        end_ts = pd.Timestamp(expiry_dt)
-        if end_ts.tzinfo is None:
-            end_ts = end_ts.tz_localize("UTC")
-        else:
-            end_ts = end_ts.tz_convert("UTC")
+                start_ts = (target_min - pad) if target_min is not None else UTC
 
         windows.append(
             ContractWindow(
@@ -90,7 +106,7 @@ def build_contract_windows(ingestor: IBKRIngestor, symbol_alias: str) -> pd.Data
                 conId=con_id,
                 expiry=lt_raw,
                 start_ts=start_ts,
-                end_ts=end_ts,
+                end_ts=expiry_dt,
             )
         )
 
@@ -161,21 +177,54 @@ def read_legacy_file(path: Path) -> pd.DataFrame:
     return df
 
 
-def migrate_symbol(legacy_root: Path, output_root: Path, ingestor: IBKRIngestor, symbol: str) -> None:
+def migrate_symbol(
+    legacy_root: Path,
+    output_root: Path,
+    ingestor: IBKRIngestor,
+    symbol: str,
+    headts_mode: str,
+    pad: pd.Timedelta,
+) -> None:
     symbol_dir = legacy_root / f"symbol={symbol}"
     if not symbol_dir.exists():
         print(f"[SKIP] {symbol}: no legacy directory")
         return
 
-    windows_df = build_contract_windows(ingestor, symbol)
     files = sorted(symbol_dir.glob("**/bars.parquet")) + sorted(symbol_dir.glob("**/bars.csv"))
     if not files:
         print(f"[WARN] {symbol}: no legacy files found")
         return
 
+    prefetched: Dict[Path, pd.DataFrame] = {}
+    first_df = read_legacy_file(files[0])
+    prefetched[files[0]] = first_df
+    legacy_min = first_df["timestamp"].min()
+
+    if files[-1] != files[0]:
+        last_df = read_legacy_file(files[-1])
+        prefetched[files[-1]] = last_df
+        legacy_max = last_df["timestamp"].max()
+    else:
+        legacy_max = first_df["timestamp"].max()
+
+    windows_df = build_contract_windows(
+        ingestor,
+        symbol,
+        headts_mode=headts_mode,
+        target_min=legacy_min,
+        target_max=legacy_max,
+        pad=pad,
+    )
+
+    if windows_df.empty:
+        print(f"[WARN] {symbol}: no contract windows overlap legacy data")
+        return
+
     enriched_frames: List[pd.DataFrame] = []
     for path in tqdm(files, desc=f"{symbol} files"):
-        df = read_legacy_file(path)
+        df = prefetched.pop(path, None)
+        if df is None:
+            df = read_legacy_file(path)
         if df.empty:
             continue
         meta = attach_metadata(df, windows_df)
@@ -224,15 +273,18 @@ def main() -> None:
     parser.add_argument("--host", default=None)
     parser.add_argument("--port", default=None, type=int)
     parser.add_argument("--client-id", default=9010, type=int)
+    parser.add_argument("--headts", choices=["off", "auto", "on"], default="auto")
     args = parser.parse_args()
 
     legacy_root = args.legacy_root.expanduser()
     output_root = args.output_root.expanduser()
 
+    pad = pd.Timedelta(days=7)
+
     ib = IBKRIngestor(host=args.host, port=args.port, clientId=args.client_id)
     try:
         for symbol in IBKR_SYMBOLS:
-            migrate_symbol(legacy_root, output_root, ib, symbol)
+            migrate_symbol(legacy_root, output_root, ib, symbol, args.headts, pad)
     finally:
         ib.disconnect()
 
