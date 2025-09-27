@@ -1,0 +1,30 @@
+trading_days_per_year: 252
+minutes_per_trading_day: 390
+label_lookahead_bars: 1
+embargo_days: 1
+cpcv:
+  n_groups: 12
+  test_group_size: 2
+  random_state: 7
+  max_splits: 20
+dsr_threshold: 0.05
+strategies:
+  - name: ma_fast
+    type: moving_average
+    params:
+      fast: 10
+      slow: 40
+  - name: ma_medium
+    type: moving_average
+    params:
+      fast: 20
+      slow: 60
+  - name: ma_slow
+    type: moving_average
+    params:
+      fast: 40
+      slow: 120
+go_no_go:
+  sharpe_min: 0.8
+  dsr_p_max: 0.05
+  slippage_budget_max: 0.8

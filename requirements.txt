@@ -36,6 +36,10 @@ aiohttp==3.8.6
 # Data Processing
 bottleneck==1.3.7
 numexpr==2.8.7
+scipy==1.11.3
+statsmodels==0.14.0
+matplotlib==3.7.3
+PyYAML==6.0.1
 # Testing & Development
 pytest==7.4.3
 pytest-asyncio==0.21.1
