@@ -1,7 +1,9 @@
+from pathlib import Path
+from datetime import datetime
+
 import numpy as np
 import pandas as pd
 import pytest
-from datetime import datetime
 
 try:  # pragma: no cover - optional heavy deps
     import torch  # noqa: F401
@@ -14,7 +16,10 @@ if TORCH_AVAILABLE:
     from wfo_rl import RLAdapter, RLSpec, make_env_from_df
 
 
-@pytest.mark.skipif(not TORCH_AVAILABLE, reason="torch/stable-baselines3 not available")
+@pytest.mark.skipif(
+    not TORCH_AVAILABLE,
+    reason="torch/stable-baselines3 not available (pip install gymnasium stable-baselines3 sb3-contrib)",
+)
 def test_rl_smoke(tmp_path):
     bars = 390
     idx = pd.date_range(end=datetime.utcnow(), periods=bars, freq="1min")
@@ -43,8 +48,8 @@ def test_rl_smoke(tmp_path):
     train_env = make_env_from_df(train_df, costs_bps=0.2, reward_kwargs=reward_kwargs, eval_mode=False)
     oos_env = make_env_from_df(test_df, costs_bps=0.2, reward_kwargs=reward_kwargs, eval_mode=True)
 
-    model, vecnorm = adapter.fit_on_is(train_env, str(tmp_path))
-    returns = adapter.score_on_oos(model, oos_env, vecnorm)
+    model, vecnorm_path = adapter.fit_on_is(train_env, str(tmp_path))
+    returns = adapter.score_on_oos(model, oos_env, vecnorm_path)
 
     assert returns.size > 0
     assert np.isfinite(returns).all()
@@ -52,3 +57,5 @@ def test_rl_smoke(tmp_path):
     if hasattr(model, "save"):
         model.save(str(tmp_path / "policy.zip"))
         assert (tmp_path / "policy.zip").exists()
+    if vecnorm_path:
+        assert Path(vecnorm_path).exists()

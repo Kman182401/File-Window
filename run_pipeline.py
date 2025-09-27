@@ -158,11 +158,9 @@ def cmd_train_offline(args: argparse.Namespace) -> None:
         strategy_dir = output_root / strat.get("name", spec.algo)
         strategy_dir.mkdir(parents=True, exist_ok=True)
         try:
-            model, vecnorm = adapter.fit_on_is(env_fn, str(strategy_dir))
+            model, vecnorm_path = adapter.fit_on_is(env_fn, str(strategy_dir))
             if hasattr(model, "save"):
                 model.save(str(strategy_dir / "policy.zip"))
-            if vecnorm is not None and hasattr(vecnorm, "save"):
-                vecnorm.save(str(strategy_dir / "vecnorm.zip"))
             save_metadata(
                 strategy_dir / "metadata.json",
                 {
@@ -170,6 +168,7 @@ def cmd_train_offline(args: argparse.Namespace) -> None:
                     "rl": rl_cfg,
                     "reward": reward_kwargs,
                     "trained_at": datetime.utcnow().isoformat(),
+                    "vecnormalize_stats": str(vecnorm_path) if vecnorm_path else None,
                 },
             )
             logger.info("Offline training completed for %s", strat.get("name", spec.algo))

@@ -233,7 +233,10 @@ def run_wfo(
             rl_strats = [s for s in strategy_objs if s.type == "rl_policy"]
             for rl_strat in rl_strats:
                 if not SB3_AVAILABLE:
-                    print(f"[WFO] Skipping RL strategy {rl_strat.name}: RL libraries unavailable")
+                    print(
+                        f"[WFO] Skipping RL strategy {rl_strat.name}: RL libraries unavailable. "
+                        "Install gymnasium, stable-baselines3, sb3-contrib to enable RL paths."
+                    )
                     continue
                 try:
                     from wfo_rl.rl_env_builder import make_env_from_df  # lazy import to avoid hard dependency
@@ -274,8 +277,8 @@ def run_wfo(
                 setattr(is_env_fn, "_len", len(is_df))
                 setattr(oos_env_fn, "_len", len(oos_df))
                 try:
-                    model, vecnorm = adapter.fit_on_is(is_env_fn, str(output_root))
-                    rl_returns = adapter.score_on_oos(model, oos_env_fn, vecnorm)
+                    model, vecnorm_path = adapter.fit_on_is(is_env_fn, str(output_root))
+                    rl_returns = adapter.score_on_oos(model, oos_env_fn, vecnorm_path)
                 except RuntimeError as exc:  # pragma: no cover - dependency guard
                     print(f"[WFO] Skipping RL strategy {rl_strat.name}: {exc}")
                     continue

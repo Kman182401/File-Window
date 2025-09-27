@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Optional, Tuple
+from pathlib import Path
+from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 import numpy as np
 
@@ -58,11 +59,13 @@ class RLAdapter:
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
-    def fit_on_is(self, make_env_fn: Callable[[], Any], log_dir: str) -> Tuple[Any, Optional[Any]]:
+    def fit_on_is(self, make_env_fn: Callable[[], Any], log_dir: str) -> Tuple[Any, Optional[Path]]:
         """Train the requested algorithm on the in-sample data."""
         if not SB3_AVAILABLE:
             raise RuntimeError("Stable-Baselines3 not available for RL training")
 
+        log_root = Path(log_dir)
+        log_root.mkdir(parents=True, exist_ok=True)
         steps = self.spec.train_timesteps
         if self.fast:
             steps = min(steps, 1_000)
@@ -82,16 +85,18 @@ class RLAdapter:
         self._maybe_run_behavior_cloning(model, make_env_fn)
         model.learn(total_timesteps=steps, progress_bar=False)
 
-        vecnorm = vec_env if isinstance(vec_env, VecNormalize) else None
-        if vecnorm is not None:
-            vecnorm.training = False
-        return model, vecnorm
+        stats_path: Optional[Path] = None
+        if isinstance(vec_env, VecNormalize):
+            vec_env.training = False
+            stats_path = log_root / "vecnormalize.pkl"
+            vec_env.save(str(stats_path))
+        return model, stats_path
 
     def score_on_oos(
         self,
         model: Any,
         make_env_fn: Callable[[], Any],
-        vecnorm_stats: Optional[Any],
+        vecnorm_stats: Optional[Union[str, Path]],
     ) -> np.ndarray:
         """Score a trained model on out-of-sample data and return per-bar returns."""
         if not SB3_AVAILABLE:
@@ -100,20 +105,19 @@ class RLAdapter:
         if DummyVecEnv is None:
             raise RuntimeError("Vectorised environment utilities unavailable")
 
-        if isinstance(vecnorm_stats, VecNormalize):
-            base_env = DummyVecEnv([make_env_fn])
+        stats_path: Optional[Path] = Path(vecnorm_stats) if vecnorm_stats else None
+        base_env = DummyVecEnv([make_env_fn])
+        if stats_path and stats_path.exists() and VecNormalize is not None:
+            eval_env = VecNormalize.load(str(stats_path), base_env)
+            eval_env.training = False
+            eval_env.norm_reward = False
+        else:
             eval_env = VecNormalize(
                 base_env,
                 training=False,
                 norm_obs=self.spec.vecnormalize_obs,
                 norm_reward=False,
-            )
-            eval_env.obs_rms = getattr(vecnorm_stats, "obs_rms", None)
-            eval_env.ret_rms = getattr(vecnorm_stats, "ret_rms", None)
-            eval_env.clip_obs = getattr(vecnorm_stats, "clip_obs", 10.0)
-            eval_env.clip_reward = getattr(vecnorm_stats, "clip_reward", np.inf)
-        else:
-            eval_env = DummyVecEnv([make_env_fn])
+            ) if VecNormalize is not None and self.spec.vecnormalize_obs else base_env
 
         observations, _ = eval_env.reset()
         state = None

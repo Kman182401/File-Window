@@ -583,11 +583,9 @@ class EnsembleRLCoordinator:
         artifact_dir = self.shadow_artifacts_dir / f"{rl_conf['name']}_{timestamp}"
         artifact_dir.mkdir(parents=True, exist_ok=True)
         try:
-            model, vecnorm = adapter.fit_on_is(env_fn, str(artifact_dir))
+            model, vecnorm_path = adapter.fit_on_is(env_fn, str(artifact_dir))
             if hasattr(model, "save"):
                 model.save(str(artifact_dir / "policy.zip"))
-            if vecnorm is not None and hasattr(vecnorm, "save"):
-                vecnorm.save(str(artifact_dir / "vecnorm.zip"))
         except RuntimeError as exc:
             logger.warning("Shadow training failed: %s", exc)
             return None
@@ -609,6 +607,7 @@ class EnsembleRLCoordinator:
                 "warmstart_epochs": spec.warmstart_epochs,
             },
             "reward": reward_kwargs,
+            "vecnorm_stats": str(vecnorm_path) if vecnorm_path else None,
         }
         candidate = CandidateRecord(
             name=shadow_strategy["name"],

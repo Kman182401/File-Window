@@ -709,10 +709,14 @@ def select_strategies_with_cpcv(
                 is_env_fn = make_env_from_df(is_df, costs_bps=costs_bps, reward_kwargs=reward_kwargs, eval_mode=False)
                 oos_env_fn = make_env_from_df(oos_df, costs_bps=costs_bps, reward_kwargs=reward_kwargs, eval_mode=True)
                 try:
-                    model, vecnorm = adapter.fit_on_is(is_env_fn, str(log_root / name))
-                    returns = adapter.score_on_oos(model, oos_env_fn, vecnorm)
+                    model, vecnorm_path = adapter.fit_on_is(is_env_fn, str(log_root / name))
+                    returns = adapter.score_on_oos(model, oos_env_fn, vecnorm_path)
                 except RuntimeError as exc:
-                    logger.warning("[CPCV] RL strategy %s failed: %s", name, exc)
+                    logger.warning(
+                        "[CPCV] RL strategy %s failed: %s -- install gymnasium, stable-baselines3, sb3-contrib",
+                        name,
+                        exc,
+                    )
                     fold_returns = []
                     break
             elif strat_type == "supervised" and strat.get("model") == "logistic":

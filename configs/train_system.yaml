@@ -36,6 +36,16 @@ strategies:
       <<: *rl_defaults
       train_timesteps: 30000
       seed: 123
+      algo_kwargs:
+        learning_rate: 0.0003
+        buffer_size: 1000000
+        learning_starts: 100
+        batch_size: 256
+        tau: 0.005  # Polyak averaging
+        gamma: 0.99
+        train_freq: 1
+        gradient_steps: 1
+        ent_coef: auto  # automatic temperature tuning
     reward:
       costs_bps: 0.25
       lambda_var: 0.2
@@ -47,6 +57,19 @@ strategies:
     policy: MlpPolicy
     rl:
       <<: *rl_defaults
+      algo_kwargs:
+        learning_rate: 0.0003  # actor & critic lr
+        buffer_size: 1000000
+        learning_starts: 100
+        batch_size: 256
+        tau: 0.005
+        gamma: 0.99
+        train_freq: 1
+        gradient_steps: 1
+        policy_delay: 2
+        target_policy_smoothing:
+          noise_std: 0.2
+          noise_clip: 0.5
     reward:
       costs_bps: 0.4
       lambda_var: 0.15
