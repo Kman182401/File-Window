@@ -119,7 +119,12 @@ class RLAdapter:
                 norm_reward=False,
             ) if VecNormalize is not None and self.spec.vecnormalize_obs else base_env
 
-        observations, _ = eval_env.reset()
+        reset_result = eval_env.reset()
+        if isinstance(reset_result, tuple):
+            observations, _ = reset_result
+        else:
+            observations = reset_result
+            _ = None
         state = None
         rewards: list[float] = []
         while True:
@@ -127,7 +132,22 @@ class RLAdapter:
                 action, state = model.predict(observations, state=state, deterministic=True)
             else:  # pragma: no cover - custom agents
                 action = model.act(observations)
-            observations, reward, terminated, truncated, _ = eval_env.step(action)
+            step_result = eval_env.step(action)
+            if isinstance(step_result, tuple):
+                if len(step_result) == 5:
+                    observations, reward, terminated, truncated, _ = step_result
+                elif len(step_result) == 4:
+                    observations, reward, done, _ = step_result
+                    terminated = done
+                    truncated = np.zeros_like(done, dtype=bool)
+                else:  # pragma: no cover - defensive
+                    observations, reward, terminated = step_result  # type: ignore[misc]
+                    truncated = np.zeros_like(terminated, dtype=bool)
+            else:  # pragma: no cover - highly unlikely
+                observations = step_result
+                reward = np.zeros((1,), dtype=float)
+                terminated = np.ones((1,), dtype=bool)
+                truncated = np.ones((1,), dtype=bool)
             rewards.extend(np.asarray(reward, dtype=float).flatten().tolist())
             if bool(np.any(terminated) or np.any(truncated)):
                 break
