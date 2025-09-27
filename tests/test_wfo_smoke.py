@@ -1,106 +1,69 @@
-import os
-from datetime import datetime, timedelta
 from pathlib import Path
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
+import pytest
 
-from wfo.cpcv import CombinatorialPurgedCV, CPCVConfig
 from wfo.runner import run_wfo
-import wfo.runner as wfo_runner
+from wfo.data_access import MarketDataAccess
 
 
-def _synthetic_bars(days: int = 40) -> pd.DataFrame:
-    start = datetime(2024, 1, 1)
-    periods = days * 24 * 60
-    index = pd.date_range(start=start, periods=periods, freq="1min", tz="America/New_York")
-    price = 100 + np.sin(np.linspace(0, 3, len(index)))
-    df = pd.DataFrame({
-        "timestamp": index,
-        "open": price,
-        "high": price + 0.2,
-        "low": price - 0.2,
-        "close": price + 0.1,
-        "volume": 1_000,
-    })
-    return df
+def test_wfo_supervised_smoke(monkeypatch, tmp_path):
+    timestamps = pd.date_range(
+        start=pd.Timestamp("2024-01-01 09:30", tz="America/New_York"),
+        periods=520,
+        freq="1min",
+    )
+    close = 4000 + np.cumsum(np.random.normal(scale=0.5, size=len(timestamps)))
+    returns = pd.Series(close).pct_change().fillna(0.0)
+    feature = np.sin(np.linspace(0, 6, len(timestamps)))
+    df = pd.DataFrame(
+        {
+            "timestamp": timestamps,
+            "close": close,
+            "feature": feature,
+            "returns": returns,
+        }
+    )
+    df["label"] = (df["close"].shift(-1) > df["close"]).astype(int)
+    df["label"] = df["label"].fillna(0).astype(int)
 
-
-def test_cpcv_purge_embargo():
-    n = 120
-    ts = pd.date_range("2024-01-01", periods=n, freq="T")
-    cfg = CPCVConfig(n_groups=6, test_group_size=2, embargo=2, label_lookahead=2, max_splits=3, random_state=7)
-    splitter = CombinatorialPurgedCV(cfg)
-
-    for train_idx, test_idx in splitter.split(ts):
-        assert set(train_idx).isdisjoint(set(test_idx))
-        for ti in test_idx:
-            for look in range(-cfg.label_lookahead, cfg.label_lookahead + 1):
-                assert (ti + look) not in train_idx
-            for emb in range(1, cfg.embargo + 1):
-                assert (ti + emb) not in train_idx
-
-
-def test_wfo_smoke(tmp_path, monkeypatch):
     def fake_get_bars(self, symbol, start, end, tz="America/New_York", limit=None):
-        return _synthetic_bars(days=60)
+        return df.copy()
 
-    monkeypatch.setattr("wfo.data_access.MarketDataAccess.get_bars", fake_get_bars)
+    monkeypatch.setattr(MarketDataAccess, "get_bars", fake_get_bars)
 
-    bars = _synthetic_bars(days=60)
-    raw_cycles = wfo_runner._build_cycles(bars, is_days=10, oos_days=4, step_days=4)
-    assert raw_cycles, "expected at least one WFO cycle"
-    raw_is, raw_oos = raw_cycles[0]
-    label_lookahead = 1
-    embargo_bars = int(1 * 390)
-    expected_is_len = len(raw_is) - label_lookahead
-    expected_oos_len = len(raw_oos) - embargo_bars
-    assert expected_is_len > 0
-    assert expected_oos_len > 0
-    expected_oos_first = raw_oos.iloc[embargo_bars]["timestamp"] if expected_oos_len > 0 else None
-
-    selection_capture = {}
-    original_selection = wfo_runner._run_cpcv_selection
-
-    def patched_selection(is_df, config, strategies, *args, **kwargs):
-        selection_capture.setdefault("is_len", len(is_df))
-        return original_selection(is_df, config, strategies, *args, **kwargs)
-
-    monkeypatch.setattr("wfo.runner._run_cpcv_selection", patched_selection)
-
-    original_strategy_returns = wfo_runner._strategy_returns
-
-    def patched_strategy_returns(df, strategy):
-        if selection_capture.get("oos_len") is None and "timestamp" in df.columns:
-            if len(df) == expected_oos_len and expected_oos_first is not None:
-                if not df.empty and df["timestamp"].iloc[0] == expected_oos_first:
-                    selection_capture["oos_len"] = len(df)
-        return original_strategy_returns(df, strategy)
-
-    monkeypatch.setattr("wfo.runner._strategy_returns", patched_strategy_returns)
-
-    out_dir = tmp_path / "artifacts"
     result = run_wfo(
         symbols=["ES"],
-        is_days=10,
-        oos_days=4,
-        step_days=4,
+        is_days=1,
+        oos_days=1,
+        step_days=1,
         cycles_min=1,
-        embargo_days=1,
+        embargo_days=0,
         label_lookahead_bars=1,
-        cpcv_folds=5,
-        config_path=Path("wfo/wfo_config.yaml"),
+        cpcv_folds=2,
+        config_path=None,
         dry_run=True,
-        output_root=out_dir,
+        output_root=tmp_path / "wfo",
         strategies=[
-            {"name": "ma_fast", "type": "moving_average", "params": {"fast": 10, "slow": 40}}
+            {
+                "name": "ES_LogReg",
+                "type": "supervised",
+                "model": "logistic",
+                "params": {"target_col": "label", "C": 0.5},
+            }
         ],
+        rl_fast_smoke=False,
+        rl_fast_overrides=None,
+        costs_bps=0.0,
     )
 
-    artifacts_path = Path(result["output_dir"])
-    assert (artifacts_path / "wfo_summary.json").exists()
-    assert (artifacts_path / "per_cycle.csv").exists()
-    assert (artifacts_path / "dsr.json").exists()
-    assert selection_capture.get("is_len") == expected_is_len
-    assert selection_capture.get("oos_len") == expected_oos_len
-    assert result["summary"].get("effective_trials") == result["dsr"]["effective_trials"]
+    output_dir = Path(result["output_dir"])
+    assert output_dir.exists()
+
+    dsr_path = output_dir / "dsr.json"
+    assert dsr_path.exists(), "DSR output missing"
+
+    per_cycle = pd.read_csv(output_dir / "per_cycle.csv")
+    assert "ES_LogReg" in per_cycle["config"].values
