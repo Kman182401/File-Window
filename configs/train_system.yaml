@@ -84,9 +84,8 @@ strategies:
         train_freq: 1
         gradient_steps: 1
         policy_delay: 2
-        target_policy_smoothing:
-          noise_std: 0.2
-          noise_clip: 0.5
+        target_policy_noise: 0.2
+        target_noise_clip: 0.5
     reward:
       costs_bps: 0.4
       lambda_var: 0.15

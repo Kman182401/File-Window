@@ -55,13 +55,10 @@ def make_env_from_df(
             use_hindsight_in_training=bool(reward_kwargs.get("use_hindsight_in_training", False) and not eval_mode),
             eval_mode=eval_mode,
         )
+        env.set_eval_mode(bool(eval_mode))
         # Flatten dict observations so SB3 policies and VecNormalize see a single Box space.
         if isinstance(env.observation_space, gym.spaces.Dict):
             env = FlattenObservation(env)
-        if eval_mode:
-            env.set_eval_mode(True)
-        else:
-            env.set_eval_mode(False)
         return env
 
     setattr(_factory, "_df", prepared)
