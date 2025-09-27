@@ -19,6 +19,8 @@ Benefits:
 - Captures different market patterns with each algorithm
 """
 
+import json
+import os
 import numpy as np
 import pandas as pd
 import logging
@@ -26,6 +28,7 @@ from typing import Dict, List, Tuple, Optional, Any, Union
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
+from pathlib import Path
 import threading
 import time
 from collections import deque
@@ -41,6 +44,9 @@ from algorithm_selector import (
 from enhanced_trading_environment import EnhancedTradingEnvironment
 from sac_trading_agent import SACTradingAgent
 from recurrent_ppo_agent import RecurrentPPOAgent
+from order_safety_wrapper import OrderSafetyManager
+from wfo.runner import run_wfo
+from wfo_rl import RLAdapter, RLSpec, make_env_from_df
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +85,18 @@ class AlgorithmPerformance:
         if len(self.recent_returns) == 0:
             return 0.0
         return np.mean(self.recent_returns)
+
+
+@dataclass
+class CandidateRecord:
+    """Metadata describing a shadow learner candidate."""
+
+    name: str
+    strategy: Dict[str, Any]
+    trained_at: datetime = field(default_factory=datetime.utcnow)
+    evaluation: Dict[str, Any] = field(default_factory=dict)
+    status: str = "trained"  # trained -> evaluated -> canary_active -> promoted/rolled_back
+    artifacts_path: Optional[str] = None
 
 
 class EnsembleRLCoordinator:
@@ -135,7 +153,15 @@ class EnsembleRLCoordinator:
         self.ensemble_decisions = 0
         self.ensemble_successes = 0
         self.decision_history = deque(maxlen=1000)
-        
+
+        # Champion/challenger management
+        self.champion_strategy: Optional[Dict[str, Any]] = None
+        self.shadow_candidate: Optional[CandidateRecord] = None
+        self.canary_candidate: Optional[CandidateRecord] = None
+        self.order_guard = OrderSafetyManager()
+        self.shadow_artifacts_dir = Path("artifacts/shadow_candidates")
+        self.shadow_artifacts_dir.mkdir(parents=True, exist_ok=True)
+
         # Thread safety
         self.lock = threading.Lock()
         
@@ -471,7 +497,7 @@ class EnsembleRLCoordinator:
     def load_ensemble_state(self, path: str):
         """Load ensemble state and weights."""
         import json
-        
+
         try:
             with open(path, 'r') as f:
                 state = json.load(f)
@@ -486,6 +512,216 @@ class EnsembleRLCoordinator:
             
         except Exception as e:
             logger.warning(f"Could not load ensemble state: {e}")
+
+    # ------------------------------------------------------------------
+    # Champion / shadow learner orchestration
+    # ------------------------------------------------------------------
+
+    def set_champion_strategy(self, strategy_config: Dict[str, Any]) -> None:
+        """Register the current champion configuration for comparisons."""
+        with self.lock:
+            self.champion_strategy = strategy_config
+        logger.info("Champion strategy set to %s", strategy_config.get("name", "unknown"))
+
+    def train_shadow_candidate(
+        self,
+        market_df: pd.DataFrame,
+        rl_config: Optional[Dict[str, Any]] = None,
+        reward_config: Optional[Dict[str, Any]] = None,
+    ) -> Optional[CandidateRecord]:
+        """Train a SAC-based shadow learner on recent data."""
+        if market_df.empty:
+            logger.warning("Shadow learner skipped: empty dataset")
+            return None
+        rl_conf = dict(rl_config or {})
+        rl_conf.setdefault("name", "shadow_sac")
+        rl_conf.setdefault("algo", "SAC")
+        rl_conf.setdefault("policy", "MlpPolicy")
+        rl_conf.setdefault("train_timesteps", 20_000)
+        rl_conf.setdefault("n_envs", 1)
+        rl_conf.setdefault("seed", 777)
+        spec = RLSpec(
+            algo=rl_conf["algo"],
+            policy=rl_conf["policy"],
+            train_timesteps=int(rl_conf["train_timesteps"]),
+            n_envs=int(rl_conf["n_envs"]),
+            seed=int(rl_conf["seed"]),
+            policy_kwargs=rl_conf.get("policy_kwargs") or {},
+            algo_kwargs=rl_conf.get("algo_kwargs") or {},
+            vecnormalize_obs=bool(rl_conf.get("vecnormalize_obs", True)),
+            vecnormalize_reward=bool(rl_conf.get("vecnormalize_reward", True)),
+            use_imitation_warmstart=bool(rl_conf.get("use_imitation_warmstart", False)),
+            imitation_kwargs=rl_conf.get("imitation_kwargs"),
+            warmstart_epochs=int(rl_conf.get("warmstart_epochs", 3)),
+        )
+        adapter = RLAdapter(spec, fast_smoke=bool(rl_conf.get("fast_smoke", False)))
+        reward_kwargs = reward_config or {}
+        env_fn = make_env_from_df(
+            market_df,
+            costs_bps=float(rl_conf.get("costs_bps", 0.0)),
+            reward_kwargs=reward_kwargs,
+            eval_mode=False,
+        )
+        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        artifact_dir = self.shadow_artifacts_dir / f"{rl_conf['name']}_{timestamp}"
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            model, vecnorm = adapter.fit_on_is(env_fn, str(artifact_dir))
+            if hasattr(model, "save"):
+                model.save(str(artifact_dir / "policy.zip"))
+            if vecnorm is not None and hasattr(vecnorm, "save"):
+                vecnorm.save(str(artifact_dir / "vecnorm.zip"))
+        except RuntimeError as exc:
+            logger.warning("Shadow training failed: %s", exc)
+            return None
+        shadow_strategy = {
+            "name": rl_conf["name"],
+            "type": "rl_policy",
+            "algo": spec.algo,
+            "policy": spec.policy,
+            "rl": {
+                "train_timesteps": spec.train_timesteps,
+                "n_envs": spec.n_envs,
+                "seed": spec.seed,
+                "vecnormalize_obs": spec.vecnormalize_obs,
+                "vecnormalize_reward": spec.vecnormalize_reward,
+                "policy_kwargs": spec.policy_kwargs or {},
+                "algo_kwargs": spec.algo_kwargs or {},
+                "use_imitation_warmstart": spec.use_imitation_warmstart,
+                "imitation_kwargs": spec.imitation_kwargs,
+                "warmstart_epochs": spec.warmstart_epochs,
+            },
+            "reward": reward_kwargs,
+        }
+        candidate = CandidateRecord(
+            name=shadow_strategy["name"],
+            strategy=shadow_strategy,
+            artifacts_path=str(artifact_dir),
+        )
+        with self.lock:
+            self.shadow_candidate = candidate
+        logger.info("Shadow learner %s trained and staged at %s", candidate.name, artifact_dir)
+        return candidate
+
+    def evaluate_shadow_candidate(self, wfo_params: Dict[str, Any]) -> Optional[CandidateRecord]:
+        """Run WFO comparison between champion and shadow candidate."""
+        with self.lock:
+            candidate = self.shadow_candidate
+            champion = self.champion_strategy
+        if candidate is None:
+            logger.warning("No shadow candidate available for evaluation")
+            return None
+        if champion is None:
+            logger.warning("Champion strategy not set; cannot evaluate shadow candidate")
+            return None
+
+        params = dict(wfo_params)
+        params.setdefault("dry_run", True)
+        strategies = [champion, candidate.strategy]
+        try:
+            result = run_wfo(strategies=strategies, **params)
+        except Exception as exc:
+            logger.error("Shadow WFO evaluation failed: %s", exc)
+            return None
+
+        output_dir = Path(result.get("output_dir", ""))
+        dsr_data = result.get("dsr", {})
+        white_data: Dict[str, Any] = {}
+        spa_data: Dict[str, Any] = {}
+        try:
+            if output_dir.exists():
+                white_path = output_dir / "white_rc.json"
+                spa_path = output_dir / "spa.json"
+                if white_path.exists():
+                    white_data = json.loads(white_path.read_text())
+                if spa_path.exists():
+                    spa_data = json.loads(spa_path.read_text())
+        except Exception as exc:
+            logger.warning("Failed to parse reality check results: %s", exc)
+
+        candidate_metrics = {
+            "dsr": dsr_data,
+            "white": white_data,
+            "spa": spa_data,
+            "summary": result.get("summary", {}),
+            "output_dir": str(output_dir) if output_dir else None,
+        }
+
+        with self.lock:
+            candidate.evaluation = candidate_metrics
+
+        cand_name = candidate.name
+        dsr_ok = dsr_data.get("p_value", 1.0) < params.get("dsr_threshold", 0.05)
+        white_ok = cand_name in white_data.get("survivors", []) if white_data else False
+        spa_ok = cand_name in spa_data.get("survivors", []) if spa_data else False
+
+        if dsr_ok and white_ok and spa_ok:
+            candidate.status = "canary_ready"
+            with self.lock:
+                self.canary_candidate = candidate
+            logger.info("Shadow candidate %s passed promotion gates", cand_name)
+            return candidate
+
+        logger.info(
+            "Shadow candidate %s did not pass promotion gates (DSR_OK=%s, White_OK=%s, SPA_OK=%s)",
+            cand_name,
+            dsr_ok,
+            white_ok,
+            spa_ok,
+        )
+        return None
+
+    def deploy_canary(self, symbols: List[str], notional_fraction: float = 0.1) -> bool:
+        """Simulate routing a small notional to the challenger under safety guardrails."""
+        with self.lock:
+            candidate = self.canary_candidate
+        if candidate is None:
+            logger.warning("No canary candidate ready for deployment")
+            return False
+
+        notional_fraction = max(0.0, min(notional_fraction, 0.25))
+        if os.getenv("DRY_RUN", "1") != "0":
+            logger.info(
+                "DRY_RUN active; logging canary allocation %.1f%% for %s",
+                notional_fraction * 100,
+                candidate.name,
+            )
+            candidate.status = "canary_simulated"
+            return True
+
+        for symbol in symbols:
+            if not self.order_guard.check_symbol_allowlist(symbol):
+                logger.warning("Symbol %s not allowed for canary deployment", symbol)
+                continue
+            logger.info(
+                "Allocating %.2f%% notional to canary %s on %s",
+                notional_fraction * 100,
+                candidate.name,
+                symbol,
+            )
+        candidate.status = "canary_active"
+        return True
+
+    def promote_canary(self, success: bool) -> None:
+        """Promote or roll back the active canary."""
+        with self.lock:
+            candidate = self.canary_candidate
+        if candidate is None:
+            logger.warning("No canary candidate to promote")
+            return
+
+        if success:
+            with self.lock:
+                self.champion_strategy = candidate.strategy
+                candidate.status = "promoted"
+                self.shadow_candidate = None
+                self.canary_candidate = None
+            logger.info("Canary %s promoted to champion", candidate.name)
+        else:
+            with self.lock:
+                candidate.status = "rolled_back"
+                self.canary_candidate = None
+            logger.info("Canary %s rolled back after canary run", candidate.name)
 
 
 def test_ensemble_coordinator():

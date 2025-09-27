@@ -40,6 +40,7 @@ class StrategyConfig:
     policy: Optional[str] = None
     rl: Optional[Dict[str, Any]] = None
     model: Optional[str] = None
+    reward: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -128,6 +129,7 @@ def _build_strategy(entry: Dict[str, Any]) -> StrategyConfig:
         policy=entry.get("policy"),
         rl=entry.get("rl"),
         model=entry.get("model"),
+        reward=entry.get("reward"),
     )
 
 
@@ -244,10 +246,24 @@ def run_wfo(
                     vecnormalize_reward=bool(rl_cfg.get("vecnormalize_reward", True)),
                     policy_kwargs=rl_cfg.get("policy_kwargs") or {},
                     algo_kwargs=rl_cfg.get("algo_kwargs") or {},
+                    use_imitation_warmstart=bool(rl_cfg.get("use_imitation_warmstart", False)),
+                    imitation_kwargs=rl_cfg.get("imitation_kwargs"),
+                    warmstart_epochs=int(rl_cfg.get("warmstart_epochs", 5)),
                 )
                 adapter = RLAdapter(spec, fast_smoke=config.rl_fast_smoke)
-                is_env_fn = make_env_from_df(is_df, costs_bps=config.trading_costs_bps)
-                oos_env_fn = make_env_from_df(oos_df, costs_bps=config.trading_costs_bps)
+                reward_kwargs = rl_strat.reward or {}
+                is_env_fn = make_env_from_df(
+                    is_df,
+                    costs_bps=config.trading_costs_bps,
+                    reward_kwargs=reward_kwargs,
+                    eval_mode=False,
+                )
+                oos_env_fn = make_env_from_df(
+                    oos_df,
+                    costs_bps=config.trading_costs_bps,
+                    reward_kwargs=reward_kwargs,
+                    eval_mode=True,
+                )
                 setattr(is_env_fn, "_len", len(is_df))
                 setattr(oos_env_fn, "_len", len(oos_df))
                 try:

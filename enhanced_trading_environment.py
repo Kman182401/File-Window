@@ -253,12 +253,16 @@ class EnhancedTradingEnvironment(gym.Env):
             'win_rate': 0,
             'sharpe_ratio': 0,
             'max_drawdown': 0,
+            'current_drawdown': 0,
             'action_delta_mean': 0,
             'turnover': 0,
             'transaction_entropy': 0,
             'latency_ms': 0,
             'fill_rate': 1.0,
-            'decision_interval': self.config.decision_interval
+            'decision_interval': self.config.decision_interval,
+            'volatility_proxy': 0,
+            'drawdown_increment': 0,
+            'last_return': 0,
         }
 
         # Action smoothness / turnover / entropy tracking
@@ -359,12 +363,16 @@ class EnhancedTradingEnvironment(gym.Env):
             'win_rate': 0,
             'sharpe_ratio': 0,
             'max_drawdown': 0,
+            'current_drawdown': 0,
             'action_delta_mean': 0,
             'turnover': 0,
             'transaction_entropy': 0,
             'latency_ms': 0,
             'fill_rate': 1.0,
-            'decision_interval': self.config.decision_interval
+            'decision_interval': self.config.decision_interval,
+            'volatility_proxy': 0,
+            'drawdown_increment': 0,
+            'last_return': 0,
         }
 
         # Reset smoothness tracking
@@ -393,6 +401,9 @@ class EnhancedTradingEnvironment(gym.Env):
         Returns:
             Tuple of (observation, reward, terminated, truncated, info)
         """
+        prev_position = float(self.position)
+        prev_price = self._get_current_price()
+
         # Parse action
         raw_action = action
 
@@ -419,18 +430,46 @@ class EnhancedTradingEnvironment(gym.Env):
         action_delta = float(np.linalg.norm(action_vector - self.prev_action))
         self.action_delta_history.append(action_delta)
 
-        # Execute trade
+        # Execute trade and advance state
         gated_direction, gated_size = self._apply_transaction_entropy_gate(direction, size)
         self._execute_trade(gated_direction, gated_size)
-
-        # Update step
         self.current_step += 1
 
-        # Calculate reward
-        reward = self._calculate_reward()
+        # Fetch next price for reward computation
+        next_price = prev_price
+        if self.data is not None and 'close' in self.data.columns and self.current_step < len(self.data):
+            next_price = float(self.data.iloc[self.current_step]['close'])
+        elif self.data is None:
+            next_price = prev_price
+
+        denom = prev_price if abs(prev_price) > 1e-8 else 1.0
+        ret_tp1 = (next_price - prev_price) / denom
+        delta_position = float(self.position - prev_position)
+
+        rolling_var = self._update_volatility_proxy(ret_tp1)
+        drawdown_increment = self._record_portfolio_value(next_price)
+        pnl_component = float(self.position * ret_tp1)
+        transaction_penalty = (self.costs_bps * 1e-4) * abs(delta_position)
+        reward = pnl_component - transaction_penalty
+
+        if not self.eval_mode:
+            reward -= self.lambda_var * rolling_var
+            reward -= self.lambda_dd * drawdown_increment
+            reward += self._compute_hindsight_bonus(prev_price)
+
+        reward = float(reward)
+
         smooth_weight = getattr(self.config, 'action_smoothness_weight', 0.0)
         if smooth_weight > 0:
             reward -= smooth_weight * (action_delta ** 2)
+
+        self._last_position = float(self.position)
+        self._last_price = next_price
+
+        self.metrics['volatility_proxy'] = rolling_var
+        self.metrics['drawdown_increment'] = drawdown_increment
+        self.metrics['last_return'] = ret_tp1
+        self.metrics['position'] = float(self.position)
 
         # Check termination
         terminated = self._is_terminated()
@@ -505,53 +544,45 @@ class EnhancedTradingEnvironment(gym.Env):
         # Update latest seen price for reward computations
         self._last_price = current_price
     
-    def _calculate_reward(self) -> float:
-        """Calculate multi-component reward."""
-        if len(self.portfolio_value_history) < 2:
+    def _update_volatility_proxy(self, new_return: float) -> float:
+        """Maintain rolling variance proxy for returns."""
+        self._return_window.append(float(new_return))
+        if len(self._return_window) < 2:
             return 0.0
-        
-        current_value = self.portfolio_value_history[-1]
-        previous_value = self.portfolio_value_history[-2]
-        
-        # PnL component
-        pnl = (current_value - previous_value) / self.config.initial_balance
-        
-        # Sharpe component (if enough history)
-        sharpe = 0
-        if len(self.portfolio_value_history) >= 21:
-            window = np.asarray(self.portfolio_value_history[-21:], dtype=np.float64)
-            diffs = np.diff(window)
-            base = window[:-1]
-            returns = np.zeros_like(diffs)
-            non_zero = np.abs(base) > 1e-8
-            returns[non_zero] = diffs[non_zero] / base[non_zero]
-            if np.std(returns) > 0:
-                sharpe = np.mean(returns) / (np.std(returns) + 1e-8) * np.sqrt(252)
-        
-        # Risk component (drawdown)
-        if len(self.portfolio_value_history) > 0:
-            peak = np.max(self.portfolio_value_history)
-            drawdown = (peak - current_value) / peak
+        return float(np.var(np.asarray(self._return_window, dtype=np.float64)))
+
+    def _record_portfolio_value(self, price: float) -> float:
+        """Track portfolio value, update drawdown stats, and return incremental penalty."""
+        portfolio_value = self.balance + self.position * price
+        if not self.portfolio_value_history:
+            self.portfolio_value_history = [portfolio_value]
         else:
-            drawdown = 0
-        
-        # Transaction component
-        transaction_penalty = 0
-        if self.current_step > self.episode_start_step:
-            transaction_penalty = self.config.transaction_weight * abs(self.position)
-        
-        # Combine components
-        if self.config.use_multi_component_reward:
-            reward = (
-                self.config.pnl_weight * pnl +
-                self.config.sharpe_weight * sharpe * 0.01 +  # Scale down Sharpe
-                self.config.risk_weight * drawdown +
-                transaction_penalty
-            )
+            self.portfolio_value_history.append(portfolio_value)
+        self._portfolio_peak = max(self._portfolio_peak, portfolio_value)
+        if self._portfolio_peak <= 0:
+            drawdown = 0.0
         else:
-            reward = pnl
-        
-        return float(reward)
+            drawdown = (self._portfolio_peak - portfolio_value) / (self._portfolio_peak + 1e-12)
+        incremental = max(0.0, drawdown - self._last_drawdown)
+        self._last_drawdown = drawdown
+        self.metrics['max_drawdown'] = max(self.metrics.get('max_drawdown', 0.0), drawdown)
+        self.metrics['current_drawdown'] = drawdown
+        return incremental
+
+    def _compute_hindsight_bonus(self, price_t: float) -> float:
+        """Optional hindsight reward component available only during training."""
+        if self.eval_mode or not self.use_hindsight_in_training:
+            return 0.0
+        if self.hindsight_weight == 0.0 or self.hindsight_H <= 0:
+            return 0.0
+        if self.data is None or 'close' not in self.data.columns:
+            return 0.0
+        base_idx = max(0, self.current_step - 1)
+        future_idx = min(len(self.data) - 1, base_idx + self.hindsight_H)
+        if future_idx <= base_idx:
+            return 0.0
+        future_price = float(self.data.iloc[future_idx]['close'])
+        return self.hindsight_weight * float(self.position) * (future_price - price_t)
     
     def _get_observation(self) -> Union[np.ndarray, Dict]:
         """Get current observation with normalization."""
@@ -820,6 +851,10 @@ class EnhancedTradingEnvironment(gym.Env):
             print(f"Metrics: {self.metrics}")
         elif mode == 'ansi':
             return str(self._get_info())
+
+    def set_eval_mode(self, flag: bool) -> None:
+        """Toggle evaluation mode at runtime."""
+        self.eval_mode = bool(flag)
 
 
 def test_enhanced_environment():

@@ -9,12 +9,20 @@ trading brain that can make decisions and learn.
 
 import os
 import logging
-import numpy as np
-import torch
-from typing import Dict, Any, Optional, Tuple, Union, Type
+from pathlib import Path
+from typing import Dict, Any, Optional, Tuple, Union, Type, Iterable
 from enum import Enum
-import psutil
 from datetime import datetime, timedelta
+
+import numpy as np
+import pandas as pd
+import psutil
+import torch
+
+from wfo.cpcv import CPCVConfig, CombinatorialPurgedCV
+from wfo.metrics import deflated_sharpe_ratio, sharpe_ratio
+from wfo.purging import PurgeConfig, apply_purge_embargo
+from wfo_rl import RLAdapter, RLSpec, make_env_from_df, logistic_positions
 
 logger = logging.getLogger(__name__)
 
@@ -602,6 +610,153 @@ class AlgorithmSelector:
                 logger.info(f"Loaded {algorithm_type.value} agent from {path}")
         except Exception as e:
             logger.error(f"Failed to load agent: {e}")
+
+
+def _coerce_strategy_entry(entry: Any) -> Dict[str, Any]:
+    """Coerce either dict or dataclass strategy descriptors into a dict."""
+    if isinstance(entry, dict):
+        return dict(entry)
+    if hasattr(entry, "__dict__"):
+        return {k: v for k, v in entry.__dict__.items() if not k.startswith("_")}
+    raise TypeError(f"Unsupported strategy entry type: {type(entry)!r}")
+
+
+def select_strategies_with_cpcv(
+    dataset: pd.DataFrame,
+    strategies: Iterable[Any],
+    cpcv_config: Dict[str, Any],
+) -> list[Dict[str, Any]]:
+    """Return a shortlist ranked by CPCV Sharpe and filtered by DSR."""
+
+    if dataset.empty:
+        logger.warning("CPCV selection skipped: empty dataset")
+        return []
+
+    base_df = dataset.reset_index(drop=True).copy()
+    if "timestamp" not in base_df.columns:
+        base_df["timestamp"] = pd.date_range(start="1970-01-01", periods=len(base_df), freq="T")
+    if "returns" not in base_df.columns:
+        if "close" in base_df.columns:
+            base_df["returns"] = base_df["close"].pct_change().fillna(0.0)
+        else:
+            base_df["returns"] = 0.0
+
+    label_lookahead = int(cpcv_config.get("label_lookahead_bars", 0))
+    embargo_days = float(cpcv_config.get("embargo_days", 0))
+    minutes_per_day = int(cpcv_config.get("minutes_per_trading_day", 390))
+    embargo_bars = int(round(embargo_days * minutes_per_day))
+
+    cpcv_cfg = CPCVConfig(
+        n_groups=int(cpcv_config.get("groups", 12)),
+        test_group_size=int(cpcv_config.get("test_group_size", 2)),
+        embargo=embargo_bars,
+        label_lookahead=label_lookahead,
+        max_splits=cpcv_config.get("folds"),
+        random_state=cpcv_config.get("random_state"),
+    )
+    splitter = CombinatorialPurgedCV(cpcv_cfg)
+
+    log_root = Path(cpcv_config.get("log_dir", "artifacts/cpcv"))
+    log_root.mkdir(parents=True, exist_ok=True)
+
+    rl_fast_smoke = bool(cpcv_config.get("rl_fast_smoke", True))
+    rl_overrides = dict(cpcv_config.get("rl_overrides", {}))
+    dsr_threshold = float(cpcv_config.get("dsr_threshold", 0.05))
+    costs_bps = float(cpcv_config.get("costs_bps", 0.0))
+
+    idx = np.arange(len(base_df))
+    shortlist: list[Dict[str, Any]] = []
+
+    for entry in strategies:
+        strat = _coerce_strategy_entry(entry)
+        strat_type = strat.get("type")
+        name = strat.get("name", "unknown")
+        logger.info("[CPCV] Evaluating strategy %s (%s)", name, strat_type)
+
+        fold_returns: list[np.ndarray] = []
+        fold_sharpes: list[float] = []
+
+        for train_idx, test_idx in splitter.split(idx):
+            train_idx = apply_purge_embargo(train_idx, test_idx, PurgeConfig(label_lookahead=label_lookahead, embargo=embargo_bars))
+            if train_idx.size == 0 or len(test_idx) == 0:
+                continue
+            is_df = base_df.iloc[train_idx].reset_index(drop=True)
+            oos_df = base_df.iloc[test_idx].reset_index(drop=True)
+
+            if strat_type == "rl_policy":
+                rl_cfg = dict(strat.get("rl") or {})
+                rl_cfg.update(rl_overrides)
+                reward_kwargs = strat.get("reward") or {}
+                spec = RLSpec(
+                    algo=strat.get("algo", "RecurrentPPO"),
+                    policy=strat.get("policy", "MlpPolicy"),
+                    train_timesteps=int(rl_cfg.get("train_timesteps", 50_000)),
+                    n_envs=int(rl_cfg.get("n_envs", 1)),
+                    seed=int(rl_cfg.get("seed", 42)),
+                    policy_kwargs=rl_cfg.get("policy_kwargs") or {},
+                    algo_kwargs=rl_cfg.get("algo_kwargs") or {},
+                    vecnormalize_obs=bool(rl_cfg.get("vecnormalize_obs", True)),
+                    vecnormalize_reward=bool(rl_cfg.get("vecnormalize_reward", True)),
+                    use_imitation_warmstart=bool(rl_cfg.get("use_imitation_warmstart", False)),
+                    imitation_kwargs=rl_cfg.get("imitation_kwargs"),
+                    warmstart_epochs=int(rl_cfg.get("warmstart_epochs", 5)),
+                )
+                adapter = RLAdapter(spec, fast_smoke=rl_fast_smoke)
+                is_env_fn = make_env_from_df(is_df, costs_bps=costs_bps, reward_kwargs=reward_kwargs, eval_mode=False)
+                oos_env_fn = make_env_from_df(oos_df, costs_bps=costs_bps, reward_kwargs=reward_kwargs, eval_mode=True)
+                try:
+                    model, vecnorm = adapter.fit_on_is(is_env_fn, str(log_root / name))
+                    returns = adapter.score_on_oos(model, oos_env_fn, vecnorm)
+                except RuntimeError as exc:
+                    logger.warning("[CPCV] RL strategy %s failed: %s", name, exc)
+                    fold_returns = []
+                    break
+            elif strat_type == "supervised" and strat.get("model") == "logistic":
+                try:
+                    positions = logistic_positions(is_df, oos_df, **(strat.get("params") or {}))
+                except Exception as exc:  # pragma: no cover - dependency guard
+                    logger.warning("[CPCV] Supervised strategy %s failed: %s", name, exc)
+                    fold_returns = []
+                    break
+                returns_series = oos_df.get("returns")
+                if returns_series is None:
+                    returns_series = oos_df["close"].pct_change().fillna(0.0)
+                returns = positions * returns_series.to_numpy(dtype=float)
+            else:
+                logger.debug("[CPCV] Strategy %s type %s not handled", name, strat_type)
+                fold_returns = []
+                break
+
+            returns = np.asarray(returns, dtype=float)
+            if returns.size == 0:
+                continue
+            fold_returns.append(returns)
+            fold_sharpes.append(sharpe_ratio(returns))
+
+        if not fold_returns or not fold_sharpes:
+            continue
+
+        aggregated = np.concatenate(fold_returns)
+        dsr = deflated_sharpe_ratio(aggregated, trials_effective=len(strategies))
+        if dsr.p_value >= dsr_threshold:
+            logger.info("[CPCV] Strategy %s filtered by DSR (p=%.4f)", name, dsr.p_value)
+            continue
+
+        shortlist.append(
+            {
+                "name": name,
+                "strategy": entry,
+                "median_sharpe": float(np.median(fold_sharpes)),
+                "sharpe_scores": [float(s) for s in fold_sharpes],
+                "dsr": {"z_score": dsr.z_score, "p_value": dsr.p_value},
+            }
+        )
+
+    shortlist.sort(key=lambda item: item["median_sharpe"], reverse=True)
+    top_k = cpcv_config.get("top_k")
+    if isinstance(top_k, int) and top_k > 0:
+        shortlist = shortlist[:top_k]
+    return shortlist
 
 
 def test_algorithm_selector():
