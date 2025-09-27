@@ -73,6 +73,10 @@ def persist_bars(symbol: str, df: pd.DataFrame) -> str:
     # Normalize to UTC index named 'timestamp'
     df = _to_utc_index(df)
 
+    # IB returns the column as 'average'; use IB's documented name 'wap'
+    if "average" in df.columns and "wap" not in df.columns:
+        df = df.rename(columns={"average": "wap"})
+
     # Column ordering: OHLCV first if present
     cols = [c for c in ["open", "high", "low", "close", "volume", "wap", "barCount"] if c in df.columns]
     if cols and list(df.columns) != cols:

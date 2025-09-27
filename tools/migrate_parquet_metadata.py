@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
+import shutil
 from tqdm import tqdm
 
 # ---------------------------------------------------------------------------
@@ -143,6 +144,8 @@ def read_legacy_file(path: Path) -> pd.DataFrame:
     for col in expected:
         if col not in df.columns:
             df[col] = pd.NA
+        elif col != "timestamp":
+            df[col] = pd.to_numeric(df[col], errors="coerce")
     df = df[expected]
     return df
 
@@ -183,6 +186,16 @@ def migrate_symbol(legacy_root: Path, output_root: Path, ingestor: IBKRIngestor,
     table = pa.Table.from_pandas(merged, preserve_index=False)
     root = output_root / "minute_bars"
     root.mkdir(parents=True, exist_ok=True)
+
+    # Remove pre-existing partitions we are about to rewrite so reruns stay clean
+    for key in merged[["symbol_root", "year", "month", "expiry"]].drop_duplicates().itertuples(index=False):
+        part_path = root
+        part_path /= f"symbol_root={key.symbol_root}"
+        part_path /= f"year={key.year}"
+        part_path /= f"month={key.month}"
+        part_path /= f"expiry={key.expiry}"
+        if part_path.exists():
+            shutil.rmtree(part_path)
 
     pq.write_to_dataset(
         table,
