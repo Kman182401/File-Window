@@ -155,7 +155,24 @@ class EnsembleRLCoordinator:
         self.decision_history = deque(maxlen=1000)
 
         # Champion/challenger management
-        self.champion_strategy: Optional[Dict[str, Any]] = None
+        self.champion_strategy: Dict[str, Any] = {
+            "name": "Ensemble_SAC_Champion",
+            "type": "rl_policy",
+            "algo": "SAC",
+            "policy": "MlpPolicy",
+            "rl": {
+                "train_timesteps": 50_000,
+                "n_envs": 1,
+                "seed": 42,
+                "vecnormalize_obs": True,
+                "vecnormalize_reward": True,
+                "policy_kwargs": {},
+                "algo_kwargs": {},
+                "use_imitation_warmstart": False,
+                "warmstart_epochs": 3,
+            },
+            "reward": {},
+        }
         self.shadow_candidate: Optional[CandidateRecord] = None
         self.canary_candidate: Optional[CandidateRecord] = None
         self.order_guard = OrderSafetyManager()

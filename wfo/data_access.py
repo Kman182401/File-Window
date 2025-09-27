@@ -16,7 +16,12 @@ try:
 except Exception:  # pragma: no cover - pyarrow optional in some environments
     _HAS_PYARROW = False
 
-from market_data_ibkr_adapter import IBKRIngestor
+try:  # pragma: no cover - optional dependency for live data
+    from market_data_ibkr_adapter import IBKRIngestor
+    _HAS_IBKR = True
+except Exception:  # pragma: no cover
+    IBKRIngestor = None
+    _HAS_IBKR = False
 
 
 DEFAULT_COLUMNS = ["timestamp", "open", "high", "low", "close", "volume"]
@@ -74,7 +79,10 @@ class MarketDataAccess:
         columns = DEFAULT_COLUMNS
         if self.config.columns:
             columns = list(self.config.columns.values())
-        symbol_root = IBKRIngestor.SYMBOL_ALIASES.get(symbol.upper(), symbol.upper())
+        if _HAS_IBKR and IBKRIngestor is not None:
+            symbol_root = IBKRIngestor.SYMBOL_ALIASES.get(symbol.upper(), symbol.upper())
+        else:
+            symbol_root = symbol.upper()
         filt = (
             (ds.field("symbol_root") == symbol_root)
             & (ds.field("timestamp") >= pd.Timestamp(start, tz="UTC"))

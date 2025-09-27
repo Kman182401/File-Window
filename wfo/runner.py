@@ -26,8 +26,7 @@ from .metrics import (
 )
 from .reporting import summarise_cycles, write_reports
 from .reality_checks import white_reality_check, hansen_spa
-from .rl_adapter import RLAdapter, RLSpec
-from .rl_env_builder import make_env_from_df
+from .rl_adapter import RLAdapter, RLSpec, SB3_AVAILABLE
 from .supervised_baselines import logistic_positions
 
 
@@ -233,6 +232,14 @@ def run_wfo(
 
             rl_strats = [s for s in strategy_objs if s.type == "rl_policy"]
             for rl_strat in rl_strats:
+                if not SB3_AVAILABLE:
+                    print(f"[WFO] Skipping RL strategy {rl_strat.name}: RL libraries unavailable")
+                    continue
+                try:
+                    from wfo_rl.rl_env_builder import make_env_from_df  # lazy import to avoid hard dependency
+                except ImportError as exc:  # pragma: no cover - optional dependency guard
+                    print(f"[WFO] Skipping RL strategy {rl_strat.name}: {exc}")
+                    continue
                 rl_cfg = dict(rl_strat.rl or {})
                 if config.rl_fast_smoke and config.rl_fast_overrides:
                     rl_cfg.update(config.rl_fast_overrides)

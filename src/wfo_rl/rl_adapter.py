@@ -249,4 +249,4 @@ class RLAdapter:
         # Other algos: noop warm-start
 
 
-__all__ = ["RLSpec", "RLAdapter"]
+__all__ = ["RLSpec", "RLAdapter", "SB3_AVAILABLE"]

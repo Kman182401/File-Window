@@ -39,6 +39,7 @@ from enum import Enum
 
 # Import existing components
 from algorithm_selector import AlgorithmSelector, AlgorithmType, RuleBasedTradingAgent
+from ensemble_rl_coordinator import EnsembleRLCoordinator
 from enhanced_trading_environment import EnhancedTradingEnvironment
 
 logger = logging.getLogger(__name__)
@@ -317,6 +318,8 @@ class OnlineLearningSystem:
         self.promotion_reports_dir = (Path.home() / "promotion_reports").resolve()
         self.promotion_reports_dir.mkdir(parents=True, exist_ok=True)
         self.seed_pool: List[int] = [0]
+        self.ensemble_coordinator: Optional[EnsembleRLCoordinator] = None
+        self.champion_history: List[Dict[str, Any]] = []
 
         logger.info(f"Online learning system initialized (enabled: {self.enabled})")
     
@@ -836,6 +839,71 @@ class OnlineLearningSystem:
             
         except Exception as e:
             logger.warning(f"Could not load online learning state: {e}")
+
+    def attach_ensemble_coordinator(self, coordinator: EnsembleRLCoordinator) -> None:
+        """Attach the ensemble coordinator for champion/challenger management."""
+        self.ensemble_coordinator = coordinator
+        logger.info("Ensemble coordinator attached to online learning system")
+
+    def run_shadow_champion_cycle(
+        self,
+        recent_data: pd.DataFrame,
+        rl_config: Optional[Dict[str, Any]],
+        reward_config: Optional[Dict[str, Any]],
+        wfo_params: Dict[str, Any],
+        symbols: Optional[List[str]] = None,
+        deploy_canary: bool = False,
+    ) -> Optional[Any]:
+        """Train, evaluate, and optionally deploy a shadow challenger."""
+        if not self.enabled:
+            logger.info("Online learning disabled; skipping shadow cycle")
+            return None
+        if self.ensemble_coordinator is None:
+            logger.warning("No ensemble coordinator attached; skipping shadow cycle")
+            return None
+
+        candidate = self.ensemble_coordinator.train_shadow_candidate(
+            recent_data,
+            rl_config=rl_config,
+            reward_config=reward_config,
+        )
+        if candidate is None:
+            return None
+
+        evaluation = self.ensemble_coordinator.evaluate_shadow_candidate(wfo_params)
+        if evaluation is not None:
+            self._log_promotion_event(evaluation)
+            if deploy_canary:
+                self.ensemble_coordinator.deploy_canary(symbols or [], wfo_params.get("canary_fraction", 0.1))
+        return evaluation
+
+    def finalize_canary_promotion(self, success: bool) -> None:
+        """Promote or roll back the current canary based on live results."""
+        if self.ensemble_coordinator is None:
+            logger.warning("No ensemble coordinator attached; cannot finalize canary")
+            return
+        self.ensemble_coordinator.promote_canary(success)
+
+    def _log_promotion_event(self, candidate: Any) -> None:
+        """Persist promotion or evaluation outcomes for auditability."""
+        try:
+            evaluation = getattr(candidate, "evaluation", {}) or {}
+            payload = {
+                "timestamp": datetime.utcnow().isoformat(),
+                "candidate": getattr(candidate, "name", "unknown"),
+                "status": getattr(candidate, "status", "unknown"),
+                "dsr": evaluation.get("dsr"),
+                "white_rc": evaluation.get("white"),
+                "spa": evaluation.get("spa"),
+                "output_dir": evaluation.get("output_dir"),
+            }
+            report_name = f"promotion_{payload['candidate']}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.json"
+            report_path = self.promotion_reports_dir / report_name
+            report_path.write_text(json.dumps(payload, indent=2))
+            self.champion_history.append(payload)
+            logger.info("Promotion event logged to %s", report_path)
+        except Exception as exc:
+            logger.warning("Failed to log promotion event: %s", exc)
 
 
 def test_online_learning_system():

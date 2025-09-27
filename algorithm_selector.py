@@ -17,7 +17,11 @@ from datetime import datetime, timedelta
 import numpy as np
 import pandas as pd
 import psutil
-import torch
+
+try:  # Optional dependency
+    import torch
+except Exception:  # pragma: no cover - fallback for CPU-only envs
+    torch = None
 
 from wfo.cpcv import CPCVConfig, CombinatorialPurgedCV
 from wfo.metrics import deflated_sharpe_ratio, sharpe_ratio
@@ -418,7 +422,7 @@ class AlgorithmSelector:
                 return create_recurrent_ppo_agent(self.env, rp_config)
             
             elif algorithm_type == AlgorithmType.PPO and STANDARD_AGENTS_AVAILABLE:
-                preferred_device = "cuda" if torch.cuda.is_available() else "cpu"
+                preferred_device = "cuda" if torch and torch.cuda.is_available() else "cpu"
                 config = {
                     'policy': 'MlpPolicy',
                     'learning_rate': 3e-4,
@@ -430,7 +434,7 @@ class AlgorithmSelector:
                 return PPO(config['policy'], self.env, **{k:v for k,v in config.items() if k != 'policy'})
             
             elif algorithm_type == AlgorithmType.A2C and STANDARD_AGENTS_AVAILABLE:
-                preferred_device = "cuda" if torch.cuda.is_available() else "cpu"
+                preferred_device = "cuda" if torch and torch.cuda.is_available() else "cpu"
                 config = {
                     'policy': 'MlpPolicy',
                     'learning_rate': 3e-4,

@@ -1,0 +1,9 @@
+{
+  "p_value": 1.0,
+  "survivors": {},
+  "strategies": [
+    "ma_fast",
+    "ma_medium",
+    "ma_slow"
+  ]
+}

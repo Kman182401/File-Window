@@ -5,7 +5,66 @@ from __future__ import annotations
 from dataclasses import dataclass
 import numpy as np
 import pandas as pd
-from scipy import stats
+try:  # pragma: no cover - optional heavy dependency
+    from scipy import stats
+    _HAS_SCIPY = True
+except Exception:  # pragma: no cover
+    import math
+
+    _HAS_SCIPY = False
+
+    class _StatsFallback:  # minimal scipy.stats subset
+        @staticmethod
+        def skew(r, bias: bool = False):
+            arr = np.asarray(r, dtype=float)
+            arr = arr[np.isfinite(arr)]
+            n = arr.size
+            if n < 3:
+                return 0.0
+            mean = arr.mean()
+            centered = arr - mean
+            m2 = np.mean(centered ** 2)
+            m3 = np.mean(centered ** 3)
+            if m2 == 0:
+                return 0.0
+            if bias:
+                return float(m3 / (m2 ** 1.5))
+            return float(np.sqrt(n * (n - 1)) / (n - 2) * (m3 / (m2 ** 1.5)))
+
+        @staticmethod
+        def kurtosis(r, fisher: bool = True, bias: bool = False):
+            arr = np.asarray(r, dtype=float)
+            arr = arr[np.isfinite(arr)]
+            n = arr.size
+            if n < 3:
+                return 0.0
+            mean = arr.mean()
+            centered = arr - mean
+            s2 = np.sum(centered ** 2)
+            s4 = np.sum(centered ** 4)
+            if s2 == 0:
+                return 0.0
+            if bias:
+                kurt = (n * s4) / (s2 ** 2)
+            else:
+                if n < 4:
+                    return 0.0
+                kurt = (
+                    (n * (n + 1) * s4) / ((n - 1) * (n - 2) * (n - 3) * (s2 ** 2))
+                    - (3 * (n - 1) ** 2) / ((n - 2) * (n - 3))
+                )
+            if fisher:
+                kurt -= 3.0
+            return float(kurt)
+
+        class norm:  # noqa: D401
+            """Normal distribution utilities."""
+
+            @staticmethod
+            def cdf(z: float) -> float:
+                return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
+
+    stats = _StatsFallback()
 
 
 def _to_array(values) -> np.ndarray:
