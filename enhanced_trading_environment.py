@@ -189,7 +189,15 @@ class EnhancedTradingEnvironment(gym.Env):
     
     def __init__(self, 
                  data: Optional[pd.DataFrame] = None,
-                 config: Optional[EnhancedTradingConfig] = None):
+                 config: Optional[EnhancedTradingConfig] = None,
+                 costs_bps: float = 0.0,
+                 lambda_var: float = 0.0,
+                 lambda_dd: float = 0.0,
+                 h_var: int = 60,
+                 hindsight_H: int = 0,
+                 hindsight_weight: float = 0.0,
+                 use_hindsight_in_training: bool = False,
+                 eval_mode: bool = False):
         """
         Initialize enhanced trading environment.
         
@@ -203,6 +211,22 @@ class EnhancedTradingEnvironment(gym.Env):
         self.data = data
         self.normalizer = ObservationNormalizer(self.config)
 
+        # Risk-aware reward parameters
+        self.costs_bps = float(costs_bps)
+        self.lambda_var = float(lambda_var)
+        self.lambda_dd = float(lambda_dd)
+        self.h_var = max(1, int(h_var))
+        self.hindsight_H = max(0, int(hindsight_H))
+        self.hindsight_weight = float(hindsight_weight)
+        self.use_hindsight_in_training = bool(use_hindsight_in_training)
+        self.eval_mode = bool(eval_mode)
+        self._return_window: deque[float] = deque(maxlen=self.h_var)
+        self._portfolio_peak: float = self.config.initial_balance
+        self._last_drawdown: float = 0.0
+        self._last_position: float = 0.0
+        self._last_price: Optional[float] = None
+        self._position_change: float = 0.0
+
         # Initialize spaces
         self._setup_spaces()
 
@@ -212,7 +236,7 @@ class EnhancedTradingEnvironment(gym.Env):
         self.balance = self.config.initial_balance
         self.position = 0
         self.entry_price = 0
-        self.portfolio_value_history = []
+        self.portfolio_value_history = [self.config.initial_balance]
 
         # Base configuration for domain randomization
         self._base_transaction_cost = self.config.transaction_cost
@@ -299,12 +323,21 @@ class EnhancedTradingEnvironment(gym.Env):
             Tuple of (observation, info)
         """
         super().reset(seed=seed)
+
+        if options is not None and "eval_mode" in options:
+            self.eval_mode = bool(options["eval_mode"])
         
         # Reset trading state
         self.balance = self.config.initial_balance
         self.position = 0
         self.entry_price = 0
-        self.portfolio_value_history = []
+        self.portfolio_value_history = [self.config.initial_balance]
+        self._return_window.clear()
+        self._portfolio_peak = self.config.initial_balance
+        self._last_drawdown = 0.0
+        self._last_position = 0.0
+        self._position_change = 0.0
+        self._last_price = None
         
         # Reset episode position
         if self.config.random_start and self.data is not None:
@@ -436,6 +469,8 @@ class EnhancedTradingEnvironment(gym.Env):
         # Calculate position change
         position_change = target_position - self.position
         
+        self._position_change = position_change
+
         if abs(position_change) > 0.01:  # Minimum position change
             # Calculate transaction cost
             transaction_cost = abs(position_change) * current_price * self.config.transaction_cost
@@ -467,9 +502,8 @@ class EnhancedTradingEnvironment(gym.Env):
         # Record action sign for transaction entropy
         self._record_transaction(direction, size)
 
-        # Record portfolio value
-        portfolio_value = self.balance + self.position * current_price
-        self.portfolio_value_history.append(portfolio_value)
+        # Update latest seen price for reward computations
+        self._last_price = current_price
     
     def _calculate_reward(self) -> float:
         """Calculate multi-component reward."""
