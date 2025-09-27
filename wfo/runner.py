@@ -427,6 +427,10 @@ def run_wfo(
             "embargo_days": config.embargo_days,
             "label_lookahead_bars": config.label_lookahead_bars,
             "rl_fast_smoke": config.rl_fast_smoke,
+            "reality_checks": {
+                "n_bootstrap": config.rc_bootstrap,
+                "block_len_bars": config.rc_block_len,
+            },
         },
         "library_versions": _collect_versions(),
         "data_hashes": data_hashes,

@@ -816,7 +816,12 @@ def select_strategies_with_cpcv(
                 "strategy": record["strategy"],
                 "median_sharpe": record["median_sharpe"],
                 "sharpe_scores": [float(s) for s in record["fold_sharpes"]],
-                "dsr": {"z_score": dsr.z_score, "p_value": dsr.p_value, "effective_trials": trials_effective},
+                "dsr": {
+                    "z_score": dsr.z_score,
+                    "p_value": dsr.p_value,
+                    "effective_trials": trials_effective,
+                },
+                "effective_trials": trials_effective,
             }
         )
 
