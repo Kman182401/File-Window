@@ -47,7 +47,7 @@ class RLAdapter:
         self.fast = fast_smoke
 
     def _build_vec_env(self, make_env_fn: Callable[[], Any], n_envs: int, *, training: bool) -> Any:
-        if not SB3_AVAILABLE:
+        if not SB3_AVAILABLE or DummyVecEnv is None or VecNormalize is None:
             raise RuntimeError("Stable-Baselines3 not available")
         venv = DummyVecEnv([make_env_fn for _ in range(n_envs)])
         venv = VecNormalize(
@@ -97,7 +97,7 @@ class RLAdapter:
         if not SB3_AVAILABLE and not hasattr(model, "predict"):
             raise RuntimeError("RL evaluation unavailable")
 
-        if SB3_AVAILABLE and isinstance(vecnorm_stats, VecNormalize):
+        if SB3_AVAILABLE and DummyVecEnv is not None and VecNormalize is not None and isinstance(vecnorm_stats, VecNormalize):
             venv = DummyVecEnv([make_env_fn])
             eval_env = VecNormalize(
                 venv,
@@ -108,10 +108,10 @@ class RLAdapter:
             eval_env.obs_rms = vecnorm_stats.obs_rms
             eval_env.ret_rms = vecnorm_stats.ret_rms
         else:
-            eval_env = DummyVecEnv([make_env_fn]) if SB3_AVAILABLE else make_env_fn()
+            eval_env = DummyVecEnv([make_env_fn]) if SB3_AVAILABLE and DummyVecEnv is not None else make_env_fn()
 
         returns: list[float] = []
-        obs = eval_env.reset()[0] if SB3_AVAILABLE else eval_env.reset()
+        obs = eval_env.reset()[0] if SB3_AVAILABLE and DummyVecEnv is not None else eval_env.reset()
         state = None
         while True:
             if hasattr(model, "predict"):

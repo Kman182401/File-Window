@@ -26,13 +26,20 @@ from .metrics import (
 )
 from .reporting import summarise_cycles, write_reports
 from .reality_checks import white_reality_check, hansen_spa
+from .rl_adapter import RLAdapter, RLSpec
+from .rl_env_builder import make_env_from_df
+from .supervised_baselines import logistic_positions
 
 
 @dataclass
 class StrategyConfig:
     name: str
     type: str
-    params: Dict[str, Any]
+    params: Optional[Dict[str, Any]] = None
+    algo: Optional[str] = None
+    policy: Optional[str] = None
+    rl: Optional[Dict[str, Any]] = None
+    model: Optional[str] = None
 
 
 @dataclass
@@ -50,6 +57,9 @@ class RunnerConfig:
     go_no_go: Dict[str, Any] | None = None
     rc_bootstrap: int = 1000
     rc_block_len: int = 78
+    rl_fast_smoke: bool = False
+    rl_fast_overrides: Optional[Dict[str, Any]] = None
+    trading_costs_bps: float = 0.0
 
 
 def load_config(path: Path | str | None) -> RunnerConfig:
@@ -58,7 +68,7 @@ def load_config(path: Path | str | None) -> RunnerConfig:
     else:
         with open(path, "r", encoding="utf-8") as fh:
             defaults = yaml.safe_load(fh)
-    strategies = [StrategyConfig(**entry) for entry in defaults.get("strategies", [])]
+    strategies = [_build_strategy(entry) for entry in defaults.get("strategies", [])]
     return RunnerConfig(
         strategies=strategies,
         trading_days_per_year=defaults.get("trading_days_per_year", 252),
@@ -73,6 +83,9 @@ def load_config(path: Path | str | None) -> RunnerConfig:
         go_no_go=defaults.get("go_no_go"),
         rc_bootstrap=defaults.get("reality_checks", {}).get("n_bootstrap", 1000),
         rc_block_len=defaults.get("reality_checks", {}).get("block_len_bars", 78),
+        rl_fast_smoke=bool(defaults.get("rl_fast_smoke", False)),
+        rl_fast_overrides=defaults.get("rl_fast_overrides"),
+        trading_costs_bps=float(defaults.get("trading_costs_bps", 0.0)),
     )
 
 
@@ -104,6 +117,18 @@ def _default_yaml() -> Dict[str, Any]:
             "block_len_bars": 78,
         },
     }
+
+
+def _build_strategy(entry: Dict[str, Any]) -> StrategyConfig:
+    return StrategyConfig(
+        name=entry["name"],
+        type=entry["type"],
+        params=entry.get("params"),
+        algo=entry.get("algo"),
+        policy=entry.get("policy"),
+        rl=entry.get("rl"),
+        model=entry.get("model"),
+    )
 
 
 def run_wfo(
@@ -268,9 +293,9 @@ def _build_cycles(bars: pd.DataFrame, is_days: int, oos_days: int, step_days: in
 def _run_cpcv_selection(
     is_df: pd.DataFrame,
     config: RunnerConfig,
+    strategies: Sequence[StrategyConfig],
     cpcv_folds: int,
     label_lookahead: int,
-    minutes_per_day: int,
 ) -> List[Dict[str, Any]]:
     base_df = is_df.reset_index(drop=True)
     returns = base_df["close"].pct_change().dropna().reset_index(drop=True)
@@ -288,8 +313,10 @@ def _run_cpcv_selection(
     )
     splitter = CombinatorialPurgedCV(cpcv_cfg)
 
-    results = []
-    for strat in config.strategies:
+    results: List[Dict[str, Any]] = []
+    for strat in strategies:
+        if strat.type == "rl_policy" or strat.model == "logistic":
+            continue
         strat_returns = _strategy_returns(base_df, strat).iloc[1:].reset_index(drop=True)
         oos_sharpes = []
         oos_returns = []
