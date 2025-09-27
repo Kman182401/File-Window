@@ -166,6 +166,9 @@ def run_wfo(
                 label_lookahead=config.label_lookahead_bars,
                 minutes_per_day=config.minutes_per_trading_day,
             )
+            if not selection:
+                print(f"[WFO] Skipping cycle {cycle_idx} for {symbol}: no strategies passed CPCV selection")
+                continue
             best = selection[0]
             for candidate in selection:
                 strat_returns = _strategy_returns(oos_df, candidate["strategy"])
@@ -214,7 +217,7 @@ def run_wfo(
     spa = hansen_spa(oos_matrix, n_bootstrap=config.rc_bootstrap, block_len=config.rc_block_len)
 
     extras = {
-        "dsr": {"z_score": dsr.z_score, "p_value": dsr.p_value},
+        "dsr": {"z_score": dsr.z_score, "p_value": dsr.p_value, "effective_trials": m_eff},
         "white_rc": {"p_value": white.p_value, "survivors": white.survivors, "strategies": names_order},
         "spa": {"p_value": spa.p_value, "survivors": spa.survivors, "strategies": names_order},
     }
@@ -339,6 +342,17 @@ def _strategy_signals(df: pd.DataFrame, strategy: StrategyConfig) -> pd.Series:
         signal = np.where(tmp["fast"] > tmp["slow"], 1.0, -1.0)
         return pd.Series(signal, index=df.index).shift(1).fillna(0)
     raise ValueError(f"Unsupported strategy type: {strategy.type}")
+
+
+def _effective_trials(matrix: np.ndarray) -> float:
+    if matrix.ndim != 2 or matrix.shape[1] == 0:
+        return 1.0
+    if matrix.shape[1] == 1:
+        return 1.0
+    c = np.corrcoef(matrix.T)
+    eig = np.linalg.eigvalsh(c)
+    denom = np.sum(eig ** 2) + 1e-12
+    return float(max(1.0, (eig.sum() ** 2) / denom))
 
 
 def _evaluate_go_no_go(summary: Dict[str, Any], dsr, thresholds: Dict[str, Any]) -> bool:
