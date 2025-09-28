@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 import numpy as np
 import pandas as pd
@@ -48,6 +48,8 @@ class DataAccessConfig:
     parquet_path: Optional[str] = None
     columns: Optional[Dict[str, str]] = None
     synthetic_days: int = 30
+    event_bars: Optional[Dict[str, Any]] = None
+    fracdiff: Optional[Dict[str, Any]] = None
 
 
 class MarketDataAccess:
@@ -78,8 +80,12 @@ class MarketDataAccess:
     ) -> pd.DataFrame:
         """Load bars for a symbol between start and end (inclusive)."""
         if self._dataset is not None:
-            return self._from_dataset(symbol, start, end, tz, limit)
-        return self._synthetic(symbol, start, end, tz, limit)
+            df = self._from_dataset(symbol, start, end, tz, limit)
+        else:
+            df = self._synthetic(symbol, start, end, tz, limit)
+        df = self._maybe_event_bars(df)
+        df = self._maybe_fracdiff(df)
+        return df
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -145,5 +151,116 @@ class MarketDataAccess:
         )
         return df.head(limit) if limit is not None else df
 
+    # ------------------------------------------------------------------
+    # Post-processing hooks
+    # ------------------------------------------------------------------
+    def _maybe_event_bars(self, df: pd.DataFrame) -> pd.DataFrame:
+        cfg = self.config.event_bars or {}
+        mode = str(cfg.get("mode", "")).lower()
+        if mode not in {"", "time", "tick", "volume", "dollar"}:
+            mode = ""
+        if mode in {"", "time"} or df.empty:
+            return df
+
+        threshold = cfg.get("threshold")
+        if threshold is None:
+            threshold = 1000 if mode == "tick" else 1_000_000
+        bars = _build_event_bars(df, mode=mode, threshold=threshold)
+        return bars if not bars.empty else df
+
+    def _maybe_fracdiff(self, df: pd.DataFrame) -> pd.DataFrame:
+        cfg = self.config.fracdiff or {}
+        if not cfg.get("enabled", False) or df.empty:
+            return df
+        columns = cfg.get("columns") or ["close"]
+        d = float(cfg.get("d", 0.5))
+        thresh = float(cfg.get("thresh", 1e-4))
+        for col in columns:
+            if col not in df.columns:
+                continue
+            name = f"{col}_fracdiff_{d:.2f}".replace(".", "p")
+            df[name] = fracdiff_series(df[col], d=d, thresh=thresh)
+        return df
+
 
 __all__ = ["MarketDataAccess", "DataAccessConfig"]
+
+
+def _build_event_bars(df: pd.DataFrame, *, mode: str, threshold: float) -> pd.DataFrame:
+    mode = mode.lower()
+    threshold = float(threshold)
+    if threshold <= 0:
+        return df
+
+    values = []
+    start_idx = 0
+    acc = 0.0
+    dollar_col = df["close"].to_numpy(dtype=float) * df["volume"].to_numpy(dtype=float)
+
+    for idx in range(len(df)):
+        if mode == "tick":
+            acc += 1
+        elif mode == "volume":
+            acc += float(df["volume"].iat[idx])
+        elif mode == "dollar":
+            acc += float(dollar_col[idx])
+        else:
+            break
+
+        if acc >= threshold:
+            window = df.iloc[start_idx : idx + 1]
+            values.append(_aggregate_window(window))
+            start_idx = idx + 1
+            acc = 0.0
+
+    if start_idx < len(df):
+        window = df.iloc[start_idx:]
+        if not window.empty:
+            values.append(_aggregate_window(window))
+
+    return pd.DataFrame(values)
+
+
+def _aggregate_window(window: pd.DataFrame) -> Dict[str, Any]:
+    open_price = float(window["open"].iloc[0])
+    close_price = float(window["close"].iloc[-1])
+    high_price = float(window["high"].max())
+    low_price = float(window["low"].min())
+    volume = float(window["volume"].sum())
+    timestamp = window["timestamp"].iloc[-1]
+    out = {
+        "timestamp": timestamp,
+        "open": open_price,
+        "high": high_price,
+        "low": low_price,
+        "close": close_price,
+        "volume": volume,
+    }
+    if "symbol" in window.columns:
+        out["symbol"] = window["symbol"].iloc[-1]
+    if "symbol_root" in window.columns:
+        out["symbol_root"] = window["symbol_root"].iloc[-1]
+    out["dollar_volume"] = float((window["close"] * window["volume"]).sum())
+    return out
+
+
+def fracdiff_series(series: pd.Series, *, d: float, thresh: float = 1e-4) -> pd.Series:
+    values = series.astype(float)
+    weights = [1.0]
+    k = 1
+    while True:
+        weight = -weights[-1] * (d - k + 1) / k
+        if abs(weight) < thresh:
+            break
+        weights.append(weight)
+        k += 1
+    weights = np.array(weights[::-1])
+
+    output = np.full(len(values), np.nan, dtype=float)
+    span = len(weights)
+    for i in range(span - 1, len(values)):
+        window = values.iloc[i - span + 1 : i + 1]
+        if window.isnull().any():
+            continue
+        output[i] = np.dot(weights, window.to_numpy())
+    return pd.Series(output, index=series.index)

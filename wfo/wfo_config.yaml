@@ -22,86 +22,126 @@ go_no_go:
   sharpe_min: 0.8
   dsr_p_max: 0.05
   slippage_budget_max: 0.8
+  white_p_min: 0.1
+  spa_p_min: 0.1
 reality_checks:
-  n_bootstrap: 1000  # keep >= 1000 for stable SPA/RC inference
-  block_len_bars: 78  # ~78 minutes (~1.3h) bootstrap block
+  n_bootstrap: 1000
+  block_len_bars: 78
 trading_costs_bps: 0.0
 rl_fast_smoke: false
 rl_fast_overrides:
   train_timesteps: 2000
-rl_defaults: &rl_defaults
+rl_defaults:
   train_timesteps: 50000
   n_envs: 1
   seed: 42
   vecnormalize_obs: true
   vecnormalize_reward: true
-  policy_kwargs: {}
-  algo_kwargs: {}
+  policy_kwargs: &id001 {}
+  algo_kwargs: &id002 {}
 strategies:
-  - name: ma_fast
-    type: moving_average
-    params:
-      fast: 10
-      slow: 40
-  - name: ma_medium
-    type: moving_average
-    params:
-      fast: 20
-      slow: 60
-  - name: ma_slow
-    type: moving_average
-    params:
-      fast: 40
-      slow: 120
-  - name: ES_PPO_LSTM
-    type: rl_policy
-    algo: RecurrentPPO
-    policy: MlpLstmPolicy
-    rl:
-      <<: *rl_defaults
-  - name: NQ_SAC
-    type: rl_policy
-    algo: SAC
-    policy: MlpPolicy
-    rl:
-      <<: *rl_defaults
-      train_timesteps: 30000
-      seed: 123
-      algo_kwargs:
-        # Stable SB3 SAC defaults: auto entropy, large buffer, tau=0.005
-        learning_rate: 0.0003
-        buffer_size: 1000000
-        learning_starts: 100
-        batch_size: 256
-        tau: 0.005
-        gamma: 0.99
-        train_freq: 1
-        gradient_steps: 1
-        ent_coef: auto
-  - name: GC_TD3
-    type: rl_policy
-    algo: TD3
-    policy: MlpPolicy
-    rl:
-      <<: *rl_defaults
-      algo_kwargs:
-        # SB3 TD3 knobs: twin critics, delayed policy, target smoothing
-        learning_rate: 0.0003
-        buffer_size: 1000000
-        learning_starts: 100
-        batch_size: 256
-        tau: 0.005
-        gamma: 0.99
-        train_freq: 1
-        gradient_steps: 1
-        policy_delay: 2
-        target_policy_noise: 0.2
-        target_noise_clip: 0.5
-  - name: ES_LogReg
-    type: supervised
-    model: logistic
-    params:
-      target_col: label
-      C: 0.5
-      calibration: sigmoid
-      calibration_cv: 3
+- name: ma_fast
+  type: moving_average
+  params:
+    fast: 10
+    slow: 40
+- name: ma_medium
+  type: moving_average
+  params:
+    fast: 20
+    slow: 60
+- name: ma_slow
+  type: moving_average
+  params:
+    fast: 40
+    slow: 120
+- name: ES_PPO_LSTM
+  type: rl_policy
+  algo: RecurrentPPO
+  policy: MlpLstmPolicy
+  rl:
+    train_timesteps: 50000
+    n_envs: 1
+    seed: 42
+    vecnormalize_obs: true
+    vecnormalize_reward: true
+    policy_kwargs: *id001
+    algo_kwargs: *id002
+- name: NQ_SAC
+  type: rl_policy
+  algo: SAC
+  policy: MlpPolicy
+  rl:
+    train_timesteps: 30000
+    n_envs: 1
+    seed: 123
+    vecnormalize_obs: true
+    vecnormalize_reward: true
+    policy_kwargs: *id001
+    algo_kwargs:
+      learning_rate: 0.0003
+      buffer_size: 1000000
+      learning_starts: 100
+      batch_size: 256
+      tau: 0.005
+      gamma: 0.99
+      train_freq: 1
+      gradient_steps: 1
+      ent_coef: auto
+- name: GC_TD3
+  type: rl_policy
+  algo: TD3
+  policy: MlpPolicy
+  rl:
+    train_timesteps: 50000
+    n_envs: 1
+    seed: 42
+    vecnormalize_obs: true
+    vecnormalize_reward: true
+    policy_kwargs: *id001
+    algo_kwargs:
+      learning_rate: 0.0003
+      buffer_size: 1000000
+      learning_starts: 100
+      batch_size: 256
+      tau: 0.005
+      gamma: 0.99
+      train_freq: 1
+      gradient_steps: 1
+      policy_delay: 2
+      target_policy_noise: 0.2
+      target_noise_clip: 0.5
+- name: ES_LogReg
+  type: supervised
+  model: logistic
+  params:
+    target_col: meta_label
+    C: 0.5
+    calibration: sigmoid
+    calibration_cv: 3
+    use_meta: true
+    side_col: side
+    meta_label_col: meta_label
+    activation_threshold: 0.55
+    sample_weight_col: sample_weight
+    probability_floor: 0.1
+labeling:
+  mode: triple_barrier
+  pt_multiplier: 1.0
+  sl_multiplier: 1.5
+  max_holding_bars: 390
+  volatility_span: 50
+  side_col: side
+  label_col: label
+  meta_label_col: meta_label
+  sample_weight_col: sample_weight
+  use_meta: true
+event_bars:
+  mode: dollar
+  threshold: 750000
+fracdiff:
+  enabled: true
+  columns:
+  - close
+  d: 0.5
+  thresh: 0.0001

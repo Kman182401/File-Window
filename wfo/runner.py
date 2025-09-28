@@ -10,14 +10,14 @@ from datetime import datetime, timedelta
 from importlib import metadata
 from pathlib import Path
 from collections import defaultdict
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
 import pandas as pd
 import yaml
 
 from .cpcv import CombinatorialPurgedCV, CPCVConfig
-from .data_access import MarketDataAccess
+from .data_access import DataAccessConfig, MarketDataAccess
 from .metrics import (
     sharpe_ratio,
     sortino_ratio,
@@ -30,7 +30,11 @@ from .metrics import (
 from .reporting import summarise_cycles, write_reports
 from .reality_checks import white_reality_check, hansen_spa
 from .rl_adapter import RLAdapter, RLSpec, SB3_AVAILABLE
-from .labeling import ensure_forward_label
+from .labeling import (
+    TripleBarrierConfig,
+    ensure_forward_label,
+    triple_barrier_labels,
+)
 from .supervised_baselines import logistic_positions
 from .utils import enable_determinism, resolve_session_minutes
 
@@ -68,6 +72,9 @@ class RunnerConfig:
     trading_costs_bps: float = 0.0
     deterministic_debug: bool = False
     deterministic_seed: int = 42
+    labeling: Optional[Dict[str, Any]] = None
+    event_bars: Optional[Dict[str, Any]] = None
+    fracdiff: Optional[Dict[str, Any]] = None
 
 
 def load_config(path: Path | str | None) -> RunnerConfig:
@@ -97,6 +104,9 @@ def load_config(path: Path | str | None) -> RunnerConfig:
         trading_costs_bps=float(defaults.get("trading_costs_bps", 0.0)),
         deterministic_debug=bool(defaults.get("deterministic_debug", False)),
         deterministic_seed=int(defaults.get("deterministic_seed", 42)),
+        labeling=defaults.get("labeling"),
+        event_bars=defaults.get("event_bars"),
+        fracdiff=defaults.get("fracdiff"),
     )
 
 
@@ -192,7 +202,8 @@ def run_wfo(
         )
         enable_determinism(config.deterministic_seed)
 
-    data_access = MarketDataAccess()
+    data_cfg = DataAccessConfig(event_bars=config.event_bars, fracdiff=config.fracdiff)
+    data_access = MarketDataAccess(data_cfg)
     now = datetime.utcnow()
     start_lookup = now - timedelta(days=max(is_days, 180) * 2)
 
@@ -201,6 +212,26 @@ def run_wfo(
         s if isinstance(s, StrategyConfig) else _build_strategy(s)
         for s in strategy_entries
     ]
+
+    label_cfg = config.labeling or {}
+    label_mode = str(label_cfg.get("mode", "forward")).lower()
+    use_meta_labels = bool(label_cfg.get("use_meta", False))
+    tb_config_template: TripleBarrierConfig | None = None
+    if label_mode == "triple_barrier":
+        tb_config_template = TripleBarrierConfig(
+            pt_multiplier=float(label_cfg.get("pt_multiplier", 1.0)),
+            sl_multiplier=float(label_cfg.get("sl_multiplier", 1.0)),
+            max_holding=int(label_cfg.get("max_holding_bars", max(1, config.label_lookahead_bars))),
+            volatility_span=int(label_cfg.get("volatility_span", 50)),
+            price_col=str(label_cfg.get("price_col", "close")),
+            volatility_col=label_cfg.get("volatility_col"),
+            side_col=label_cfg.get("side_col"),
+            label_col=str(label_cfg.get("label_col", "label")),
+            meta_label_col=str(label_cfg.get("meta_label_col", "meta_label")),
+            ret_col=str(label_cfg.get("ret_col", "ret")),
+            t1_col=str(label_cfg.get("t1_col", "t1")),
+            sample_weight_col=str(label_cfg.get("sample_weight_col", "sample_weight")),
+        )
 
     per_cycle_records: List[Dict[str, Any]] = []
     per_config_returns: Dict[str, List[np.ndarray]] = {s.name: [] for s in strategy_objs}
@@ -249,7 +280,17 @@ def run_wfo(
                 continue
 
             lookahead = max(1, config.label_lookahead_bars)
-            ensure_forward_label(is_df, horizon=lookahead)
+            if label_mode == "triple_barrier" and tb_config_template is not None:
+                tb_labels = triple_barrier_labels(is_df, tb_config_template)
+                is_df = is_df.join(tb_labels)
+                if "exit_index" in is_df.columns:
+                    is_df = is_df.drop(columns=["exit_index"])
+                target_col = tb_config_template.meta_label_col if use_meta_labels else tb_config_template.label_col
+                if target_col in is_df.columns:
+                    is_df = is_df.dropna(subset=[target_col])
+            else:
+                ensure_forward_label(is_df, horizon=lookahead)
+
             ensure_forward_label(oos_df, horizon=lookahead)
 
             non_rl = [s for s in strategy_objs if s.type not in {"rl_policy", "supervised"}]
@@ -352,9 +393,17 @@ def run_wfo(
             sup_strats = [s for s in strategy_objs if s.type == "supervised" and s.model == "logistic"]
             for sup_strat in sup_strats:
                 params = sup_strat.params or {}
+                if use_meta_labels and "target_col" not in params and tb_config_template is not None:
+                    params["target_col"] = tb_config_template.meta_label_col
                 target_col = params.get("target_col", "label")
-                ensure_forward_label(is_df, horizon=lookahead)
-                ensure_forward_label(oos_df, horizon=lookahead)
+                if "use_meta" not in params:
+                    params["use_meta"] = use_meta_labels
+                if params.get("use_meta") and "side_col" not in params and tb_config_template is not None:
+                    params["side_col"] = tb_config_template.side_col or "side"
+                if params.get("use_meta") and "meta_label_col" not in params and tb_config_template is not None:
+                    params["meta_label_col"] = tb_config_template.meta_label_col
+                if "sample_weight_col" not in params and tb_config_template is not None:
+                    params["sample_weight_col"] = tb_config_template.sample_weight_col
                 if target_col not in is_df.columns:
                     print(f"[WFO] Logistic baseline skipped (missing target '{target_col}' in IS data)")
                     continue
@@ -419,6 +468,8 @@ def run_wfo(
     spa = hansen_spa(oos_matrix, n_bootstrap=config.rc_bootstrap, block_len=config.rc_block_len)
 
     summary["effective_trials"] = m_eff
+    summary["white_rc_p"] = white.p_value
+    summary["spa_p"] = spa.p_value
 
     extras = {
         "dsr": {"z_score": dsr.z_score, "p_value": dsr.p_value, "effective_trials": m_eff},
@@ -458,7 +509,7 @@ def run_wfo(
         os.environ.setdefault("ALLOW_ORDERS", "0")
 
     if config.go_no_go:
-        summary["go_no_go"] = _evaluate_go_no_go(summary, dsr, config.go_no_go)
+        summary["go_no_go"] = _evaluate_go_no_go(summary, dsr, white, spa, config.go_no_go)
 
     return {
         "summary": summary,
@@ -589,14 +640,24 @@ def _effective_trials(matrix: np.ndarray) -> float:
     return float(max(1.0, (eig.sum() ** 2) / denom))
 
 
-def _evaluate_go_no_go(summary: Dict[str, Any], dsr, thresholds: Dict[str, Any]) -> bool:
+def _evaluate_go_no_go(
+    summary: Dict[str, Any],
+    dsr,
+    white,
+    spa,
+    thresholds: Dict[str, Any],
+) -> bool:
     sharpe_min = thresholds.get("sharpe_min")
     dsr_p_max = thresholds.get("dsr_p_max")
     slippage_max = thresholds.get("slippage_budget_max")
+    white_p_min = thresholds.get("white_p_min")
+    spa_p_min = thresholds.get("spa_p_min")
     sharpe_ok = sharpe_min is None or summary.get("sharpe_median", 0) >= sharpe_min
     dsr_ok = dsr_p_max is None or dsr.p_value <= dsr_p_max
     slippage_ok = slippage_max is None or summary.get("slippage_budget_used", 0) <= slippage_max
-    return bool(sharpe_ok and dsr_ok and slippage_ok)
+    white_ok = white_p_min is None or white.p_value >= white_p_min
+    spa_ok = spa_p_min is None or spa.p_value >= spa_p_min
+    return bool(sharpe_ok and dsr_ok and slippage_ok and white_ok and spa_ok)
 
 
 def _build_cycle_record(

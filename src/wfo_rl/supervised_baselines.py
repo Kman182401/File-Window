@@ -20,6 +20,14 @@ def logistic_positions(
     target_col: str = "label",
     calibration: str = "sigmoid",
     calibration_cv: int = 3,
+    *,
+    side_col: str = "side",
+    meta_label_col: str = "meta_label",
+    use_meta: bool = False,
+    activation_threshold: float = 0.5,
+    sample_weight_col: str | None = None,
+    probability_floor: float = 0.0,
+    feature_blacklist: tuple[str, ...] = ("timestamp", "returns", "price"),
     **kwargs: Any,
 ) -> np.ndarray:
     """Fit logistic regression (with probability calibration) and emit OOS positions.
@@ -33,14 +41,19 @@ def logistic_positions(
     if not SK_AVAILABLE:
         raise RuntimeError("scikit-learn not available")
 
-    feature_cols = [c for c in is_df.columns if c not in ("timestamp", "returns", "price", target_col)]
+    blacklist = set(feature_blacklist + (target_col,))
+    feature_cols = [c for c in is_df.columns if c not in blacklist]
     if not feature_cols:
         raise ValueError("No feature columns available for logistic baseline")
     if target_col not in is_df.columns:
         raise ValueError(f"Target column '{target_col}' missing from IS data")
 
-    X = is_df[feature_cols].to_numpy()
-    y = is_df[target_col].to_numpy()
+    train_df = is_df.dropna(subset=[target_col])
+    if train_df.empty:
+        return np.zeros(len(oos_df), dtype=float)
+
+    X = train_df[feature_cols].to_numpy()
+    y = train_df[target_col].to_numpy()
 
     classes = np.unique(y)
     if classes.size < 2:
@@ -50,16 +63,38 @@ def logistic_positions(
     if missing:
         raise ValueError(f"OOS data missing feature columns: {missing}")
 
+    sample_weight = None
+    if sample_weight_col and sample_weight_col in train_df.columns:
+        sample_weight = train_df[sample_weight_col].to_numpy(dtype=float)
+        if np.all(sample_weight == 0):
+            sample_weight = None
+
     base_model = LogisticRegression(max_iter=200, **kwargs)
-    calibrator = CalibratedClassifierCV(base_model, method=calibration, cv=calibration_cv)
-    try:
-        calibrator.fit(X, y)
-        X_oos = oos_df[feature_cols].to_numpy()
-        proba = calibrator.predict_proba(X_oos)[:, 1]
-    except ValueError:
-        base_model.fit(X, y)
-        X_oos = oos_df[feature_cols].to_numpy()
+    X_oos = oos_df[feature_cols].to_numpy()
+
+    if sample_weight is None and calibration_cv > 1:
+        calibrator = CalibratedClassifierCV(base_model, method=calibration, cv=calibration_cv)
+        try:
+            calibrator.fit(X, y)
+            proba = calibrator.predict_proba(X_oos)[:, 1]
+        except ValueError:
+            base_model.fit(X, y)
+            proba = base_model.predict_proba(X_oos)[:, 1]
+    else:
+        base_model.fit(X, y, sample_weight=sample_weight)
         proba = base_model.predict_proba(X_oos)[:, 1]
+
+    proba = np.clip(proba, probability_floor, 1.0)
+
+    if use_meta:
+        if side_col not in oos_df.columns:
+            raise ValueError(f"OOS data missing side column '{side_col}' for meta-label sizing")
+        if meta_label_col not in train_df.columns:
+            raise ValueError(f"IS data missing meta label column '{meta_label_col}'")
+        mask = proba >= activation_threshold
+        size = np.where(mask, proba, 0.0)
+        return (oos_df[side_col].to_numpy(dtype=float) * size).astype(float)
+
     return (proba * 2.0 - 1.0).astype(float)
 
 
