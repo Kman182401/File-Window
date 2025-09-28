@@ -107,24 +107,30 @@ def get_ibkr_front_month_contract(
 
 
 class IBKRIngestor:
-    # Symbol alias mapping: alternative forms -> canonical forms
+    # Map common aliases (front-month futures, FX tickers) to canonical symbols used by WFO.
     SYMBOL_ALIASES = {
-        "GC": "XAUUSD",
-        "6E": "EURUSD", 
-        "6B": "GBPUSD",
-        "6A": "AUDUSD",
-        "XAUUSD": "XAUUSD",
-        "EURUSD": "EURUSD",
-        "GBPUSD": "GBPUSD", 
-        "AUDUSD": "AUDUSD",
-        "ES1!": "ES1!",
-        "NQ1!": "NQ1!"
+        "ES1!": "ES",
+        "NQ1!": "NQ",
+        "XAUUSD": "GC",
+        "EURUSD": "6E",
+        "GBPUSD": "6B",
+        "AUDUSD": "6A",
+        "ES": "ES",
+        "NQ": "NQ",
+        "GC": "GC",
+        "6E": "6E",
+        "6B": "6B",
+        "6A": "6A",
     }
-    
+
+    @classmethod
+    def canonical_symbol(cls, s: str) -> str:
+        """Return the canonical symbol for any alias, defaulting to upper-case input."""
+        return cls.SYMBOL_ALIASES.get(s.upper(), s.upper())
+
     def _canonical_symbol(self, symbol: str) -> str:
-        """Convert symbol to canonical form, case-insensitive lookup."""
-        normalized = symbol.strip().upper()
-        return self.SYMBOL_ALIASES.get(normalized, symbol)
+        """Backward-compatible alias that delegates to the class helper."""
+        return self.canonical_symbol(symbol)
 
     def __init__(self, host=None, port=None, clientId=None, ib=None):
         import os

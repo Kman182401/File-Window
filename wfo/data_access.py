@@ -24,6 +24,22 @@ except Exception:  # pragma: no cover
     _HAS_IBKR = False
 
 
+
+# --- Safe alias mapping (works even if IBKRIngestor lacks SYMBOL_ALIASES) ---
+try:
+    from market_data_ibkr_adapter import IBKRIngestor  # optional dependency
+except Exception:
+    IBKRIngestor = None  # type: ignore
+
+SYMBOL_ALIASES = {
+    "ES1!": "ES", "NQ1!": "NQ",
+    "XAUUSD": "GC",
+    "EURUSD": "6E", "GBPUSD": "6B", "AUDUSD": "6A",
+    "ES": "ES", "NQ": "NQ", "GC": "GC", "6E": "6E", "6B": "6B", "6A": "6A",
+}
+if IBKRIngestor is not None:
+    SYMBOL_ALIASES.update(getattr(IBKRIngestor, "SYMBOL_ALIASES", {}))
+# ---------------------------------------------------------------------------
 DEFAULT_COLUMNS = ["timestamp", "open", "high", "low", "close", "volume"]
 
 
@@ -80,7 +96,7 @@ class MarketDataAccess:
         if self.config.columns:
             columns = list(self.config.columns.values())
         if _HAS_IBKR and IBKRIngestor is not None:
-            symbol_root = IBKRIngestor.SYMBOL_ALIASES.get(symbol.upper(), symbol.upper())
+            symbol_root = SYMBOL_ALIASES.get(symbol.upper(), symbol.upper())
         else:
             symbol_root = symbol.upper()
         filt = (
