@@ -1,0 +1,66 @@
+{
+  "strategy": {
+    "name": "NQ_SAC",
+    "type": "rl_policy",
+    "algo": "SAC",
+    "policy": "MlpPolicy",
+    "rl": {
+      "train_timesteps": 30000,
+      "n_envs": 1,
+      "seed": 123,
+      "vecnormalize_obs": true,
+      "vecnormalize_reward": true,
+      "policy_kwargs": {},
+      "algo_kwargs": {
+        "device": "cuda",
+        "learning_rate": 0.0003,
+        "buffer_size": 1000000,
+        "learning_starts": 100,
+        "batch_size": 256,
+        "tau": 0.005,
+        "gamma": 0.99,
+        "train_freq": 1,
+        "gradient_steps": 1,
+        "ent_coef": "auto"
+      },
+      "use_imitation_warmstart": false,
+      "warmstart_epochs": 3
+    },
+    "reward": {
+      "costs_bps": 0.25,
+      "lambda_var": 0.2,
+      "lambda_dd": 0.05,
+      "h_var": 90
+    }
+  },
+  "rl": {
+    "train_timesteps": 30000,
+    "n_envs": 1,
+    "seed": 123,
+    "vecnormalize_obs": true,
+    "vecnormalize_reward": true,
+    "policy_kwargs": {},
+    "algo_kwargs": {
+      "device": "cuda",
+      "learning_rate": 0.0003,
+      "buffer_size": 1000000,
+      "learning_starts": 100,
+      "batch_size": 256,
+      "tau": 0.005,
+      "gamma": 0.99,
+      "train_freq": 1,
+      "gradient_steps": 1,
+      "ent_coef": "auto"
+    },
+    "use_imitation_warmstart": false,
+    "warmstart_epochs": 3
+  },
+  "reward": {
+    "costs_bps": 0.25,
+    "lambda_var": 0.2,
+    "lambda_dd": 0.05,
+    "h_var": 90
+  },
+  "trained_at": "2025-09-28T05:32:33.989543",
+  "vecnormalize_stats": "artifacts/offline_train/20250928_051904/NQ_SAC/vecnormalize.pkl"
+}
