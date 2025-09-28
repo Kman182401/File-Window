@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from typing import Hashable, Iterable, Optional
 
 import numpy as np
 import pandas as pd
+
+
+logger = logging.getLogger(__name__)
 
 
 def ensure_forward_label(
@@ -104,6 +108,11 @@ def triple_barrier_labels(df: pd.DataFrame, config: TripleBarrierConfig) -> pd.D
     t1 = np.full(n, np.nan)
     exit_index = np.full(n, np.nan)
 
+    skip_vol = 0
+    pt_hits = 0
+    sl_hits = 0
+    expiry_hits = 0
+
     pt_mult = max(0.0, float(config.pt_multiplier))
     sl_mult = max(0.0, float(config.sl_multiplier))
     max_holding = max(1, int(config.max_holding))
@@ -114,6 +123,7 @@ def triple_barrier_labels(df: pd.DataFrame, config: TripleBarrierConfig) -> pd.D
     for i in range(n):
         sigma = vol[i]
         if not np.isfinite(sigma) or sigma == 0:
+            skip_vol += 1
             continue
 
         direction = side[i] if side is not None else 1.0
@@ -130,18 +140,28 @@ def triple_barrier_labels(df: pd.DataFrame, config: TripleBarrierConfig) -> pd.D
         lower = -sl_mult * sigma if sl_mult > 0 else -np.inf
 
         hit_idx = None
+        hit_type = "expiry"
         for offset, r_val in enumerate(path_ret):
             if r_val >= upper:
                 hit_idx = i + offset
+                hit_type = "pt"
                 break
             if r_val <= lower:
                 hit_idx = i + offset
+                hit_type = "sl"
                 break
 
         if hit_idx is None:
             hit_idx = vertical_end
         exit_index[i] = hit_idx
         t1[i] = index[hit_idx]
+
+        if hit_type == "pt":
+            pt_hits += 1
+        elif hit_type == "sl":
+            sl_hits += 1
+        else:
+            expiry_hits += 1
 
         realised_ret = price_values[hit_idx] / start_price - 1.0
         aligned_ret = direction * realised_ret
@@ -169,30 +189,49 @@ def triple_barrier_labels(df: pd.DataFrame, config: TripleBarrierConfig) -> pd.D
     if config.side_col and config.side_col in df.columns:
         out[config.side_col] = df[config.side_col]
     out["exit_index"] = exit_index
+
+    if n:
+        logger.info(
+            "TB: skipped %.2f%% rows due to zero/non-finite vol (span=%d); hits -> PT=%d, SL=%d, EXP=%d",
+            100.0 * skip_vol / n,
+            int(config.volatility_span),
+            pt_hits,
+            sl_hits,
+            expiry_hits,
+        )
     return out
 
 
 def _meta_sample_weights(exit_indices: Iterable[float], returns: Iterable[float]) -> np.ndarray:
     exit_arr = np.asarray(exit_indices, dtype=float)
     n = exit_arr.shape[0]
-    concurrency = np.zeros(n, dtype=float)
+    diff = np.zeros(n + 1, dtype=float)
 
-    for i, exit_idx in enumerate(exit_arr):
-        if not np.isfinite(exit_idx):
+    for i, e in enumerate(exit_arr):
+        if not np.isfinite(e):
             continue
-        start = i
-        end = int(exit_idx)
-        concurrency[start : end + 1] += 1.0
+        e = int(e)
+        if e < i:
+            continue
+        diff[i] += 1.0
+        if e + 1 <= n - 1:
+            diff[e + 1] -= 1.0
 
-    concurrency[concurrency == 0] = 1.0
+    concurrency = np.cumsum(diff)[:n]
+    inv_conc = np.zeros(n, dtype=float)
+    mask = concurrency > 0
+    inv_conc[mask] = 1.0 / concurrency[mask]
+    prefix = np.cumsum(inv_conc)
 
     weights = np.zeros(n, dtype=float)
-    for i, exit_idx in enumerate(exit_arr):
-        if not np.isfinite(exit_idx):
+    for i, e in enumerate(exit_arr):
+        if not np.isfinite(e):
             continue
-        end = int(exit_idx)
-        contrib = np.sum(1.0 / concurrency[i : end + 1])
-        weights[i] = contrib
+        e = int(e)
+        if e < i:
+            continue
+        prev = prefix[i - 1] if i > 0 else 0.0
+        weights[i] = prefix[e] - prev
 
     abs_ret = np.abs(np.asarray(returns, dtype=float))
     weights *= abs_ret

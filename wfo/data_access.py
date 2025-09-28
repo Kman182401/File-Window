@@ -161,12 +161,17 @@ class MarketDataAccess:
             mode = ""
         if mode in {"", "time"} or df.empty:
             return df
+        required = {"close", "volume"}
+        if not required.issubset(df.columns):
+            return df
 
         threshold = cfg.get("threshold")
         if threshold is None:
             threshold = 1000 if mode == "tick" else 1_000_000
         bars = _build_event_bars(df, mode=mode, threshold=threshold)
-        return bars if not bars.empty else df
+        if bars is None or bars.empty:
+            return df
+        return bars
 
     def _maybe_fracdiff(self, df: pd.DataFrame) -> pd.DataFrame:
         cfg = self.config.fracdiff or {}
@@ -245,6 +250,11 @@ def _aggregate_window(window: pd.DataFrame) -> Dict[str, Any]:
 
 
 def fracdiff_series(series: pd.Series, *, d: float, thresh: float = 1e-4) -> pd.Series:
+    """Fractional differentiation with d typically in [0, 1].
+
+    When ``d = 0`` the original series is returned (after dropping NaNs); as ``d``
+    approaches 1 the transformation converges to a first difference.
+    """
     values = series.astype(float)
     weights = [1.0]
     k = 1

@@ -28,6 +28,7 @@ def logistic_positions(
     sample_weight_col: str | None = None,
     probability_floor: float = 0.0,
     feature_blacklist: tuple[str, ...] = ("timestamp", "returns", "price"),
+    calibrate_with_weights: bool = False,
     **kwargs: Any,
 ) -> np.ndarray:
     """Fit logistic regression (with probability calibration) and emit OOS positions.
@@ -74,7 +75,7 @@ def logistic_positions(
     base_model = LogisticRegression(max_iter=200, **kwargs)
     X_oos = oos_df[feature_cols].fillna(method="ffill").fillna(0.0).to_numpy()
 
-    if sample_weight is None and calibration_cv > 1:
+    if sample_weight is None and calibration_cv > 1 and not calibrate_with_weights:
         calibrator = CalibratedClassifierCV(base_model, method=calibration, cv=calibration_cv)
         try:
             calibrator.fit(X, y)
@@ -82,6 +83,10 @@ def logistic_positions(
         except ValueError:
             base_model.fit(X, y)
             proba = base_model.predict_proba(X_oos)[:, 1]
+    elif calibration_cv > 1 and calibrate_with_weights and sample_weight is not None:
+        calibrator = CalibratedClassifierCV(base_model, method=calibration, cv=calibration_cv)
+        calibrator.fit(X, y, sample_weight=sample_weight)
+        proba = calibrator.predict_proba(X_oos)[:, 1]
     else:
         base_model.fit(X, y, sample_weight=sample_weight)
         proba = base_model.predict_proba(X_oos)[:, 1]
