@@ -11,7 +11,7 @@ rl_defaults: &rl_defaults
   warmstart_epochs: 3
 
 datasets:
-  minute_bars_path: data/minute_bars
+  minute_bars_path: /home/karson/data/ibkr_partitioned/minute_bars
   lookback_days: 30
 
 deterministic_debug: false

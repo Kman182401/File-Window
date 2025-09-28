@@ -78,6 +78,20 @@ def load_minute_data(data_path: Path, symbol: str, fallback_days: int = 5) -> pd
             if "timestamp" not in df.columns:
                 df["timestamp"] = pd.date_range(start=datetime.utcnow(), periods=len(df), freq="1min")
             return df
+        try:
+            import pyarrow.dataset as ds  # type: ignore
+
+            dataset = ds.dataset(str(data_path), format="parquet", partitioning="hive")
+            table = dataset.to_table(filter=ds.field("symbol_root") == symbol)
+            if table.num_rows > 0:
+                df = table.to_pandas()
+                if "timestamp" not in df.columns:
+                    df["timestamp"] = pd.date_range(start=datetime.utcnow(), periods=len(df), freq="1min")
+                if "returns" not in df.columns and "close" in df.columns:
+                    df["returns"] = df["close"].pct_change().fillna(0.0)
+                return df
+        except Exception:
+            logger.debug("pyarrow.dataset fallback unavailable for %s", data_path, exc_info=True)
     logger.warning("Minute data not found for %s at %s; generating synthetic sample", symbol, data_path)
     bars = fallback_days * 390
     index = pd.date_range(end=datetime.utcnow(), periods=bars, freq="1min")
