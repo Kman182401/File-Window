@@ -1,0 +1,54 @@
+{
+  "strategy": {
+    "name": "ES_PPO_LSTM",
+    "type": "rl_policy",
+    "algo": "RecurrentPPO",
+    "policy": "MlpLstmPolicy",
+    "rl": {
+      "train_timesteps": 50000,
+      "n_envs": 1,
+      "seed": 42,
+      "vecnormalize_obs": true,
+      "vecnormalize_reward": true,
+      "policy_kwargs": {},
+      "algo_kwargs": {
+        "device": "cuda"
+      },
+      "use_imitation_warmstart": false,
+      "warmstart_epochs": 3
+    },
+    "reward": {
+      "costs_bps": 0.5,
+      "lambda_var": 0.0,
+      "lambda_dd": 0.0,
+      "h_var": 60,
+      "hindsight_H": 120,
+      "hindsight_weight": 0.05,
+      "use_hindsight_in_training": true
+    }
+  },
+  "rl": {
+    "train_timesteps": 50000,
+    "n_envs": 1,
+    "seed": 42,
+    "vecnormalize_obs": true,
+    "vecnormalize_reward": true,
+    "policy_kwargs": {},
+    "algo_kwargs": {
+      "device": "cuda"
+    },
+    "use_imitation_warmstart": false,
+    "warmstart_epochs": 3
+  },
+  "reward": {
+    "costs_bps": 0.5,
+    "lambda_var": 0.0,
+    "lambda_dd": 0.0,
+    "h_var": 60,
+    "hindsight_H": 120,
+    "hindsight_weight": 0.05,
+    "use_hindsight_in_training": true
+  },
+  "trained_at": "2025-09-28T05:24:44.072133",
+  "vecnormalize_stats": "artifacts/offline_train/20250928_051904/ES_PPO_LSTM/vecnormalize.pkl"
+}
