@@ -41,7 +41,8 @@ def logistic_positions(
     if not SK_AVAILABLE:
         raise RuntimeError("scikit-learn not available")
 
-    blacklist = set(feature_blacklist + (target_col,))
+    blacklist = set(feature_blacklist)
+    blacklist.add(target_col)
     feature_cols = [c for c in is_df.columns if c not in blacklist]
     if not feature_cols:
         raise ValueError("No feature columns available for logistic baseline")
@@ -49,6 +50,7 @@ def logistic_positions(
         raise ValueError(f"Target column '{target_col}' missing from IS data")
 
     train_df = is_df.dropna(subset=[target_col])
+    train_df = train_df.dropna(subset=feature_cols)
     if train_df.empty:
         return np.zeros(len(oos_df), dtype=float)
 
@@ -70,7 +72,7 @@ def logistic_positions(
             sample_weight = None
 
     base_model = LogisticRegression(max_iter=200, **kwargs)
-    X_oos = oos_df[feature_cols].to_numpy()
+    X_oos = oos_df[feature_cols].fillna(method="ffill").fillna(0.0).to_numpy()
 
     if sample_weight is None and calibration_cv > 1:
         calibrator = CalibratedClassifierCV(base_model, method=calibration, cv=calibration_cv)
