@@ -60,7 +60,7 @@ def estimate_volatility(
 
     pct = price.pct_change()
     vol = pct.ewm(span=span, min_periods=min_periods or span).std()
-    vol = vol.fillna(method="bfill").fillna(0.0)
+    vol = vol.bfill().fillna(0.0)
     return vol
 
 
@@ -105,7 +105,7 @@ def triple_barrier_labels(df: pd.DataFrame, config: TripleBarrierConfig) -> pd.D
     label = np.zeros(n, dtype=float)
     meta = np.zeros(n, dtype=float)
     ret = np.zeros(n, dtype=float)
-    t1 = np.full(n, np.nan)
+    t1 = np.full(n, np.datetime64('NaT'), dtype='datetime64[ns]')
     exit_index = np.full(n, np.nan)
 
     skip_vol = 0

@@ -26,7 +26,7 @@ go_no_go:
   spa_p_min: 0.1
 reality_checks:
   n_bootstrap: 1000
-  block_len_bars: 78
+  block_len_bars: 90
 trading_costs_bps: 0.0
 rl_fast_smoke: false
 rl_fast_overrides:
