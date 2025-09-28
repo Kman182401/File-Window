@@ -21,12 +21,15 @@ try:  # pragma: no cover - optional heavy deps
     import gymnasium as gym  # noqa: F401
     from stable_baselines3 import PPO, SAC, TD3  # type: ignore
     from sb3_contrib import RecurrentPPO  # type: ignore
-    from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize  # type: ignore
+    from stable_baselines3.common.env_util import make_vec_env  # type: ignore
+    from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize  # type: ignore
     SB3_AVAILABLE = True
 except Exception:  # pragma: no cover
     SB3_AVAILABLE = False
     DummyVecEnv = None  # type: ignore
+    SubprocVecEnv = None  # type: ignore
     VecNormalize = None  # type: ignore
+    make_vec_env = None  # type: ignore
 
 from .imitation_learning import pretrain_policy_via_behavior_cloning
 
@@ -159,10 +162,21 @@ class RLAdapter:
     # Internal helpers
     # ------------------------------------------------------------------
     def _build_vec_env(self, make_env_fn: Callable[[], Any], n_envs: int, *, training: bool) -> Any:
-        if DummyVecEnv is None:
+        if not SB3_AVAILABLE:
+            raise RuntimeError("Stable-Baselines3 not available for vectorised environments")
+        if make_vec_env is not None and SubprocVecEnv is not None and n_envs > 1:
+            venv = make_vec_env(
+                make_env_fn,
+                n_envs=n_envs,
+                seed=self.spec.seed,
+                vec_env_cls=SubprocVecEnv,
+            )
+        elif DummyVecEnv is not None:
+            venv = DummyVecEnv([make_env_fn for _ in range(n_envs)])
+        else:
             raise RuntimeError("Vectorised environment wrappers unavailable")
-        venv = DummyVecEnv([make_env_fn for _ in range(n_envs)])
-        if not SB3_AVAILABLE or VecNormalize is None:
+
+        if VecNormalize is None:
             return venv
 
         norm_kwargs = dict(
