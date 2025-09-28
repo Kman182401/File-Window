@@ -405,7 +405,14 @@ def run_wfo(
     if not matrix_columns:
         matrix_columns.append(aggregated_selected)
         names_order.append("selected")
+    
+    # Length guard: make all columns the same length before stacking
+    min_len = min(col.shape[0] for col in matrix_columns)
+    if any(col.shape[0] != min_len for col in matrix_columns):
+        print(f"[WFO] Normalising column lengths to {min_len} for aggregation")
+        matrix_columns = [col[:min_len] for col in matrix_columns]
     oos_matrix = np.column_stack(matrix_columns)
+
     m_eff = _effective_trials(oos_matrix)
     dsr = deflated_sharpe_ratio(aggregated_selected, trials_effective=m_eff)
     white = white_reality_check(oos_matrix, n_bootstrap=config.rc_bootstrap, block_len=config.rc_block_len)

@@ -1,0 +1,13 @@
+{
+  "p_value": 0.991008991008991,
+  "survivors": {},
+  "strategies": [
+    "ma_fast",
+    "ma_medium",
+    "ma_slow",
+    "ES_PPO_LSTM",
+    "NQ_SAC",
+    "GC_TD3",
+    "ES_LogReg"
+  ]
+}

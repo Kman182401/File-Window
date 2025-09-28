@@ -1,0 +1,57 @@
+{
+  "generated_at": "2025-09-28T06:10:30.618713Z",
+  "config": {
+    "trading_days_per_year": 252,
+    "minutes_per_trading_day": 390,
+    "session_minutes": {
+      "default": 390,
+      "ES": 1365,
+      "NQ": 1365,
+      "GC": 1365,
+      "6E": 1365,
+      "6B": 1365,
+      "6A": 1365
+    },
+    "embargo_days": 1,
+    "label_lookahead_bars": 1,
+    "rl_fast_smoke": true,
+    "reality_checks": {
+      "n_bootstrap": 1000,
+      "block_len_bars": 78
+    }
+  },
+  "library_versions": {
+    "stable-baselines3": "2.4.0",
+    "sb3-contrib": "2.4.0",
+    "gymnasium": "0.29.1",
+    "torch": "2.5.1+cu121",
+    "numpy": "1.26.4",
+    "pandas": "2.3.2"
+  },
+  "data_hashes": {
+    "GC": "c3582461eed90bd225f2b366a7ba7084accc1805a02fe7837f27b9cfd203a151"
+  },
+  "strategy_seeds": {
+    "ma_fast": null,
+    "ma_medium": null,
+    "ma_slow": null,
+    "ES_PPO_LSTM": 42,
+    "NQ_SAC": 123,
+    "GC_TD3": 42,
+    "ES_LogReg": null
+  },
+  "vecnormalize_stats": {
+    "ES_PPO_LSTM": [
+      "artifacts/wfo/GC/ES_PPO_LSTM/cycle_1/vecnormalize.pkl"
+    ],
+    "NQ_SAC": [
+      "artifacts/wfo/GC/NQ_SAC/cycle_1/vecnormalize.pkl"
+    ],
+    "GC_TD3": [
+      "artifacts/wfo/GC/GC_TD3/cycle_1/vecnormalize.pkl"
+    ]
+  },
+  "session_minutes_used": {
+    "GC": 1365
+  }
+}
