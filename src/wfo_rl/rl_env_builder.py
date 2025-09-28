@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any, Callable, Dict, Optional
+from functools import partial
 
 import numpy as np
 import pandas as pd
@@ -23,6 +24,30 @@ def _prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         clean["price"] = clean["close"]
     return clean
 
+def _instantiate_env(
+    prepared: pd.DataFrame,
+    config: Optional[EnhancedTradingConfig],
+    costs_bps: float,
+    reward_kwargs: Dict[str, Any],
+    eval_mode: bool,
+) -> EnhancedTradingEnvironment:
+    env = EnhancedTradingEnvironment(
+        data=prepared.copy(),
+        config=config,
+        costs_bps=costs_bps,
+        lambda_var=reward_kwargs.get("lambda_var", 0.0),
+        lambda_dd=reward_kwargs.get("lambda_dd", 0.0),
+        h_var=int(reward_kwargs.get("h_var", 60)),
+        hindsight_H=int(reward_kwargs.get("hindsight_H", 0)),
+        hindsight_weight=float(reward_kwargs.get("hindsight_weight", 0.0)),
+        use_hindsight_in_training=bool(reward_kwargs.get("use_hindsight_in_training", False) and not eval_mode),
+        eval_mode=eval_mode,
+    )
+    env.set_eval_mode(bool(eval_mode))
+    if isinstance(env.observation_space, gym.spaces.Dict):
+        env = FlattenObservation(env)
+    return env
+
 
 def make_env_from_df(
     df: pd.DataFrame,
@@ -42,29 +67,19 @@ def make_env_from_df(
 
     prepared = _prepare_dataframe(df)
 
-    def _factory() -> EnhancedTradingEnvironment:
-        env = EnhancedTradingEnvironment(
-            data=prepared.copy(),
-            config=config,
-            costs_bps=costs_bps,
-            lambda_var=reward_kwargs.get("lambda_var", 0.0),
-            lambda_dd=reward_kwargs.get("lambda_dd", 0.0),
-            h_var=int(reward_kwargs.get("h_var", 60)),
-            hindsight_H=int(reward_kwargs.get("hindsight_H", 0)),
-            hindsight_weight=float(reward_kwargs.get("hindsight_weight", 0.0)),
-            use_hindsight_in_training=bool(reward_kwargs.get("use_hindsight_in_training", False) and not eval_mode),
-            eval_mode=eval_mode,
-        )
-        env.set_eval_mode(bool(eval_mode))
-        # Flatten dict observations so SB3 policies and VecNormalize see a single Box space.
-        if isinstance(env.observation_space, gym.spaces.Dict):
-            env = FlattenObservation(env)
-        return env
+    factory = partial(
+        _instantiate_env,
+        prepared=prepared,
+        config=config,
+        costs_bps=costs_bps,
+        reward_kwargs=reward_kwargs,
+        eval_mode=eval_mode,
+    )
 
-    setattr(_factory, "_df", prepared)
-    setattr(_factory, "_reward_kwargs", reward_kwargs)
-    setattr(_factory, "_eval_mode", eval_mode)
-    return _factory
+    setattr(factory, "_df", prepared)
+    setattr(factory, "_reward_kwargs", reward_kwargs)
+    setattr(factory, "_eval_mode", eval_mode)
+    return factory
 
 
 __all__ = ["make_env_from_df"]
