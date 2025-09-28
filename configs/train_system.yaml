@@ -1,6 +1,6 @@
 rl_defaults: &rl_defaults
   train_timesteps: 50000
-  n_envs: 1
+  n_envs: 4
   seed: 42
   vecnormalize_obs: true
   vecnormalize_reward: true
@@ -33,6 +33,14 @@ strategies:
     policy: MlpLstmPolicy
     rl:
       <<: *rl_defaults
+      algo_kwargs:
+        device: "cuda"
+        n_steps: 4096
+        batch_size: 1024
+        n_epochs: 10
+      policy_kwargs:
+        net_arch: [512, 512]
+        lstm_hidden_size: 256
     reward:
       costs_bps: 0.5
       lambda_var: 0.0
@@ -55,12 +63,14 @@ strategies:
         learning_rate: 0.0003
         buffer_size: 1000000
         learning_starts: 100
-        batch_size: 256
+        batch_size: 512
         tau: 0.005  # Polyak averaging
         gamma: 0.99
         train_freq: 1
-        gradient_steps: 1
+        gradient_steps: 2
         ent_coef: auto  # automatic temperature tuning
+      policy_kwargs:
+        net_arch: [512, 512]
     reward:
       costs_bps: 0.25
       lambda_var: 0.2
@@ -78,14 +88,16 @@ strategies:
         learning_rate: 0.0003  # actor & critic lr
         buffer_size: 1000000
         learning_starts: 100
-        batch_size: 256
+        batch_size: 512
         tau: 0.005
         gamma: 0.99
         train_freq: 1
-        gradient_steps: 1
+        gradient_steps: 2
         policy_delay: 2
         target_policy_noise: 0.2
         target_noise_clip: 0.5
+      policy_kwargs:
+        net_arch: [512, 512]
     reward:
       costs_bps: 0.4
       lambda_var: 0.15
