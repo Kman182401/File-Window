@@ -137,7 +137,9 @@ class PaperTradingExecutor:
         self.equity_curve = [self.config['initial_capital']]
         self.daily_stats = []
         self.telemetry = TradingTelemetry()
-        
+        self.session_start_equity = float(self.equity_curve[0])
+        self.session_start_timestamp = datetime.now()
+
         # Market data
         self.market_data: Dict[str, pd.DataFrame] = {}
         self.last_prices: Dict[str, float] = {}
@@ -170,7 +172,19 @@ class PaperTradingExecutor:
             'results_dir': 'paper_trading_results',
             'decision_engine': {}
         }
-    
+
+    def reset_session_pnl_baseline(self, equity: Optional[float] = None) -> None:
+        """Mark the baseline equity used to compute session PnL."""
+        if equity is None:
+            if self.equity_curve:
+                equity = self.equity_curve[-1]
+            else:
+                equity = self.config['initial_capital']
+        self.session_start_equity = float(equity)
+        self.session_start_timestamp = datetime.now()
+        if hasattr(self.portfolio, "daily_pnl"):
+            self.portfolio.daily_pnl = 0.0
+
     def connect_to_market(self) -> bool:
         """Connect to IBKR for both market data and order execution"""
         try:
@@ -200,6 +214,7 @@ class PaperTradingExecutor:
         
         # Start order management system
         self.order_manager.start()
+        self.reset_session_pnl_baseline(self.portfolio.total_balance)
         
         # Setup order callbacks
         self._setup_order_callbacks()
@@ -560,7 +575,7 @@ class PaperTradingExecutor:
             logger.error(f"Error updating portfolio from broker: {e}")
 
         if len(self.equity_curve) > 1:
-            self.portfolio.daily_pnl = self.equity_curve[-1] - self.config['initial_capital']
+            self.portfolio.daily_pnl = self.equity_curve[-1] - self.session_start_equity
         self._write_trading_telemetry()
     
     def _update_position_from_order(self, order: Order):
@@ -681,7 +696,7 @@ class PaperTradingExecutor:
         
         # Calculate daily P&L
         if len(self.equity_curve) > 1:
-            self.portfolio.daily_pnl = self.equity_curve[-1] - self.config['initial_capital']
+            self.portfolio.daily_pnl = self.equity_curve[-1] - self.session_start_equity
         self._write_trading_telemetry()
 
     def _write_trading_telemetry(self):
@@ -691,7 +706,10 @@ class PaperTradingExecutor:
         if len(self.equity_curve) >= 2 and self.equity_curve[-2] != 0:
             ret = (self.equity_curve[-1] / self.equity_curve[-2]) - 1
             telemetry.push_return(ret)
-        telemetry.set_pnl("session", getattr(self.portfolio, "daily_pnl", 0.0))
+        session_pnl = self.equity_curve[-1] - getattr(
+            self, "session_start_equity", self.config['initial_capital']
+        )
+        telemetry.set_pnl("session", session_pnl)
         telemetry.write()
     
     def _close_all_positions_real(self):
