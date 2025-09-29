@@ -184,6 +184,13 @@ def _update_telemetry(*, tag: str, summary: dict, out: dict, run_id: str, seed: 
         logger.exception("run_id=%s tag=%s message=failed writing learning snapshot", run_id, tag)
 
 
+def env_truthy(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _sleep_with_jitter(delay: float) -> None:
     jitter = random.uniform(0, delay * 0.3) if delay > 0 else 0.0
     time.sleep(delay + jitter)
@@ -223,7 +230,9 @@ if __name__ == "__main__":
     rng = random.SystemRandom()
     backoff = 60
     while True:
-        run_id = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
+        force_promotion = env_truthy("WFO_FORCE_PROMOTION", default=False)
+        forced_suffix = "-forced" if force_promotion else ""
+        run_id = f"{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}{forced_suffix}"
         smoke_seed = rng.randrange(0, 2**31 - 1)
         promo_seed = rng.randrange(0, 2**31 - 1)
         smoke_overrides = {**smoke_rl, "seed": smoke_seed}
@@ -232,21 +241,40 @@ if __name__ == "__main__":
             out_smoke = run_wfo_once(dry_run=True, rl_fast_smoke=True, rl_overrides=smoke_overrides)
             s = log_summary("smoke", out_smoke, run_id=run_id, seed=smoke_seed, rl_overrides=smoke_overrides)
 
-            if s.get("go_no_go"):
-                _log_event(
-                    {
-                        "ts": time.time(),
-                        "event": "promotion_start",
-                        "tag": "promotion",
-                        "run_id": run_id,
-                        "cycle": "aggregate",
-                        "fold": "aggregate",
-                        "symbol": "ALL",
-                        "seed": promo_seed,
-                        "n_envs": promo_overrides.get("n_envs"),
-                        "message": "Gates passed — starting promotion run with RL training.",
-                    }
-                )
+            gates_passed = bool(s.get("go_no_go"))
+            if gates_passed or force_promotion:
+                if gates_passed:
+                    _log_event(
+                        {
+                            "ts": time.time(),
+                            "event": "promotion_start",
+                            "tag": "promotion",
+                            "run_id": run_id,
+                            "cycle": "aggregate",
+                            "fold": "aggregate",
+                            "symbol": "ALL",
+                            "seed": promo_seed,
+                            "n_envs": promo_overrides.get("n_envs"),
+                            "forced": False,
+                            "message": "Gates passed — starting promotion run with RL training.",
+                        }
+                    )
+                else:
+                    _log_event(
+                        {
+                            "ts": time.time(),
+                            "event": "promotion_force",
+                            "tag": "promotion",
+                            "run_id": run_id,
+                            "cycle": "aggregate",
+                            "fold": "aggregate",
+                            "symbol": "ALL",
+                            "seed": promo_seed,
+                            "n_envs": promo_overrides.get("n_envs"),
+                            "forced": True,
+                            "message": "Force promotion override enabled — running promotion despite gate failure.",
+                        }
+                    )
                 out_rl = run_wfo_once(dry_run=False, rl_fast_smoke=False, rl_overrides=promo_overrides)
                 log_summary("promotion", out_rl, run_id=run_id, seed=promo_seed, rl_overrides=promo_overrides)
             else:
@@ -261,6 +289,7 @@ if __name__ == "__main__":
                         "symbol": "ALL",
                         "seed": promo_seed,
                         "n_envs": promo_overrides.get("n_envs"),
+                        "forced": False,
                         "message": "Gates failed — skipping RL training this cycle.",
                     }
                 )
