@@ -145,6 +145,7 @@ def _update_telemetry(*, tag: str, summary: dict, out: dict, run_id: str, seed: 
                 "tag": tag,
                 "run_id": run_id,
                 "go_no_go": summary.get("go_no_go"),
+                "pnl_units": "return",
             },
         )
     except Exception:
