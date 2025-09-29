@@ -80,7 +80,6 @@ strategies:
     policy_kwargs: *id001
     compile_policy: true
     algo_kwargs:
-      device: cuda
       n_steps: 2048
       batch_size: 1024
       n_epochs: 4
@@ -96,7 +95,6 @@ strategies:
     vecnormalize_reward: true
     policy_kwargs: *id001
     algo_kwargs:
-      device: cuda
       learning_rate: 0.0003
       buffer_size: 1000000
       learning_starts: 100
@@ -118,7 +116,6 @@ strategies:
     vecnormalize_reward: true
     policy_kwargs: *id001
     algo_kwargs:
-      device: cuda
       learning_rate: 0.0003
       buffer_size: 1000000
       learning_starts: 100
