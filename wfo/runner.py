@@ -9,8 +9,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from importlib import metadata
 from pathlib import Path
-from collections import defaultdict
-from typing import Any, Dict, List, Optional, Sequence
+from collections import defaultdict, OrderedDict
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -37,6 +37,8 @@ from .labeling import (
 )
 from .supervised_baselines import logistic_positions
 from .utils import enable_determinism, resolve_session_minutes
+_TB_CACHE_LIMIT = 64
+_TB_LABEL_CACHE: OrderedDict[Tuple[Any, ...], pd.DataFrame] = OrderedDict()
 
 
 @dataclass
@@ -75,6 +77,50 @@ class RunnerConfig:
     labeling: Optional[Dict[str, Any]] = None
     event_bars: Optional[Dict[str, Any]] = None
     fracdiff: Optional[Dict[str, Any]] = None
+
+
+def _tb_cache_key(
+    symbol: str,
+    cycle_idx: int,
+    df: pd.DataFrame,
+    config: TripleBarrierConfig,
+    use_meta: bool,
+    data_hash: Optional[str],
+) -> Tuple[Any, ...]:
+    if df.empty:
+        start = end = None
+    else:
+        start = df.index[0]
+        end = df.index[-1]
+    return (
+        symbol,
+        cycle_idx,
+        data_hash,
+        len(df),
+        str(start),
+        str(end),
+        float(config.pt_multiplier),
+        float(config.sl_multiplier),
+        int(config.max_holding),
+        int(config.volatility_span),
+        bool(use_meta),
+        config.side_col,
+    )
+
+
+def _tb_cache_get(key: Tuple[Any, ...]) -> Optional[pd.DataFrame]:
+    cached = _TB_LABEL_CACHE.get(key)
+    if cached is None:
+        return None
+    _TB_LABEL_CACHE.move_to_end(key)
+    return cached.copy()
+
+
+def _tb_cache_set(key: Tuple[Any, ...], value: pd.DataFrame) -> None:
+    _TB_LABEL_CACHE[key] = value.copy()
+    _TB_LABEL_CACHE.move_to_end(key)
+    while len(_TB_LABEL_CACHE) > _TB_CACHE_LIMIT:
+        _TB_LABEL_CACHE.popitem(last=False)
 
 
 def load_config(path: Path | str | None) -> RunnerConfig:
@@ -270,18 +316,43 @@ def run_wfo(
                     print(f"[WFO] Skipping cycle {cycle_idx} for {symbol}: IS window too short after label purge")
                     continue
                 is_df = is_df.iloc[:-config.label_lookahead_bars]
+            effective_embargo = embargo_bars
             if embargo_bars > 0:
                 if len(oos_df) <= embargo_bars:
-                    print(f"[WFO] Skipping cycle {cycle_idx} for {symbol}: OOS window too short after embargo")
-                    continue
-                oos_df = oos_df.iloc[embargo_bars:]
+                    fallback = max(0, len(oos_df) - 1)
+                    if fallback < embargo_bars:
+                        print(
+                            f"[WFO] Reducing embargo bars for {symbol} cycle {cycle_idx} "
+                            f"from {embargo_bars} to {fallback} to preserve OOS window"
+                        )
+                    effective_embargo = fallback
+                if effective_embargo > 0:
+                    if len(oos_df) <= effective_embargo:
+                        print(
+                            f"[WFO] Skipping cycle {cycle_idx} for {symbol}: OOS window too short after embargo "
+                            f"(effective={effective_embargo})"
+                        )
+                        continue
+                    oos_df = oos_df.iloc[effective_embargo:]
             if is_df.empty or oos_df.empty:
                 print(f"[WFO] Skipping cycle {cycle_idx} for {symbol}: empty window after gap enforcement")
                 continue
 
             lookahead = max(1, config.label_lookahead_bars)
             if label_mode == "triple_barrier" and tb_config_template is not None:
-                tb_labels = triple_barrier_labels(is_df, tb_config_template)
+                cache_key = _tb_cache_key(
+                    symbol,
+                    cycle_idx,
+                    is_df,
+                    tb_config_template,
+                    use_meta_labels,
+                    data_hashes.get(symbol),
+                )
+                tb_labels = _tb_cache_get(cache_key)
+                if tb_labels is None:
+                    tb_labels = triple_barrier_labels(is_df, tb_config_template)
+                    _tb_cache_set(cache_key, tb_labels)
+                tb_labels = tb_labels.reindex(is_df.index)
                 is_df = is_df.join(tb_labels)
                 if "exit_index" in is_df.columns:
                     is_df = is_df.drop(columns=["exit_index"])
@@ -518,6 +589,8 @@ def run_wfo(
         "go_no_go": summary.get("go_no_go"),
         "output_dir": str(output_dir),
         "dsr": extras["dsr"],
+        "per_cycle_records": per_cycle_records,
+        "run_metadata": metadata_payload,
     }
 
 

@@ -273,7 +273,7 @@ class EnhancedTradingEnvironment(gym.Env):
         self.decision_interval_counter = 0
         self.last_action_vector: Optional[np.ndarray] = None
 
-        logger.info(f"Initialized enhanced trading environment with {len(self.config.symbols)} symbols")
+        logger.debug("Initialized enhanced trading environment with %d symbols", len(self.config.symbols))
     
     def _setup_spaces(self):
         """Setup observation and action spaces."""

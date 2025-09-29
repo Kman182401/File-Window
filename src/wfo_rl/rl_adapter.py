@@ -74,26 +74,33 @@ class RLAdapter:
             steps = min(steps, 1_000)
 
         vec_env = self._build_vec_env(make_env_fn, self.spec.n_envs, training=True)
-        algo_cls = self._resolve_algo()
-        policy_kwargs = self.spec.policy_kwargs or {}
-        algo_kwargs = dict(seed=self.spec.seed, **(self.spec.algo_kwargs or {}))
-        model = algo_cls(
-            self._resolve_policy_name(),
-            vec_env,
-            policy_kwargs=policy_kwargs,
-            tensorboard_log=log_dir,
-            **algo_kwargs,
-        )
+        try:
+            algo_cls = self._resolve_algo()
+            policy_kwargs = self.spec.policy_kwargs or {}
+            algo_kwargs = dict(seed=self.spec.seed, **(self.spec.algo_kwargs or {}))
+            model = algo_cls(
+                self._resolve_policy_name(),
+                vec_env,
+                policy_kwargs=policy_kwargs,
+                tensorboard_log=log_dir,
+                **algo_kwargs,
+            )
 
-        self._maybe_run_behavior_cloning(model, make_env_fn)
-        model.learn(total_timesteps=steps, progress_bar=False)
+            self._maybe_run_behavior_cloning(model, make_env_fn)
+            model.learn(total_timesteps=steps, progress_bar=False)
 
-        stats_path: Optional[Path] = None
-        if isinstance(vec_env, VecNormalize):
-            vec_env.training = False
-            stats_path = log_root / "vecnormalize.pkl"
-            vec_env.save(str(stats_path))
-        return model, stats_path
+            stats_path: Optional[Path] = None
+            if isinstance(vec_env, VecNormalize):
+                vec_env.training = False
+                stats_path = log_root / "vecnormalize.pkl"
+                vec_env.save(str(stats_path))
+            return model, stats_path
+        finally:
+            if hasattr(vec_env, "close"):
+                try:
+                    vec_env.close()
+                except Exception:
+                    pass
 
     def score_on_oos(
         self,
@@ -110,53 +117,63 @@ class RLAdapter:
 
         stats_path: Optional[Path] = Path(vecnorm_stats) if vecnorm_stats else None
         base_env = DummyVecEnv([make_env_fn])
-        if stats_path and stats_path.exists() and VecNormalize is not None:
-            eval_env = VecNormalize.load(str(stats_path), base_env)
-            eval_env.training = False
-            eval_env.norm_reward = False
-        else:
-            eval_env = VecNormalize(
-                base_env,
-                training=False,
-                norm_obs=self.spec.vecnormalize_obs,
-                norm_reward=False,
-            ) if VecNormalize is not None and self.spec.vecnormalize_obs else base_env
+        try:
+            if stats_path and stats_path.exists() and VecNormalize is not None:
+                eval_env = VecNormalize.load(str(stats_path), base_env)
+                eval_env.training = False
+                eval_env.norm_reward = False
+            else:
+                eval_env = VecNormalize(
+                    base_env,
+                    training=False,
+                    norm_obs=self.spec.vecnormalize_obs,
+                    norm_reward=False,
+                ) if VecNormalize is not None and self.spec.vecnormalize_obs else base_env
 
-        reset_result = eval_env.reset()
-        if isinstance(reset_result, tuple):
-            observations, _ = reset_result
-        else:
-            observations = reset_result
-            _ = None
-        state = None
-        rewards: list[float] = []
-        while True:
-            if hasattr(model, "predict"):
-                action, state = model.predict(observations, state=state, deterministic=True)
-            else:  # pragma: no cover - custom agents
-                action = model.act(observations)
-            step_result = eval_env.step(action)
-            if isinstance(step_result, tuple):
-                if len(step_result) == 5:
-                    observations, reward, terminated, truncated, _ = step_result
-                elif len(step_result) == 4:
-                    observations, reward, done, _ = step_result
-                    terminated = done
-                    truncated = np.zeros_like(done, dtype=bool)
-                else:  # pragma: no cover - defensive
-                    observations, reward, terminated = step_result  # type: ignore[misc]
-                    truncated = np.zeros_like(terminated, dtype=bool)
-            else:  # pragma: no cover - highly unlikely
-                observations = step_result
-                reward = np.zeros((1,), dtype=float)
-                terminated = np.ones((1,), dtype=bool)
-                truncated = np.ones((1,), dtype=bool)
-            rewards.extend(np.asarray(reward, dtype=float).flatten().tolist())
-            if bool(np.any(terminated) or np.any(truncated)):
-                break
-        if hasattr(eval_env, "close"):
-            eval_env.close()
-        return np.asarray(rewards, dtype=float)
+            reset_result = eval_env.reset()
+            if isinstance(reset_result, tuple):
+                observations, _ = reset_result
+            else:
+                observations = reset_result
+                _ = None
+            state = None
+            rewards: list[float] = []
+            while True:
+                if hasattr(model, "predict"):
+                    action, state = model.predict(observations, state=state, deterministic=True)
+                else:  # pragma: no cover - custom agents
+                    action = model.act(observations)
+                step_result = eval_env.step(action)
+                if isinstance(step_result, tuple):
+                    if len(step_result) == 5:
+                        observations, reward, terminated, truncated, _ = step_result
+                    elif len(step_result) == 4:
+                        observations, reward, done, _ = step_result
+                        terminated = done
+                        truncated = np.zeros_like(done, dtype=bool)
+                    else:  # pragma: no cover - defensive
+                        observations, reward, terminated = step_result  # type: ignore[misc]
+                        truncated = np.zeros_like(terminated, dtype=bool)
+                else:  # pragma: no cover - highly unlikely
+                    observations = step_result
+                    reward = np.zeros((1,), dtype=float)
+                    terminated = np.ones((1,), dtype=bool)
+                    truncated = np.ones((1,), dtype=bool)
+                rewards.extend(np.asarray(reward, dtype=float).flatten().tolist())
+                if bool(np.any(terminated) or np.any(truncated)):
+                    break
+            return np.asarray(rewards, dtype=float)
+        finally:
+            if 'eval_env' in locals() and hasattr(eval_env, "close"):
+                try:
+                    eval_env.close()
+                except Exception:
+                    pass
+            elif hasattr(base_env, "close"):
+                try:
+                    base_env.close()
+                except Exception:
+                    pass
 
     # ------------------------------------------------------------------
     # Internal helpers
