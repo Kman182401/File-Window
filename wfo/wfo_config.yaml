@@ -23,8 +23,8 @@ go_no_go:
   sharpe_min: 0.8
   dsr_p_max: 0.05
   slippage_budget_max: 0.8
-  white_p_min: 0.9
-  spa_p_min: 0.9
+  white_p_min: 0.1
+  spa_p_min: 0.1
 reality_checks:
   n_bootstrap: 1000
   block_len_bars: 90

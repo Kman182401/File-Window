@@ -111,7 +111,9 @@ import gymnasium as gym
 from colorlog import ColoredFormatter
 
 import warnings
-from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.callbacks import BaseCallback, CallbackList
+
+from monitoring.client.omega_polybar_callback import OmegaPolybarCallback
 
 import logging
 logger = logging.getLogger(__name__)
@@ -1035,6 +1037,12 @@ class RLTradingPipeline:
         self.micropoll_bar_size = os_mod.getenv('MICROPOLL_BAR_SIZE', '5 secs')
         self.micropoll_what = os_mod.getenv('MICROPOLL_WHAT', 'MIDPOINT')
         self._last_poll_ts: Dict[str, Any] = {}
+        self.ppo_eval_summary = {
+            "eval_sharpe": None,
+            "best_eval_sharpe": None,
+            "best_ckpt_steps": None,
+            "last_training_steps": None,
+        }
         if self.micropoll_enable:
             try:
                 import pandas as pd
@@ -1050,6 +1058,14 @@ class RLTradingPipeline:
         self.status = "initialized"
         self.last_error = None
         self.notification_hook = None  # Extensibility: notification system
+
+    def _ppo_eval_provider(self) -> Dict[str, Any]:
+        summary = self.ppo_eval_summary
+        return {
+            "eval_sharpe": summary.get("eval_sharpe"),
+            "best_eval_sharpe": summary.get("best_eval_sharpe"),
+            "best_ckpt_steps": summary.get("best_ckpt_steps"),
+        }
 
         # Sequence forecaster integration (PyTorch-based supervised models)
         self.seq_torch = torch
@@ -2942,11 +2958,17 @@ class RLTradingPipeline:
             logging.info("Initializing fresh PPO model (no reusable checkpoint available).")
             model = PPO("MlpPolicy", env, verbose=0)
         train_steps = int(os_mod.getenv("PPO_TRAIN_STEPS", str(self.config.get("ppo_train_steps", 200))))
+        polybar_cb = OmegaPolybarCallback(
+            write_every_steps=int(os_mod.getenv("PPO_POLYBAR_WRITE_STEPS", "2048")),
+            eval_provider=self._ppo_eval_provider,
+        )
+        callbacks = CallbackList([ppo_logger, polybar_cb])
         model.learn(
             total_timesteps=train_steps,
-            callback=ppo_logger,
+            callback=callbacks,
             progress_bar=False,
         )
+        self.ppo_eval_summary["last_training_steps"] = int(model.num_timesteps)
         self.ppo_model = model
         ppo_logger.print_summary()
         if save_path is None:
@@ -3000,6 +3022,7 @@ class RLTradingPipeline:
                 ticker,
             )
             self.ppo_model = None
+            self.ppo_eval_summary["eval_sharpe"] = None
             return 0.0
         env = TradingEnv(test_frame)
         regime = detect_regime(test_data['close'])
@@ -3020,6 +3043,7 @@ class RLTradingPipeline:
                     [path.name for path in mismatched],
                 )
                 self.ppo_model = None
+                self.ppo_eval_summary["eval_sharpe"] = None
                 return 0.0
 
             legacy_candidate = ppo_dir / legacy_ppo_filename(ticker, regime_suffix)
@@ -3028,6 +3052,7 @@ class RLTradingPipeline:
             else:
                 logging.warning(f"No PPO model found for {ticker} at {candidate}; skipping PPO run.")
                 self.ppo_model = None
+                self.ppo_eval_summary["eval_sharpe"] = None
                 return 0.0
 
         try:
@@ -3035,6 +3060,7 @@ class RLTradingPipeline:
         except Exception as exc:
             logging.warning(f"Failed to load PPO model %s: %s", candidate, exc)
             self.ppo_model = None
+            self.ppo_eval_summary["eval_sharpe"] = None
             return 0.0
 
         if self.ppo_model.observation_space.shape != env.observation_space.shape:
@@ -3045,6 +3071,7 @@ class RLTradingPipeline:
                 env.observation_space.shape,
             )
             self.ppo_model = None
+            self.ppo_eval_summary["eval_sharpe"] = None
             return 0.0
         obs, info = env.reset()
         done = False
@@ -3067,6 +3094,11 @@ class RLTradingPipeline:
                 "rows": int(len(test_data)),
             },
         )
+        self.ppo_eval_summary["eval_sharpe"] = float(total_reward)
+        best = self.ppo_eval_summary.get("best_eval_sharpe")
+        if best is None or total_reward > best:
+            self.ppo_eval_summary["best_eval_sharpe"] = float(total_reward)
+            self.ppo_eval_summary["best_ckpt_steps"] = self.ppo_eval_summary.get("last_training_steps")
         return total_reward
 
     def train_ensemble_ppo(self, train_data, n_models=3):
