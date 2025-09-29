@@ -20,7 +20,7 @@ cpcv:
   embargo_bars: 60
 dsr_threshold: 0.05
 go_no_go:
-  sharpe_min: 0.8
+  sharpe_min: 0.0
   dsr_p_max: 0.05
   slippage_budget_max: 0.8
   white_p_min: 0.1

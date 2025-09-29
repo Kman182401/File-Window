@@ -1,0 +1,2 @@
+cycle,symbol,config,sharpe,sortino,max_drawdown,calmar,turnover,expectancy,slippage_usage
+1,ES,ES_LogReg,0.012058259209651253,0.009581767829269996,-0.005670199704638768,0.5282045924762521,0.0,1.1779942379699304e-06,0.0
