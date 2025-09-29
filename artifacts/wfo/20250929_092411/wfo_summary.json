@@ -1,0 +1,17 @@
+{
+  "cycles": 45,
+  "sharpe_mean": -0.0019318254038195226,
+  "sharpe_median": 0.0,
+  "sharpe_iqr": 0.0016294660969437562,
+  "sortino_mean": Infinity,
+  "calmar_mean": 0.07825700371436856,
+  "max_drawdown_min": -0.04540707640500111,
+  "turnover_mean": 31.77777777777778,
+  "expectancy_mean": 2.7497979995504246e-08,
+  "slippage_budget_used": 0.0,
+  "total_return": -0.03962227414879316,
+  "equity_final": 0.9603777258512068,
+  "effective_trials": 5.920496677946513,
+  "white_rc_p": 0.6933066933066933,
+  "spa_p": 0.24
+}

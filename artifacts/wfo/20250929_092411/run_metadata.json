@@ -1,0 +1,85 @@
+{
+  "generated_at": "2025-09-29T09:24:15.116333Z",
+  "config": {
+    "trading_days_per_year": 252,
+    "minutes_per_trading_day": 390,
+    "session_minutes": {
+      "default": 390,
+      "ES": 1365,
+      "NQ": 1365,
+      "GC": 1365,
+      "6E": 1365,
+      "6B": 1365,
+      "6A": 1365
+    },
+    "embargo_days": 1,
+    "label_lookahead_bars": 1,
+    "rl_fast_smoke": true,
+    "reality_checks": {
+      "n_bootstrap": 1000,
+      "block_len_bars": 90
+    }
+  },
+  "library_versions": {
+    "stable-baselines3": "2.4.0",
+    "sb3-contrib": "2.4.0",
+    "gymnasium": "0.29.1",
+    "torch": "2.5.1+cu121",
+    "numpy": "1.26.4",
+    "pandas": "2.3.2"
+  },
+  "data_hashes": {
+    "ES": "d5ec714137cbe5dcd0dce8417cbcad91e2e56187d3e3d038b04efe6406323375",
+    "NQ": "e3e285182a94c852387bc2c49070d6fb7367a4a7edc37cad41d7838be98120b7",
+    "GC": "4d9296317a1a93e737a75194fd2955dbb486a125e503ba45a40cba70f34ad935"
+  },
+  "strategy_seeds": {
+    "ma_fast": null,
+    "ma_medium": null,
+    "ma_slow": null,
+    "ES_PPO_LSTM": 42,
+    "NQ_SAC": 123,
+    "GC_TD3": 42,
+    "ES_LogReg": null
+  },
+  "vecnormalize_stats": {
+    "ES_PPO_LSTM": [
+      "artifacts/wfo/ES/ES_PPO_LSTM/cycle_1/vecnormalize.pkl",
+      "artifacts/wfo/ES/ES_PPO_LSTM/cycle_2/vecnormalize.pkl",
+      "artifacts/wfo/ES/ES_PPO_LSTM/cycle_3/vecnormalize.pkl",
+      "artifacts/wfo/NQ/ES_PPO_LSTM/cycle_1/vecnormalize.pkl",
+      "artifacts/wfo/NQ/ES_PPO_LSTM/cycle_2/vecnormalize.pkl",
+      "artifacts/wfo/NQ/ES_PPO_LSTM/cycle_3/vecnormalize.pkl",
+      "artifacts/wfo/GC/ES_PPO_LSTM/cycle_1/vecnormalize.pkl",
+      "artifacts/wfo/GC/ES_PPO_LSTM/cycle_2/vecnormalize.pkl",
+      "artifacts/wfo/GC/ES_PPO_LSTM/cycle_3/vecnormalize.pkl"
+    ],
+    "NQ_SAC": [
+      "artifacts/wfo/ES/NQ_SAC/cycle_1/vecnormalize.pkl",
+      "artifacts/wfo/ES/NQ_SAC/cycle_2/vecnormalize.pkl",
+      "artifacts/wfo/ES/NQ_SAC/cycle_3/vecnormalize.pkl",
+      "artifacts/wfo/NQ/NQ_SAC/cycle_1/vecnormalize.pkl",
+      "artifacts/wfo/NQ/NQ_SAC/cycle_2/vecnormalize.pkl",
+      "artifacts/wfo/NQ/NQ_SAC/cycle_3/vecnormalize.pkl",
+      "artifacts/wfo/GC/NQ_SAC/cycle_1/vecnormalize.pkl",
+      "artifacts/wfo/GC/NQ_SAC/cycle_2/vecnormalize.pkl",
+      "artifacts/wfo/GC/NQ_SAC/cycle_3/vecnormalize.pkl"
+    ],
+    "GC_TD3": [
+      "artifacts/wfo/ES/GC_TD3/cycle_1/vecnormalize.pkl",
+      "artifacts/wfo/ES/GC_TD3/cycle_2/vecnormalize.pkl",
+      "artifacts/wfo/ES/GC_TD3/cycle_3/vecnormalize.pkl",
+      "artifacts/wfo/NQ/GC_TD3/cycle_1/vecnormalize.pkl",
+      "artifacts/wfo/NQ/GC_TD3/cycle_2/vecnormalize.pkl",
+      "artifacts/wfo/NQ/GC_TD3/cycle_3/vecnormalize.pkl",
+      "artifacts/wfo/GC/GC_TD3/cycle_1/vecnormalize.pkl",
+      "artifacts/wfo/GC/GC_TD3/cycle_2/vecnormalize.pkl",
+      "artifacts/wfo/GC/GC_TD3/cycle_3/vecnormalize.pkl"
+    ]
+  },
+  "session_minutes_used": {
+    "ES": 1365,
+    "NQ": 1365,
+    "GC": 1365
+  }
+}
