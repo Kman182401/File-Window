@@ -31,6 +31,7 @@ from ibkr_paper_broker import IBKRPaperBroker, PaperOrder, OrderStatus as Broker
 from order_management_system import OrderManagementSystem, OrderManagerConfig, ManagedOrder, OrderPriority
 from utils.market_data_validator import MarketDataValidator
 from monitoring.alerting_system import get_alerting_system, AlertSeverity, AlertType
+from monitoring.client.omega_trading_status import TradingTelemetry
 from utils.audit_logger import audit_log, AuditEventType, AuditSeverity
 from configs.market_data_config import IBKR_SYMBOLS
 
@@ -124,16 +125,18 @@ class PaperTradingExecutor:
             total_balance=self.config['initial_capital'],
             available_balance=self.config['initial_capital']
         )
+        self.portfolio.daily_pnl = 0.0
         self.positions: Dict[str, Position] = {}
         self.orders: List[Order] = []
         self.order_counter = 0
-        
+
         # Performance tracking
         self.trades_executed = 0
         self.total_commission = 0.0
         self.total_slippage = 0.0
         self.equity_curve = [self.config['initial_capital']]
         self.daily_stats = []
+        self.telemetry = TradingTelemetry()
         
         # Market data
         self.market_data: Dict[str, pd.DataFrame] = {}
@@ -555,6 +558,10 @@ class PaperTradingExecutor:
         
         except Exception as e:
             logger.error(f"Error updating portfolio from broker: {e}")
+
+        if len(self.equity_curve) > 1:
+            self.portfolio.daily_pnl = self.equity_curve[-1] - self.config['initial_capital']
+        self._write_trading_telemetry()
     
     def _update_position_from_order(self, order: Order):
         """Update position after order execution"""
@@ -675,6 +682,17 @@ class PaperTradingExecutor:
         # Calculate daily P&L
         if len(self.equity_curve) > 1:
             self.portfolio.daily_pnl = self.equity_curve[-1] - self.config['initial_capital']
+        self._write_trading_telemetry()
+
+    def _write_trading_telemetry(self):
+        telemetry = getattr(self, "telemetry", None)
+        if telemetry is None:
+            return
+        if len(self.equity_curve) >= 2 and self.equity_curve[-2] != 0:
+            ret = (self.equity_curve[-1] / self.equity_curve[-2]) - 1
+            telemetry.push_return(ret)
+        telemetry.set_pnl("session", getattr(self.portfolio, "daily_pnl", 0.0))
+        telemetry.write()
     
     def _close_all_positions_real(self):
         """Close all open positions through REAL IB Gateway orders"""
