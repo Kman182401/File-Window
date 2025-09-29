@@ -515,6 +515,13 @@ def run_wfo(
         first_non_empty = next((vals for vals in per_config_returns.values() if vals), [np.zeros(1)])
         aggregated_selected = np.concatenate(first_non_empty) if first_non_empty else np.zeros(1)
 
+    if aggregated_selected.size == 0:
+        aggregated_selected = np.zeros(1)
+
+    total_return = float(np.prod(1 + aggregated_selected) - 1)
+    summary["total_return"] = total_return
+    summary["equity_final"] = float(1 + total_return)
+
     matrix_columns = []
     names_order = []
     for name, series_list in per_config_returns.items():

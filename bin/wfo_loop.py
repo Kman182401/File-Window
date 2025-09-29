@@ -10,6 +10,9 @@ import multiprocessing as mp
 from datetime import datetime
 from pathlib import Path
 
+from monitoring.client.omega_trading_status import write_trading_snapshot
+from monitoring.client.omega_polybar_callback import write_learning_snapshot
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
@@ -128,7 +131,53 @@ def log_summary(tag: str, out: dict, *, run_id: str, seed: int | None, rl_overri
         }
         _log_event(cycle_payload)
 
+    _update_telemetry(tag=tag, summary=s, out=out, run_id=run_id, seed=seed, rl_overrides=rl_overrides)
     return s
+
+
+def _update_telemetry(*, tag: str, summary: dict, out: dict, run_id: str, seed: int | None, rl_overrides: dict | None) -> None:
+    try:
+        write_trading_snapshot(
+            sharpe=summary.get("sharpe_median"),
+            max_drawdown=summary.get("max_drawdown_min"),
+            pnl_session=summary.get("total_return"),
+            extras={
+                "tag": tag,
+                "run_id": run_id,
+                "go_no_go": summary.get("go_no_go"),
+            },
+        )
+    except Exception:
+        logger.exception("run_id=%s tag=%s message=failed writing trading snapshot", run_id, tag)
+
+    try:
+        metrics = {
+            "approx_kl": (out.get("dsr") or {}).get("p_value"),
+            "entropy": out.get("white_rc_p"),
+            "clipfrac": out.get("spa_p"),
+            "cycles": summary.get("cycles"),
+        }
+        eval_payload = {
+            "eval_sharpe": summary.get("sharpe_median"),
+            "best_eval_sharpe": summary.get("sharpe_median"),
+            "best_ckpt_steps": summary.get("cycles"),
+            "go_no_go": summary.get("go_no_go"),
+        }
+        total_timesteps = (rl_overrides or {}).get("total_timesteps")
+        extras = {
+            "tag": tag,
+            "run_id": run_id,
+            "seed": seed,
+        }
+        write_learning_snapshot(
+            algo="wfo",
+            total_timesteps=total_timesteps,
+            metrics=metrics,
+            evaluation=eval_payload,
+            extras=extras,
+        )
+    except Exception:
+        logger.exception("run_id=%s tag=%s message=failed writing learning snapshot", run_id, tag)
 
 
 def _sleep_with_jitter(delay: float) -> None:

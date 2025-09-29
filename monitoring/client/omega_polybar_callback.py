@@ -34,6 +34,26 @@ def _write_atomic_json(path: str, payload: Dict[str, Any]) -> None:
             pass
 
 
+def write_learning_snapshot(
+    *,
+    algo: str = "wfo",
+    total_timesteps: Optional[float] = None,
+    metrics: Optional[Dict[str, Any]] = None,
+    evaluation: Optional[Dict[str, Any]] = None,
+    extras: Optional[Dict[str, Any]] = None,
+) -> None:
+    payload: Dict[str, Any] = {
+        "ts": int(time.time()),
+        "algo": algo,
+        "total_timesteps": total_timesteps,
+        "metrics": metrics or {},
+        "eval": evaluation or {},
+    }
+    if extras:
+        payload.update(extras)
+    _write_atomic_json(OUT_PATH, payload)
+
+
 def _safe(value: Any, ndigits: int = 6) -> Optional[float]:
     """Return a rounded float when possible, otherwise None."""
     if value is None:

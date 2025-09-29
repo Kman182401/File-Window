@@ -4,7 +4,7 @@ import statistics
 import tempfile
 import time
 from collections import deque
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 OUT_PATH = os.path.expanduser("~/.local/share/omega/trading_status.json")
 os.makedirs(os.path.dirname(OUT_PATH), exist_ok=True)
@@ -24,6 +24,26 @@ def _write_atomic_json(path: str, payload: Dict[str, Any]) -> None:
             os.unlink(tmp_path)
         except FileNotFoundError:
             pass
+
+
+def write_trading_snapshot(
+    *,
+    sharpe: Optional[float] = None,
+    max_drawdown: Optional[float] = None,
+    pnl_session: Optional[float] = None,
+    extras: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Write a one-shot snapshot to the trading telemetry JSON."""
+
+    snapshot: Dict[str, Any] = {
+        "ts": int(time.time()),
+        "sharpe": float(sharpe) if sharpe is not None else None,
+        "max_drawdown": float(max_drawdown) if max_drawdown is not None else None,
+        "pnl": {"session": float(pnl_session) if pnl_session is not None else None},
+    }
+    if extras:
+        snapshot.update(extras)
+    _write_atomic_json(OUT_PATH, snapshot)
 
 
 class TradingTelemetry:
