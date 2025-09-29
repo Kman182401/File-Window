@@ -1,3 +1,9 @@
+from pathlib import Path
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path[:0] = [str(ROOT), str(ROOT / "src")]
+
 import os
 import time
 import json
@@ -7,8 +13,7 @@ import logging
 import random
 import gc
 import multiprocessing as mp
-from datetime import datetime
-from pathlib import Path
+from datetime import datetime, UTC
 
 logging.basicConfig(
     level=logging.INFO,
@@ -24,8 +29,6 @@ LOG.parent.mkdir(parents=True, exist_ok=True)
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
 
 import sys
-sys.path[:0] = [str(ROOT), str(ROOT/"src")]
-
 from monitoring.client.omega_trading_status import write_trading_snapshot
 from monitoring.client.omega_polybar_callback import write_learning_snapshot
 
@@ -220,7 +223,7 @@ if __name__ == "__main__":
     rng = random.SystemRandom()
     backoff = 60
     while True:
-        run_id = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+        run_id = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
         smoke_seed = rng.randrange(0, 2**31 - 1)
         promo_seed = rng.randrange(0, 2**31 - 1)
         smoke_overrides = {**smoke_rl, "seed": smoke_seed}

@@ -6,7 +6,7 @@ import os
 import json
 import hashlib
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 from importlib import metadata
 from pathlib import Path
 from collections import defaultdict, OrderedDict
@@ -250,7 +250,7 @@ def run_wfo(
 
     data_cfg = DataAccessConfig(event_bars=config.event_bars, fracdiff=config.fracdiff)
     data_access = MarketDataAccess(data_cfg)
-    now = datetime.utcnow()
+    now = datetime.now(UTC)
     start_lookup = now - timedelta(days=max(is_days, 180) * 2)
 
     strategy_entries = strategies if strategies is not None else config.strategies
@@ -506,7 +506,7 @@ def run_wfo(
     if not per_cycle_records:
         raise RuntimeError("No WFO cycles were executed")
 
-    output_dir = Path(output_root) / datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    output_dir = Path(output_root) / datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     summary = summarise_cycles(per_cycle_records)
 
     if selected_returns:
@@ -555,7 +555,7 @@ def run_wfo(
         "spa": {"p_value": spa.p_value, "survivors": spa.survivors, "strategies": names_order},
     }
     metadata_payload = {
-        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "generated_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "config": {
             "trading_days_per_year": config.trading_days_per_year,
             "minutes_per_trading_day": config.minutes_per_trading_day,
