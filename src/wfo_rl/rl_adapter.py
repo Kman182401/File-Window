@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple, Union
 
+import logging
 import numpy as np
 
 try:  # pragma: no cover - optional heavy deps
@@ -16,6 +17,13 @@ except Exception:  # pragma: no cover
     TORCH_AVAILABLE = False
     torch = None  # type: ignore
     nn = None  # type: ignore
+
+if TORCH_AVAILABLE:
+    try:
+        torch.set_num_threads(1)
+        torch.set_num_interop_threads(1)
+    except Exception:
+        pass
 
 try:  # pragma: no cover - optional heavy deps
     import gymnasium as gym  # noqa: F401
@@ -34,6 +42,9 @@ except Exception:  # pragma: no cover
 from .imitation_learning import pretrain_policy_via_behavior_cloning
 
 
+logger = logging.getLogger(__name__)
+
+
 @dataclass
 class RLSpec:
     """Configuration describing how to instantiate and train an RL model."""
@@ -50,6 +61,8 @@ class RLSpec:
     use_imitation_warmstart: bool = False
     imitation_kwargs: Optional[Dict[str, Any]] = None
     warmstart_epochs: int = 5
+    device: str = "auto"
+    compile_policy: bool = False
 
 
 class RLAdapter:
@@ -77,7 +90,9 @@ class RLAdapter:
         try:
             algo_cls = self._resolve_algo()
             policy_kwargs = self.spec.policy_kwargs or {}
-            algo_kwargs = dict(seed=self.spec.seed, **(self.spec.algo_kwargs or {}))
+            algo_kwargs = dict(self.spec.algo_kwargs or {})
+            algo_kwargs.setdefault("seed", self.spec.seed)
+            algo_kwargs.setdefault("device", self._resolve_device())
             model = algo_cls(
                 self._resolve_policy_name(),
                 vec_env,
@@ -85,6 +100,8 @@ class RLAdapter:
                 tensorboard_log=log_dir,
                 **algo_kwargs,
             )
+
+            self._maybe_compile_policy(model)
 
             self._maybe_run_behavior_cloning(model, make_env_fn)
             model.learn(total_timesteps=steps, progress_bar=False)
@@ -222,6 +239,26 @@ class RLAdapter:
                 norm_obs=self.spec.vecnormalize_obs,
                 norm_reward=self.spec.vecnormalize_reward if training else False,
             )
+
+        return venv
+
+    def _resolve_device(self) -> str:
+        if self.spec.device != "auto":
+            return self.spec.device
+        if TORCH_AVAILABLE and torch.cuda.is_available():
+            return "cuda"
+        return "cpu"
+
+    def _maybe_compile_policy(self, model: Any) -> None:
+        if not self.spec.compile_policy or not TORCH_AVAILABLE:
+            return
+        compile_fn = getattr(torch, "compile", None)
+        if compile_fn is None:
+            return
+        try:  # pragma: no cover - best effort
+            model.policy = compile_fn(model.policy)
+        except Exception as exc:
+            logger.debug("torch.compile failed for %s: %s", model.__class__.__name__, exc)
 
     def _resolve_algo(self):
         mapping = {

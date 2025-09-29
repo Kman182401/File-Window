@@ -421,6 +421,8 @@ def run_wfo(
                     use_imitation_warmstart=bool(rl_cfg.get("use_imitation_warmstart", False)),
                     imitation_kwargs=rl_cfg.get("imitation_kwargs"),
                     warmstart_epochs=int(rl_cfg.get("warmstart_epochs", 5)),
+                    device=str(rl_cfg.get("device", "auto")),
+                    compile_policy=bool(rl_cfg.get("compile_policy", False)),
                 )
                 adapter = RLAdapter(spec, fast_smoke=config.rl_fast_smoke)
                 reward_kwargs = rl_strat.reward or {}
