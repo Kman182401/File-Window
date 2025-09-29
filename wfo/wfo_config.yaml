@@ -126,6 +126,16 @@ strategies:
     activation_threshold: 0.55
     sample_weight_col: sample_weight
     probability_floor: 0.1
+    feature_blacklist:
+    - label
+    - meta_label
+    - price
+    - ret
+    - returns
+    - sample_weight
+    - side
+    - t1
+    - timestamp
 labeling:
   mode: triple_barrier
   pt_multiplier: 1.0
