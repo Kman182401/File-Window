@@ -10,9 +10,6 @@ import multiprocessing as mp
 from datetime import datetime
 from pathlib import Path
 
-from monitoring.client.omega_trading_status import write_trading_snapshot
-from monitoring.client.omega_polybar_callback import write_learning_snapshot
-
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
@@ -28,6 +25,9 @@ os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
 
 import sys
 sys.path[:0] = [str(ROOT), str(ROOT/"src")]
+
+from monitoring.client.omega_trading_status import write_trading_snapshot
+from monitoring.client.omega_polybar_callback import write_learning_snapshot
 
 def run_wfo_once(dry_run: bool, rl_fast_smoke: bool, rl_overrides: dict | None):
     cfg = yaml.safe_load(CFG.read_text())
