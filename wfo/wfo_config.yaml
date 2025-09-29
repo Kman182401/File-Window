@@ -116,13 +116,11 @@ strategies:
   type: supervised
   model: logistic
   params:
-    target_col: meta_label
+    target_col: label
     C: 0.5
     calibration: sigmoid
     calibration_cv: 3
-    use_meta: true
-    side_col: side
-    meta_label_col: meta_label
+    use_meta: false
     activation_threshold: 0.55
     sample_weight_col: sample_weight
     probability_floor: 0.1
@@ -146,7 +144,7 @@ labeling:
   label_col: label
   meta_label_col: meta_label
   sample_weight_col: sample_weight
-  use_meta: true
+  use_meta: false
 event_bars:
   mode: dollar
   threshold: 750000

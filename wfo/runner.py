@@ -513,6 +513,9 @@ def run_wfo(
 
     return {
         "summary": summary,
+        "white_rc_p": summary.get("white_rc_p"),
+        "spa_p": summary.get("spa_p"),
+        "go_no_go": summary.get("go_no_go"),
         "output_dir": str(output_dir),
         "dsr": extras["dsr"],
     }
