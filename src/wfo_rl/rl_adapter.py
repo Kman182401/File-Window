@@ -252,6 +252,13 @@ class RLAdapter:
     def _maybe_compile_policy(self, model: Any) -> None:
         if not self.spec.compile_policy or not TORCH_AVAILABLE:
             return
+        if self._resolve_device() == "cuda" and not self._gpu_supports_triton():
+            logger.info(
+                "Skipping torch.compile for %s: CUDA compute capability %s < 7.0",
+                model.__class__.__name__,
+                getattr(torch.cuda, "get_device_capability", lambda *_: ("?", "?"))(),
+            )
+            return
         compile_fn = getattr(torch, "compile", None)
         if compile_fn is None:
             return
@@ -259,6 +266,12 @@ class RLAdapter:
             model.policy = compile_fn(model.policy)
         except Exception as exc:
             logger.debug("torch.compile failed for %s: %s", model.__class__.__name__, exc)
+
+    def _gpu_supports_triton(self) -> bool:
+        if not TORCH_AVAILABLE or not torch.cuda.is_available():
+            return False
+        major, _minor = torch.cuda.get_device_capability()
+        return major >= 7
 
     def _resolve_algo(self):
         mapping = {

@@ -78,7 +78,7 @@ strategies:
     vecnormalize_obs: true
     vecnormalize_reward: true
     policy_kwargs: *id001
-    compile_policy: true
+    compile_policy: false
     algo_kwargs:
       n_steps: 2048
       batch_size: 1024
@@ -94,6 +94,7 @@ strategies:
     vecnormalize_obs: true
     vecnormalize_reward: true
     policy_kwargs: *id001
+    compile_policy: false
     algo_kwargs:
       learning_rate: 0.0003
       buffer_size: 1000000
@@ -115,6 +116,7 @@ strategies:
     vecnormalize_obs: true
     vecnormalize_reward: true
     policy_kwargs: *id001
+    compile_policy: false
     algo_kwargs:
       learning_rate: 0.0003
       buffer_size: 1000000

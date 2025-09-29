@@ -43,6 +43,11 @@ if IBKRIngestor is not None:
 DEFAULT_COLUMNS = ["timestamp", "open", "high", "low", "close", "volume"]
 
 
+def _as_utc(ts_like: Any) -> pd.Timestamp:
+    """Return a timezone-aware UTC timestamp for arbitrary datetime-like inputs."""
+    return pd.to_datetime(ts_like, utc=True)
+
+
 @dataclass
 class DataAccessConfig:
     parquet_path: Optional[str] = None
@@ -105,10 +110,12 @@ class MarketDataAccess:
             symbol_root = SYMBOL_ALIASES.get(symbol.upper(), symbol.upper())
         else:
             symbol_root = symbol.upper()
+        start_ts = _as_utc(start)
+        end_ts = _as_utc(end)
         filt = (
             (ds.field("symbol_root") == symbol_root)
-            & (ds.field("timestamp") >= pd.Timestamp(start, tz="UTC"))
-            & (ds.field("timestamp") <= pd.Timestamp(end, tz="UTC"))
+            & (ds.field("timestamp") >= start_ts)
+            & (ds.field("timestamp") < end_ts)
         )
         scanner = self._dataset.scanner(filter=filt, columns=columns)
         table = scanner.to_table()
