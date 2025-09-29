@@ -1,9 +1,9 @@
-from datetime import datetime
+from datetime import datetime, UTC
 from heartbeat import HeartbeatLogger
 
 if __name__ == "__main__":
     hb = HeartbeatLogger()
-    run_id = f"SMOKE_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
+    run_id = f"SMOKE_{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}"
     ok = hb.log(
         run_id=run_id,
         phase="smoke",

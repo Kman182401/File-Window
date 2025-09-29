@@ -8,6 +8,14 @@ session_minutes:
   6E: 1365
   6B: 1365
   6A: 1365
+symbols:
+- ES
+- NQ
+- GC
+is_days: 30
+oos_days: 5
+step_days: 3
+cycles_min: 3
 deterministic_debug: false
 deterministic_seed: 42
 label_lookahead_bars: 1

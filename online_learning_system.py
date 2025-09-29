@@ -30,7 +30,7 @@ from statistics import NormalDist
 from itertools import combinations
 from typing import Dict, List, Tuple, Optional, Any, Union, Callable, Iterable
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 from collections import deque
 import threading
 import time
@@ -633,14 +633,14 @@ class OnlineLearningSystem:
         rc_pvalue = harness.reality_check_pvalue(stacked, benchmark_index=0)
 
         report = {
-            'timestamp': datetime.utcnow().isoformat(),
+            'timestamp': datetime.now(UTC).isoformat().replace("+00:00", "Z"),
             'num_trials': int(total_trials),
             'benchmark_sharpe': float(benchmark_sr),
             'reality_check_pvalue': float(rc_pvalue),
             'candidates': candidate_metrics,
         }
 
-        report_filename = report_name or f"promotion_report_{datetime.utcnow().strftime('%Y%m%dT%H%M%S')}.json"
+        report_filename = report_name or f"promotion_report_{datetime.now(UTC).strftime('%Y%m%dT%H%M%S')}.json"
         report_path = self.promotion_reports_dir / report_filename
         harness.write_promotion_report(report, report_path)
         report['report_path'] = str(report_path)
@@ -693,7 +693,7 @@ class OnlineLearningSystem:
         )
 
         report = {
-            'timestamp': datetime.utcnow().isoformat(),
+            'timestamp': datetime.now(UTC).isoformat().replace("+00:00", "Z"),
             'segments': segment_results,
             'aggregate_sharpe': float(self.evaluation_harness.compute_sharpe_ratio(combined)),
             'deflated_sharpe_ratio': float(dsr),
@@ -701,7 +701,7 @@ class OnlineLearningSystem:
             'num_evaluations': len(aggregated_returns),
         }
 
-        report_filename = f"walk_forward_{datetime.utcnow().strftime('%Y%m%dT%H%M%S')}.json"
+        report_filename = f"walk_forward_{datetime.now(UTC).strftime('%Y%m%dT%H%M%S')}.json"
         report_path = self.promotion_reports_dir / report_filename
         self.evaluation_harness.write_promotion_report(report, report_path)
         report['report_path'] = str(report_path)
@@ -889,7 +889,7 @@ class OnlineLearningSystem:
         try:
             evaluation = getattr(candidate, "evaluation", {}) or {}
             payload = {
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
                 "candidate": getattr(candidate, "name", "unknown"),
                 "status": getattr(candidate, "status", "unknown"),
                 "dsr": evaluation.get("dsr"),
@@ -897,7 +897,7 @@ class OnlineLearningSystem:
                 "spa": evaluation.get("spa"),
                 "output_dir": evaluation.get("output_dir"),
             }
-            report_name = f"promotion_{payload['candidate']}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.json"
+            report_name = f"promotion_{payload['candidate']}_{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}.json"
             report_path = self.promotion_reports_dir / report_name
             report_path.write_text(json.dumps(payload, indent=2))
             self.champion_history.append(payload)

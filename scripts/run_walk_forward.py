@@ -4,7 +4,7 @@ import sys
 import json
 import logging
 from dataclasses import fields
-from datetime import datetime
+from datetime import datetime, UTC
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -305,7 +305,7 @@ def train_and_evaluate(cfg: Dict[str, Any]) -> Dict[str, Any]:
     step_array = np.array(aggregate_step_returns, dtype=np.float64)
 
     report = {
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "experiment": cfg["experiment_name"],
         "clip_range_vf": cfg.get("clip_range_vf"),
         "total_timesteps": int(cfg["total_timesteps"]),

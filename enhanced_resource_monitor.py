@@ -27,7 +27,7 @@ import logging
 import threading
 import psutil
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 from typing import Dict, List, Optional, Callable, Any
 from dataclasses import dataclass, field
 import warnings
@@ -195,7 +195,7 @@ class EnhancedResourceMonitor:
                 gpu_mem_used_gb = 0.0
             
             return ResourceMetrics(
-                timestamp=datetime.utcnow(),
+                timestamp=datetime.now(UTC),
                 memory_used_gb=memory.used / 1024**3,
                 memory_percent=memory.percent,
                 cpu_percent=cpu_percent,
@@ -215,7 +215,7 @@ class EnhancedResourceMonitor:
             logger.error(f"Error getting system metrics: {e}")
             # Return safe defaults
             return ResourceMetrics(
-                timestamp=datetime.utcnow(),
+                timestamp=datetime.now(UTC),
                 memory_used_gb=0,
                 memory_percent=0,
                 cpu_percent=0,

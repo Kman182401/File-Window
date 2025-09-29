@@ -4,7 +4,7 @@ import sys
 import uuid
 from pathlib import Path
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, UTC
 import pandas as pd
 from pandas.api.types import is_datetime64_any_dtype, is_datetime64tz_dtype
 
@@ -244,7 +244,7 @@ def fetch_ibkr_news_for_tickers(tickers, lookback_hours=24, max_results=200):
         ib=ib
     )
 
-    end_dt = datetime.utcnow()
+    end_dt = datetime.now(UTC)
     start_dt = end_dt - timedelta(hours=lookback_hours)
 
     for tvsym in tickers:
@@ -1020,7 +1020,7 @@ class RLTradingPipeline:
             'ML_RETRAIN_EVERY_MIN',
             str(config.get('ml_retrain_every_min', 60))
         ))
-        self.run_id = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        self.run_id = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
         self.pipeline_corr_id = f"{self.run_id}:{uuid.uuid4().hex}"
         self.local_model_dir = _ensure_dir(LOCAL_STACKING_DIR / self.run_id)
         _ensure_dir(LOCAL_PPO_DIR)
@@ -1315,7 +1315,7 @@ class RLTradingPipeline:
                         device=self.seq_device,
                         seed=self.seq_seed,
                     )
-                    self.seq_last_train_time[ticker] = datetime.utcnow()
+                    self.seq_last_train_time[ticker] = datetime.now(UTC)
                     self.seq_models.pop(ticker, None)
                     artifact = self._get_seq_artifact(ticker)
                     self._emit_event(
@@ -1737,7 +1737,7 @@ class RLTradingPipeline:
 
                 fitted_models: Dict[str, Dict[str, Any]] = {}
                 results: Dict[str, Dict[str, Any]] = {}
-                now_utc = datetime.utcnow()
+                now_utc = datetime.now(UTC)
                 full_retrain_timestamp = None
 
                 for ticker in features:
@@ -2804,7 +2804,7 @@ class RLTradingPipeline:
     def _emit_bridge_decision(self, ticker: str, side: str, quantity: int, confidence: float, reason: str) -> None:
         """Append a JSON line decision for the orders bridge."""
         payload = {
-            "ts": datetime.utcnow().isoformat(),
+            "ts": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
             "symbol": ticker,
             "side": side.upper(),
             "qty": int(quantity),

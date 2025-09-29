@@ -4,7 +4,7 @@ import argparse
 import pandas as pd
 import boto3
 import os
-from datetime import datetime
+from datetime import datetime, UTC
 from audit_logging_utils import log_trade_results
 from market_data_config import S3_BUCKET_NAME
 
@@ -35,7 +35,7 @@ def main():
         return
 
     filename = os.path.basename(file_path)
-    timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+    timestamp = datetime.now(UTC).strftime('%Y%m%d_%H%M%S')
     s3_key = f"{prefix}{filename.rsplit('.', 1)[0]}_{timestamp}.csv"
 
     upload_file_to_s3(file_path, bucket, s3_key)

@@ -22,7 +22,7 @@ import time
 import signal
 import logging
 import traceback
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 from typing import Dict, List, Any, Optional
 import numpy as np
 import pandas as pd
@@ -69,7 +69,7 @@ class Pipeline5LoopMonitor:
         self.config = config.copy()
         self.loop_count = 0
         self.target_loops = 5
-        self.start_time = datetime.utcnow()
+        self.start_time = datetime.now(UTC)
         self.loop_timeout = PER_LOOP_TIMEOUT  # Use configurable timeout
         
         # Telemetry storage
@@ -84,7 +84,7 @@ class Pipeline5LoopMonitor:
         self.super_model = SuperModel(ml_weight=0.6, rl_weight=0.4)
         
         # Setup logging files
-        self.timestamp = datetime.utcnow().strftime("%Y-%m-%d_%H-%M-%S")
+        self.timestamp = datetime.now(UTC).strftime("%Y-%m-%d_%H-%M-%S")
         self.log_dir = os.path.expanduser("~/logs/monitors")
         os.makedirs(self.log_dir, exist_ok=True)
         
@@ -259,7 +259,7 @@ class Pipeline5LoopMonitor:
         Wrapper around the original main loop to inject monitoring.
         """
         def monitored_loop():
-            loop_start_time = datetime.utcnow()
+            loop_start_time = datetime.now(UTC)
             loop_metrics = {
                 "loop_number": self.loop_count + 1,
                 "start_time": loop_start_time.isoformat(),
@@ -299,13 +299,13 @@ class Pipeline5LoopMonitor:
                 self.errors.append({
                     "loop": self.loop_count + 1,
                     "error": str(e),
-                    "timestamp": datetime.utcnow().isoformat()
+                    "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
                 })
                 
             finally:
-                loop_metrics["end_time"] = datetime.utcnow().isoformat()
+                loop_metrics["end_time"] = datetime.now(UTC).isoformat().replace("+00:00", "Z")
                 loop_metrics["duration_seconds"] = (
-                    datetime.utcnow() - loop_start_time
+                    datetime.now(UTC) - loop_start_time
                 ).total_seconds()
                 
                 # Log to JSONL

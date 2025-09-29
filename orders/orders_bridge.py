@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 import os, json, time, sys
-from datetime import datetime
+from datetime import datetime, UTC
 
 # Add parent directory to path to import paper_trading_executor
 sys.path.insert(0, os.path.expanduser('~'))
@@ -64,7 +64,7 @@ def log_trade(payload):
                    input=_j.dumps(payload).encode(), check=False)
 
 def submit_order(dec):
-    ts = datetime.utcnow().isoformat()
+    ts = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     status = "dry_run"
     order_id = None
     entry_price = None
@@ -345,4 +345,3 @@ with open(AUDIT, "a+", buffering=1) as f:
         print(f"[orders_bridge] Decision parsed: {dec}", flush=True)
         submit_order(dec)
         print(f"[orders_bridge] Order processed for {dec['symbol']}", flush=True)
-

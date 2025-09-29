@@ -10,7 +10,7 @@ import pandas as pd
 import json
 import logging
 from typing import Dict, List, Any, Optional, Tuple
-from datetime import datetime
+from datetime import datetime, UTC
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +96,7 @@ class SuperModel:
             "decision": decision,
             "confidence": confidence,
             "rationale": rationale,
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z")
         }
         
         # Log the decision
@@ -281,7 +281,7 @@ def simulate_paper_trade(decision: Dict[str, Any], current_price: float,
         Dict with trade simulation details
     """
     trade_sim = {
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "decision": decision["decision"],
         "confidence": decision["confidence"],
         "price": current_price,

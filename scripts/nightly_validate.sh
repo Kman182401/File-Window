@@ -23,7 +23,7 @@ for sym in ("ES","NQ"):
         if not cds:
             print(f"nightly_validate: no contracts for {sym}")
             continue
-        today = dt.datetime.utcnow().strftime('%Y%m%d')
+        today = dt.datetime.now(dt.timezone.utc).strftime('%Y%m%d')
         contracts = sorted([cd.contract for cd in cds if (cd.contract.lastTradeDateOrContractMonth or '0000') >= today],
                            key=lambda c: c.lastTradeDateOrContractMonth or '9999')
         c = contracts[0]

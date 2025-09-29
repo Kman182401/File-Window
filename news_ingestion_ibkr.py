@@ -1,5 +1,5 @@
 from ib_insync import IB
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 import pandas as pd
 import os
 
@@ -35,7 +35,7 @@ def fetch_ibkr_news_DISABLED(lookback_hours=24, max_results=200):
         providers = ib.reqNewsProviders()
         provider_codes = ",".join([p.code for p in providers]) if _PROVIDER_CODES is None else _PROVIDER_CODES
 
-        end = datetime.utcnow()
+        end = datetime.now(UTC)
         start = end - timedelta(hours=lookback_hours)
 
         # Using conId=0 pulls general news not tied to a specific contract.

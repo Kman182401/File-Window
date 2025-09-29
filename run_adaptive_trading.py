@@ -13,7 +13,7 @@ import time
 import logging
 import psutil
 import signal
-from datetime import datetime
+from datetime import datetime, UTC
 import traceback
 
 # Add project root to path
@@ -623,7 +623,7 @@ class AdaptiveTradingSystem:
                 return False
             
             self.running = True
-            self.start_time = datetime.utcnow()
+            self.start_time = datetime.now(UTC)
             
             logger.info("\n" + "="*80)
             logger.info("🚀 STARTING ADAPTIVE PAPER TRADING")
@@ -987,7 +987,7 @@ class AdaptiveTradingSystem:
 
     def print_status(self):
         """Print enhanced system status with health monitoring"""
-        runtime = (datetime.utcnow() - self.start_time).total_seconds()
+        runtime = (datetime.now(UTC) - self.start_time).total_seconds()
         hours = runtime / 3600
         
         memory = psutil.virtual_memory()
@@ -1060,7 +1060,7 @@ class AdaptiveTradingSystem:
         if not self.start_time:
             return
         
-        runtime = (datetime.utcnow() - self.start_time).total_seconds()
+        runtime = (datetime.now(UTC) - self.start_time).total_seconds()
         hours = runtime / 3600
         
         # Get final health score

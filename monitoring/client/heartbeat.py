@@ -54,7 +54,7 @@ class HeartbeatLogger:
             positions: Optional[Dict[str, Any]] = None):
         self._connect()
         payload = {
-            "ts": datetime.datetime.utcnow(),
+            "ts": datetime.datetime.now(datetime.timezone.utc),
             "run_id": run_id,
             "phase": phase,
             "pnl": pnl,

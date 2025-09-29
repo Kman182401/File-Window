@@ -8,7 +8,7 @@ import time
 import json
 import threading
 import os
-from datetime import datetime
+from datetime import datetime, UTC
 
 class ResourceMonitor:
     def __init__(self, log_file="resource_usage.log", alert_memory_gb=5.0):
@@ -36,7 +36,7 @@ class ResourceMonitor:
             python_processes = []
             
         metrics = {
-            'timestamp': datetime.utcnow().isoformat(),
+            'timestamp': datetime.now(UTC).isoformat().replace("+00:00", "Z"),
             'memory_total_gb': memory.total / 1024**3,
             'memory_used_gb': memory.used / 1024**3,
             'memory_available_gb': memory.available / 1024**3,

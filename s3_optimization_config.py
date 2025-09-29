@@ -16,6 +16,7 @@ from io import BytesIO
 import gzip
 import pickle
 import logging
+from datetime import datetime, UTC
 
 logger = logging.getLogger(__name__)
 
@@ -293,8 +294,7 @@ class S3PathOptimizer:
         template = self.path_templates.get(data_type, '{data_type}/{filename}')
         
         # Add default parameters
-        from datetime import datetime
-        now = datetime.utcnow()
+        now = datetime.now(UTC)
         
         default_params = {
             'data_type': data_type,

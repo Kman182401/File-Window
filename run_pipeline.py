@@ -16,7 +16,7 @@ import sys
 import importlib
 import logging
 from copy import deepcopy
-from datetime import datetime
+from datetime import datetime, UTC
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -76,7 +76,7 @@ def load_minute_data(data_path: Path, symbol: str, fallback_days: int = 5) -> pd
             logger.info("Loading minute data from %s", parquet_files[0])
             df = pd.read_parquet(parquet_files[0])
             if "timestamp" not in df.columns:
-                df["timestamp"] = pd.date_range(start=datetime.utcnow(), periods=len(df), freq="1min")
+                df["timestamp"] = pd.date_range(start=datetime.now(UTC), periods=len(df), freq="1min")
             return df
         try:
             import pyarrow.dataset as ds  # type: ignore
@@ -86,7 +86,7 @@ def load_minute_data(data_path: Path, symbol: str, fallback_days: int = 5) -> pd
             if table.num_rows > 0:
                 df = table.to_pandas()
                 if "timestamp" not in df.columns:
-                    df["timestamp"] = pd.date_range(start=datetime.utcnow(), periods=len(df), freq="1min")
+                    df["timestamp"] = pd.date_range(start=datetime.now(UTC), periods=len(df), freq="1min")
                 if "returns" not in df.columns and "close" in df.columns:
                     df["returns"] = df["close"].pct_change().fillna(0.0)
                 return df
@@ -94,7 +94,7 @@ def load_minute_data(data_path: Path, symbol: str, fallback_days: int = 5) -> pd
             logger.debug("pyarrow.dataset fallback unavailable for %s", data_path, exc_info=True)
     logger.warning("Minute data not found for %s at %s; generating synthetic sample", symbol, data_path)
     bars = fallback_days * 390
-    index = pd.date_range(end=datetime.utcnow(), periods=bars, freq="1min")
+    index = pd.date_range(end=datetime.now(UTC), periods=bars, freq="1min")
     prices = 100 + np.cumsum(np.random.randn(bars) * 0.1)
     df = pd.DataFrame({
         "timestamp": index,
@@ -108,7 +108,7 @@ def load_minute_data(data_path: Path, symbol: str, fallback_days: int = 5) -> pd
 def ensure_returns(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy().reset_index(drop=True)
     if "timestamp" not in df.columns:
-        df["timestamp"] = pd.date_range(start=datetime.utcnow(), periods=len(df), freq="1min")
+        df["timestamp"] = pd.date_range(start=datetime.now(UTC), periods=len(df), freq="1min")
     if "returns" not in df.columns and "close" in df.columns:
         df["returns"] = df["close"].pct_change().fillna(0.0)
     if "returns" not in df.columns:
@@ -145,7 +145,7 @@ def cmd_train_offline(args: argparse.Namespace) -> None:
         enable_determinism(int(config.get("deterministic_seed", 42)))
 
     rl_defaults = config.get("rl_defaults", {})
-    output_root = Path(args.output_dir or "artifacts/offline_train") / datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    output_root = Path(args.output_dir or "artifacts/offline_train") / datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     output_root.mkdir(parents=True, exist_ok=True)
 
     rl_strategies = [s for s in config.get("strategies", []) if s.get("type") == "rl_policy"]
@@ -187,7 +187,7 @@ def cmd_train_offline(args: argparse.Namespace) -> None:
                     "strategy": strat,
                     "rl": rl_cfg,
                     "reward": reward_kwargs,
-                    "trained_at": datetime.utcnow().isoformat(),
+                    "trained_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
                     "vecnormalize_stats": str(vecnorm_path) if vecnorm_path else None,
                 },
             )

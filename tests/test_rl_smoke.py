@@ -1,5 +1,5 @@
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, UTC
 
 import numpy as np
 import pandas as pd
@@ -22,7 +22,7 @@ if TORCH_AVAILABLE:
 )
 def test_rl_smoke(tmp_path):
     bars = 390
-    idx = pd.date_range(end=datetime.utcnow(), periods=bars, freq="1min")
+    idx = pd.date_range(end=datetime.now(UTC), periods=bars, freq="1min")
     prices = 100 + np.cumsum(np.random.randn(bars) * 0.05)
     df = pd.DataFrame({
         "timestamp": idx,

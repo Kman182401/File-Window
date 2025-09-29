@@ -21,7 +21,7 @@ import sqlite3
 import threading
 import time
 from dataclasses import dataclass, field, asdict
-from datetime import datetime
+from datetime import datetime, UTC
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
@@ -57,7 +57,7 @@ EVENT_DB_FILENAME = os.getenv("OMNI_MONITOR_DB", str(Path.home() / "logs/omni_mo
 
 @dataclass
 class OmniEvent:
-    ts: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    ts: str = field(default_factory=lambda: datetime.now(UTC).isoformat().replace("+00:00", "Z"))
     level: str = "INFO"
     component: str = "system"
     category: str = "general"

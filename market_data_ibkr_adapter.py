@@ -4,7 +4,7 @@
 
 from ib_insync import IB, util, Contract, Future, MarketOrder, LimitOrder, Order, Trade, Position, PortfolioItem
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, UTC
 from typing import Optional, List, Dict, Any, Tuple, Callable
 import logging
 import time
@@ -64,7 +64,8 @@ def get_ibkr_front_month_contract(
     else:
         exchange_candidates = [ex]
 
-    ref_ymd = int((asof or datetime.utcnow()).strftime("%Y%m%d"))
+    ref_time = asof or datetime.now(UTC)
+    ref_ymd = int(ref_time.strftime("%Y%m%d"))
 
     for ex_name in exchange_candidates:
         # Prefer querying with tradingClass when provided (currency futures)

@@ -26,7 +26,7 @@ import pandas as pd
 import logging
 from typing import Dict, List, Tuple, Optional, Any, Union
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 from enum import Enum
 from pathlib import Path
 import threading
@@ -93,7 +93,7 @@ class CandidateRecord:
 
     name: str
     strategy: Dict[str, Any]
-    trained_at: datetime = field(default_factory=datetime.utcnow)
+    trained_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     evaluation: Dict[str, Any] = field(default_factory=dict)
     status: str = "trained"  # trained -> evaluated -> canary_active -> promoted/rolled_back
     artifacts_path: Optional[str] = None
@@ -579,7 +579,7 @@ class EnsembleRLCoordinator:
             reward_kwargs=reward_kwargs,
             eval_mode=False,
         )
-        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
         artifact_dir = self.shadow_artifacts_dir / f"{rl_conf['name']}_{timestamp}"
         artifact_dir.mkdir(parents=True, exist_ok=True)
         try:

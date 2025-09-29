@@ -19,7 +19,7 @@ Version: 1.0.0
 
 import os
 import logging
-from datetime import datetime, time, timedelta
+from datetime import datetime, time, timedelta, UTC
 from typing import Dict, List, Tuple, Optional, Union
 import pytz
 from dataclasses import dataclass
@@ -115,7 +115,7 @@ class MarketHoursDetector:
     def is_market_open(self, market_name: str, dt: datetime = None) -> bool:
         """Check if a specific market is currently open"""
         if dt is None:
-            dt = datetime.utcnow()
+            dt = datetime.now(UTC).astimezone(pytz.UTC)
             
         if market_name not in self.markets:
             logger.warning(f"Unknown market: {market_name}")
@@ -158,7 +158,7 @@ class MarketHoursDetector:
         Times are computed in the market's local timezone and returned as UTC.
         """
         if dt is None:
-            dt = datetime.utcnow().replace(tzinfo=pytz.UTC)
+            dt = datetime.now(UTC).astimezone(pytz.UTC)
 
         if market_name not in self.markets:
             return 'closed', None
@@ -205,7 +205,7 @@ class MarketHoursDetector:
     def are_primary_markets_closed(self, dt: datetime = None) -> bool:
         """Check if all primary markets are closed (safe for historical training)"""
         if dt is None:
-            dt = datetime.utcnow()
+            dt = datetime.now(UTC).astimezone(pytz.UTC)
             
         for market_name in self.primary_markets:
             if self.is_market_open(market_name, dt):
@@ -217,7 +217,7 @@ class MarketHoursDetector:
     def get_next_market_open(self, market_name: str, dt: datetime = None) -> Optional[datetime]:
         """Get the next market open time"""
         if dt is None:
-            dt = datetime.utcnow()
+            dt = datetime.now(UTC).astimezone(pytz.UTC)
             
         if market_name not in self.markets:
             return None
@@ -257,7 +257,7 @@ class MarketHoursDetector:
         Returns:
             (is_safe_now, next_conflict_time, reason)
         """
-        now = datetime.utcnow().replace(tzinfo=pytz.UTC)
+        now = datetime.now(UTC).astimezone(pytz.UTC)
         
         # Check if markets are currently closed
         if not self.are_primary_markets_closed(now):
@@ -302,7 +302,7 @@ class MarketHoursDetector:
         }
         
         # Get status of all markets
-        now = datetime.utcnow().replace(tzinfo=pytz.UTC)
+        now = datetime.now(UTC).astimezone(pytz.UTC)
         for market_name, market in self.markets.items():
             schedule['market_status'][market_name] = {
                 'is_open': self.is_market_open(market_name, now),
