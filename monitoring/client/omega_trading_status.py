@@ -1,12 +1,29 @@
 import json
 import os
 import statistics
+import tempfile
 import time
 from collections import deque
-from typing import Dict
+from typing import Dict, Any
 
 OUT_PATH = os.path.expanduser("~/.local/share/omega/trading_status.json")
 os.makedirs(os.path.dirname(OUT_PATH), exist_ok=True)
+
+
+def _write_atomic_json(path: str, payload: Dict[str, Any]) -> None:
+    directory = os.path.dirname(path)
+    fd, tmp_path = tempfile.mkstemp(dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, separators=(",", ":"))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except FileNotFoundError:
+            pass
 
 
 class TradingTelemetry:
@@ -47,7 +64,4 @@ class TradingTelemetry:
             "pnl": {k: round(v, 2) for k, v in self.pnls.items()},
         }
 
-        tmp_path = OUT_PATH + ".tmp"
-        with open(tmp_path, "w", encoding="utf-8") as handle:
-            json.dump(data, handle, separators=(",", ":"))
-        os.replace(tmp_path, OUT_PATH)
+        _write_atomic_json(OUT_PATH, data)

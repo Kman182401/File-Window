@@ -3094,11 +3094,16 @@ class RLTradingPipeline:
                 "rows": int(len(test_data)),
             },
         )
-        self.ppo_eval_summary["eval_sharpe"] = float(total_reward)
-        best = self.ppo_eval_summary.get("best_eval_sharpe")
+        summary = self.ppo_eval_summary
+        summary["eval_sharpe"] = float(total_reward)
+        best = summary.get("best_eval_sharpe")
         if best is None or total_reward > best:
-            self.ppo_eval_summary["best_eval_sharpe"] = float(total_reward)
-            self.ppo_eval_summary["best_ckpt_steps"] = self.ppo_eval_summary.get("last_training_steps")
+            summary.update(
+                {
+                    "best_eval_sharpe": float(total_reward),
+                    "best_ckpt_steps": summary.get("last_training_steps"),
+                }
+            )
         return total_reward
 
     def train_ensemble_ppo(self, train_data, n_models=3):

@@ -1,6 +1,7 @@
 import json
 import math
 import os
+import tempfile
 import time
 from typing import Any, Callable, Dict, Optional
 
@@ -15,6 +16,22 @@ else:
 
 OUT_PATH = os.path.expanduser("~/.local/share/omega/learning_status.json")
 os.makedirs(os.path.dirname(OUT_PATH), exist_ok=True)
+
+
+def _write_atomic_json(path: str, payload: Dict[str, Any]) -> None:
+    directory = os.path.dirname(path)
+    fd, tmp_path = tempfile.mkstemp(dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, separators=(",", ":"))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except FileNotFoundError:
+            pass
 
 
 def _safe(value: Any, ndigits: int = 6) -> Optional[float]:
@@ -73,8 +90,5 @@ class OmegaPolybarCallback(BaseCallback):
             except Exception as exc:  # keep JSON valid even on failures
                 data["eval"] = {"error": repr(exc)}
 
-        tmp_path = OUT_PATH + ".tmp"
-        with open(tmp_path, "w", encoding="utf-8") as handle:
-            json.dump(data, handle, separators=(",", ":"))
-        os.replace(tmp_path, OUT_PATH)
+        _write_atomic_json(OUT_PATH, data)
         return True
