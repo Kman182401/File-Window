@@ -4,7 +4,13 @@ import os
 import time
 from typing import Any, Callable, Dict, Optional
 
-from stable_baselines3.common.callbacks import BaseCallback
+try:
+    from stable_baselines3.common.callbacks import BaseCallback
+except ImportError as exc:  # pragma: no cover - optional dependency
+    BaseCallback = object  # type: ignore[misc,assignment]
+    _IMPORT_ERROR = exc
+else:
+    _IMPORT_ERROR = None
 
 
 OUT_PATH = os.path.expanduser("~/.local/share/omega/learning_status.json")
@@ -30,6 +36,10 @@ class OmegaPolybarCallback(BaseCallback):
         eval_provider: Optional[Callable[[], Dict[str, Any]]] = None,
         verbose: int = 0,
     ) -> None:
+        if _IMPORT_ERROR is not None:
+            raise RuntimeError(
+                "Stable-Baselines3 must be installed to use OmegaPolybarCallback."
+            ) from _IMPORT_ERROR
         super().__init__(verbose)
         self.write_every_steps = int(write_every_steps)
         self.eval_provider = eval_provider
