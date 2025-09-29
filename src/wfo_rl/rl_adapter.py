@@ -89,10 +89,14 @@ class RLAdapter:
         vec_env = self._build_vec_env(make_env_fn, self.spec.n_envs, training=True)
         try:
             algo_cls = self._resolve_algo()
-            policy_kwargs = self.spec.policy_kwargs or {}
+            policy_kwargs = dict(self.spec.policy_kwargs or {})
             algo_kwargs = dict(self.spec.algo_kwargs or {})
             algo_kwargs.setdefault("seed", self.spec.seed)
             algo_kwargs.setdefault("device", self._resolve_device())
+            if self.spec.algo == "TD3":
+                for key in ("use_sde", "sde_sample_freq", "use_sde_at_warmup"):
+                    policy_kwargs.pop(key, None)
+                    algo_kwargs.pop(key, None)
             model = algo_cls(
                 self._resolve_policy_name(),
                 vec_env,
