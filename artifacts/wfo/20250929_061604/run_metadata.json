@@ -1,0 +1,41 @@
+{
+  "generated_at": "2025-09-29T06:16:06.066433Z",
+  "config": {
+    "trading_days_per_year": 252,
+    "minutes_per_trading_day": 390,
+    "session_minutes": {
+      "default": 390,
+      "ES": 1365,
+      "NQ": 1365,
+      "GC": 1365,
+      "6E": 1365,
+      "6B": 1365,
+      "6A": 1365
+    },
+    "embargo_days": 1,
+    "label_lookahead_bars": 1,
+    "rl_fast_smoke": true,
+    "reality_checks": {
+      "n_bootstrap": 1000,
+      "block_len_bars": 90
+    }
+  },
+  "library_versions": {
+    "stable-baselines3": "2.4.0",
+    "sb3-contrib": "2.4.0",
+    "gymnasium": "0.29.1",
+    "torch": "2.5.1+cu121",
+    "numpy": "1.26.4",
+    "pandas": "2.3.2"
+  },
+  "data_hashes": {
+    "ES": "947eccffc1946a8364009ae332ccd3f49e6aa2a063c65b88752e609e270f47e5"
+  },
+  "strategy_seeds": {
+    "ES_LogReg": null
+  },
+  "vecnormalize_stats": {},
+  "session_minutes_used": {
+    "ES": 1365
+  }
+}

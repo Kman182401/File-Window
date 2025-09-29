@@ -1,0 +1,9 @@
+{
+  "p_value": 0.236,
+  "survivors": {
+    "0": 0.6087928359146795
+  },
+  "strategies": [
+    "ES_LogReg"
+  ]
+}
